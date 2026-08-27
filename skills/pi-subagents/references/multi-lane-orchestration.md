@@ -14,6 +14,12 @@ Record the isolation path before the first mutation. Do not split one source sea
 
 For every lane, record the delivery target, allowed actions, required validation, and review rigor. For cross-repository work, name the shared contract and which repository changes first. A blocked decision is a lane state: record the owner, options, recommended default, and evidence needed to continue.
 
+## Expanded writer fanout and nesting
+
+Normal fanout is at most three depth-one lanes. Use four to six independent lanes—including mutation/test-writing lanes—only when each has a distinct seam/output, isolated writer workspace, non-overlapping contract, recorded integration order, and material benefit; more than six requires explicit user approval. Testing that changes files, generated state, or shared lifecycle resources is a mutation lane.
+
+Nested delegation is exceptional. A root-designated fanout child with `subagent` may spawn one additional level, at most three children, within a normal total of six live descendants. A nested writer must use `worktree: true` or a recorded temporary clone, own a non-overlapping contract, and return a scoped commit or captured patch plus validation. Every nested launch explicitly uses Luna or Terra, never Sol/inherited Sol. Nested children do not recurse, merge, integrate, or decide scope; the intermediate synthesizes and the root reviews, integrates, accepts, and confirms cleanup.
+
 ## Partitioned runs
 
 Use one writer per repo/cwd or worktree. Mutation lanes need distinct isolation paths and explicit `cwd` values. Set `worktree: true` when a run needs managed worktree isolation within one repository. Read-only runs can share a checkout only when they cannot change state or create generated files.
@@ -44,8 +50,8 @@ After a writer produces a candidate, run the required fresh-context, read-only r
 
 ## Handoff, cleanup, and recovery
 
-Use stable lane-qualified artifact paths for reports and review output. A handoff states the lane status, repository and worktree, changed files, validation, open decisions, next action, and artifact or receipt paths. Copy only the final evidence to memory, a mission record, or a PR/comment, then remove scratch files from the active worktree before closing the lane.
+Use stable lane-qualified artifact paths for reports and review output. A writer handoff states lane status, repository/worktree, base/ref, changed files, commit or patch, validation, open decisions, next action, artifact paths, and cleanup state. Copy only final evidence to memory, a mission record, or a PR/comment, then remove scratch files from the active worktree before closing the lane.
 
-Keep a worktree until its handoff is durable, no run owns it, and no later gate needs it. Clean up only inside the recorded authority boundary. If a run stops or needs attention, preserve its worktree and artifacts, record the last known state and recovery owner, then resume that run or create one replacement lane from the handoff. Do not start another writer while worktree ownership is uncertain.
+Keep an unmanaged worktree until its handoff is durable, no run owns it, and no later gate needs it. Managed worktrees may be removed after durable patch/handoff capture; the root confirms each manifest's cleanup state. Clean up only inside recorded authority, never with `--force`. If work is dirty/divergent, a run stops, or ownership is uncertain, preserve the worktree/artifacts, record state and recovery owner, and resume it or create one replacement from the handoff. Never discard uncommitted work or start another writer while ownership is uncertain.
 
-Before completion, inspect the board. Every lane must be terminal or blocked with a named next action. Confirm one writer per repo/cwd or worktree, required validation, required fresh read-only review, and a durable handoff. The parent reports outcomes, evidence, residual risks, and the next decision.
+Before completion, inspect the board. Every lane must be terminal or blocked with a named next action. Confirm one writer per repo/cwd/worktree, required validation, fresh read-only review, durable handoff, integration disposition, and cleanup state. The root reports outcomes, evidence, residual risks, and the next decision.
