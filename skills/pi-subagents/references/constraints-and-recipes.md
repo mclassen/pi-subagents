@@ -12,8 +12,7 @@ This file is a detailed reference loaded from `skills/pi-subagents/SKILL.md`.
   session exists.
 - **Forked runs inherit parent history.** They are branched threads, not fresh
   filtered contexts. Use fresh context for adversarial reviewers unless the user explicitly asks for forked context.
-- **Default subagent nesting depth is 2.** Deeper recursive delegation is blocked
-  unless configured otherwise.
+- **Default subagent nesting depth is 2.** Policy permits one nested level only: a root-designated fanout child may spawn at most three children, within normally six live descendants total. Nested writers require separate managed temporary worktrees/clones, non-overlapping contracts, scoped commits/patches, and explicit Luna/Terra selection—never Sol/inherited Sol. They cannot recurse, merge, or integrate. Raising runtime depth does not authorize deeper policy nesting.
 - **Attention signals are not lifecycle state.** `needs_attention` means no activity has been observed past the configured threshold. `paused` means the child turn was intentionally interrupted or is awaiting direction; it is not the same as `failed`.
 - **Intercom asks are blocking.** A session can only maintain one pending outbound
   ask wait state at a time.
@@ -55,7 +54,7 @@ This reference keeps cross-cutting policy and failure handling. Load the matchin
 Choose the smallest recipe that fits:
 
 - **Recon → plan → implement:** run one focused `scout`, then one `worker` that consumes its findings.
-- **Non-trivial implementation:** clarify scope and acceptance, record user-owned decisions and seam/validation contracts, scout load-bearing code, plan when useful, use one writer, run fresh review/validation, apply only accepted fixes with one writer, then inspect direct evidence and the final diff before parent acceptance. Split large work into serial milestones instead of a writer swarm; do not stop at review without disposition.
+- **Non-trivial implementation:** clarify scope and acceptance, record user-owned decisions and seam/validation contracts, scout load-bearing code, and plan when useful. Keep one writer per workspace; use multiple writers only for independent seams in isolated worktrees under `multi-lane-orchestration.md`. Run fresh review/validation, apply accepted fixes through the owning writer, then inspect direct evidence and the final diff before root acceptance. Prefer serial milestones when seams overlap; do not stop at review without disposition.
 - **Parallel analysis:** fan out only independent read/review/validation work, or isolate each writer in its own worktree. Never run concurrent writers in one checkout.
 
 ## Error Handling

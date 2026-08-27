@@ -9,23 +9,12 @@ description: |
 
 # Pi Subagents
 
-Choose a mode:
+Choose a mode subject to user/global delegation eligibility:
 
-- **Direct mode:** For tiny or focused work, the parent handles the task
-  directly; a single bounded child handoff is fine. Skip workflow ceremony.
-- **Orchestrator mode:** For substantial or delegated work, the parent is the
-  supervisor, arbiter, and authority holder—not the routine primary doer.
-  Subagents may own planning/design, scouting, implementation,
-  simplification/challenge, validation, and review as useful. The parent keeps
-  user intent, constraints, authority, routing, arbitration, final acceptance,
-  and publication.
-- A useful loop for substantial work is **writer → challenge/simplify → review**;
-  the parent arbitrates between steps, and tiny tasks can skip it.
-- Direct parent edits during orchestrator mode should be intentional, small
-  interventions with a brief reason.
+- **Direct mode:** The parent handles focused, serial, context-heavy, or causally coupled work directly. Skip workflow ceremony.
+- **Orchestrator mode:** Use only for eligible independent child lanes that materially improve evidence, review, or isolated execution. The parent remains causal owner and default coder—especially when Sol—and keeps user intent, constraints, authority, routing, arbitration, integration, final acceptance, and publication. Child implementation is limited to frozen mechanical slices that independently pass the writer gate; never prescribe writer → review → writer merely because work is substantial.
 
-Children do not spawn subagents unless the parent explicitly delegated fanout
-and their resolved `tools` allow `subagent`.
+This skill is for the root parent orchestrator only; do not inject or follow it inside children. Ordinary children do not launch subagents. An explicitly assigned fanout child whose resolved `tools` includes `subagent` may spawn one further level only for assigned work. Nested writers require separate managed temporary worktrees/clones, non-overlapping contracts, and scoped commits or captured patches. Nested children cannot recurse, merge, or integrate; the intermediate synthesizes for the root.
 
 ## Launch shape
 
@@ -91,6 +80,8 @@ review.
 - Exact model names are deployment policy. Put them in user/project settings or profiles, not package guidance.
 - Give every child a compact meta-prompt checklist: objective; repo/cwd/ref; authority/edit boundary; relevant files/contracts and constraints; success/acceptance criteria; validation; expected output/report; and stop/ask conditions. See `references/prompting-and-roles.md`.
 - For mutation work, use an isolated lane/worktree when isolation, overlap, or concurrent juggling matters; keep one writer per cwd/worktree. See `references/multi-lane-orchestration.md` for lane mechanics.
+- Normal fanout is at most three depth-one lanes. Permit four to six independent lanes only with distinct seams and outputs, isolated writer workspaces, non-overlapping contracts, recorded integration order, and material benefit; more than six requires explicit user approval. Testing that changes files, generated state, or shared lifecycle resources is mutation.
+- Nested fanout is one additional level, at most three children, and normally no more than six live descendants total. Nested writers use separate managed worktrees or temporary clones and return scoped commits or patches; every nested launch explicitly uses Luna or Terra, never Sol or inherited Sol. The root confirms durable handoffs and managed cleanup, preserving dirty or divergent work rather than force-discarding it.
 - Keep long/high-output validation out of chat: prefer `interactive_shell` dispatch/background monitors, bounded logs, or subagent-owned reports; return a concise summary plus report path unless same-turn output is required. Do not use `interactive_shell` as an implicit fallback for a failed `subagent` lane; see `references/execution-controls.md`.
 - Treat subagent workflow, child launch, prompt runtime, extension load, and child tooling setup failures as lane infrastructure blockers. Stop, report the exact failure and run/worktree state, verify a clean worktree or capture a partial diff, and use only a clear same-protocol retry or an owner-approved execution-mode fallback.
 - For cross-codebase work, record the repo, explicit `cwd`, authority boundary, and expected output before launch.
