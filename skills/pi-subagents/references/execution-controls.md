@@ -135,7 +135,7 @@ depends on runtime data rather than a predeclared stage plan.
 
 ### Async/background
 
-Prefer async mode for every subagent launch. Set `async: true` no matter the task unless the parent must block until completion. This applies to scouts, researchers, workers, reviewers, validators, oracle checks, one-off delegates, final review gates, publication gates, and scripted workflows. Keep the write path single-threaded even when the run is async.
+Prefer async mode for every subagent launch. Set `async: true` no matter the task unless the parent must block until completion. This applies to scouts, researchers, workers, reviewers, validators, oracle checks, one-off delegates, final review gates, publication gates, and scripted workflows. Keep each workspace's write path single-threaded; intentional parallel writers require separate managed worktrees or clones and non-overlapping contracts.
 
 Use `async:false` only when the parent must block until completion. Async mode still shows progress. Do not use `async:false` because a task is short, because it is the last gate, because no other work is ready, because the user asked to finish the overall job, or because blocking is convenient.
 
@@ -454,7 +454,7 @@ requires a clean git state and is mainly for intentionally parallel write
 workflows. On completion, use each child's handoff path from its
 `artifactPaths` instead of scraping combined text. Each manifest records child status and output references, full
 patch paths and stats, and whether each temporary worktree and branch was
-removed. The manifest is journaled immediately after managed worktree setup, before children run, so abrupt exits retain owned paths and branches for recovery. Dirty or divergent work without a successfully captured patch is preserved with a partial-cleanup warning. Permanently discard recorded preserved work with `subagent({ action: "worktree.discard", handoffPath: "<child handoff path>" })`; authority defaults to interactive confirmation and refuses headlessly, and partial results print manual Git recovery commands. If you want one writer thread and several advisory agents, prefer a
+removed. The manifest is journaled immediately after managed worktree setup, before children run, so abrupt exits retain owned paths and branches for recovery. Dirty or divergent work without a successfully captured patch is preserved with a partial-cleanup warning. Permanently discard recorded preserved work with `subagent({ action: "worktree.discard", handoffPath: "<child handoff path>" })`; authority defaults to interactive confirmation and refuses headlessly, and partial results print manual Git recovery commands. For nested writers, the root parent consumes the durable handoff or patch, performs integration and validation, and confirms the cleanup manifest; nested children do not merge or integrate. If you want one writer thread and several advisory agents, prefer a
 single-writer pattern instead.
 
 Git worktrees start from tracked files, so ignored or untracked build state
