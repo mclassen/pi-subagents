@@ -53,8 +53,8 @@ This reference keeps cross-cutting policy and failure handling. Load the matchin
 
 Choose the smallest recipe that fits:
 
-- **Recon → plan → implement:** run one focused `scout`, then one `worker` that consumes its findings.
-- **Non-trivial implementation:** clarify scope and acceptance, record user-owned decisions and seam/validation contracts, scout load-bearing code, and plan when useful. Keep one writer per workspace; use multiple writers only for independent seams in isolated worktrees under `multi-lane-orchestration.md`. Run fresh review/validation, apply accepted fixes through the owning writer, then inspect direct evidence and the final diff before root acceptance. Prefer serial milestones when seams overlap; do not stop at review without disposition.
+- **Recon → plan → implement:** parent performs the serial path by default. Delegate a scout only for an obviously independent context-light question; delegate a worker only after the resulting frozen mechanical slice passes the user/global eligibility gate.
+- **Non-trivial implementation:** parent owns causality, design, and coding by default—especially when Sol. Clarify scope/acceptance, record decisions and seam/validation contracts, inspect load-bearing code, and plan when useful. An eligible child writer gets a distinct isolated workspace and returns a scoped commit/patch; parent integrates and validates. Use fresh isolated review, apply accepted fixes in parent unless the next slice independently qualifies, then inspect direct evidence and final diff before root acceptance.
 - **Parallel analysis:** fan out only independent read/review/validation work, or isolate each writer in its own worktree. Never run concurrent writers in one checkout.
 
 ## Error Handling

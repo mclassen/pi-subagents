@@ -22,4 +22,15 @@ describe("writer budget guidance", () => {
 		assert.match(toolReference, /elapsed timeout is not a mutation-safe boundary/i);
 	});
 
+	it("keeps review-loop implementation ownership behind the delegation gate", () => {
+		const reviewLoop = readProjectFile("prompts/review-loop.md");
+
+		assert.match(reviewLoop, /Implementation requested.*does not automatically require a child writer/i);
+		assert.match(reviewLoop, /Sol-medium\/high parent is the default implementation owner/);
+		assert.match(reviewLoop, /Iteration quotas never force worker delegation/);
+		assert.match(reviewLoop, /Implementation owner: `parent` or `worker`/);
+		assert.match(reviewLoop, /Packet economics:/);
+		assert.match(reviewLoop, /never let a child writer share the parent checkout/i);
+	});
+
 });

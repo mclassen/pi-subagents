@@ -22,7 +22,7 @@ Nested delegation is exceptional. A root-designated fanout child with `subagent`
 
 ## Partitioned runs
 
-Use one writer per repo/cwd or worktree. Mutation lanes need distinct isolation paths and explicit `cwd` values. Set `worktree: true` when a run needs managed worktree isolation within one repository. Read-only runs can share a checkout only when they cannot change state or create generated files.
+Give every run a distinct isolated workspace/resource and explicit `cwd`; never share a checkout/directory between children, including read-only runs. Set `worktree: true` for a managed repository worktree, or provision a temporary clone/snapshot containing the exact target when worktree creation cannot represent an uncommitted diff. Keep one writer per repo/cwd/worktree.
 
 For Pi extension repositories, keep lane worktrees outside auto-discovered extension directories such as `~/.pi/agent/extensions`. A stale extension worktree there can auto-load duplicate tools and shortcuts. Remove or move it only after its handoff is durable, the worktree is clean, and no run owns it.
 
@@ -46,7 +46,7 @@ async lanes are running, record the revisit trigger and yield.
 
 An ordinary coordinated workflow has one mission. Use its durable state, artifacts, run records, and receipts for recovery. Treat a receipt as evidence, not as authority or acceptance.
 
-After a writer produces a candidate, run the required fresh-context, read-only reviewer. The reviewer inspects the exact worktree and returns evidence-backed findings. The parent decides which findings are in scope and whether the lane is ready. Use `review-and-validation.md` for finding disposition, validation, and gate-failure triage. Send accepted fixes to that lane's sole writer, then rerun only the affected gate.
+After an eligible child writer produces a candidate, the parent checks its diff/artifacts, integrates only the accepted scoped commit or patch, and validates in the parent target. Then run required fresh-context read-only reviewers, each in a distinct snapshot of that exact integrated target. The parent decides finding disposition. Parent implements accepted fixes by default; reuse the lane writer only when the next frozen mechanical slice independently passes the delegation gate, then rerun only the affected gate.
 
 ## Handoff, cleanup, and recovery
 

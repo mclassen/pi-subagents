@@ -10,7 +10,7 @@ Parent extensions may register a session-scoped, out-of-band ceiling through `pi
 
 - **Complex work orchestration**: keep the parent on its ordinary strong default model. Delegate only when another child materially improves evidence, independent review, or isolated execution; omission failures are cheaper than unnecessary commissions. For hard orchestration or root-cause questions, use a top-reasoning model only as a bounded read-only critic/oracle escalation, never as an autonomous root. Complex means the task has multiple moving parts, unclear acceptance, cross-cutting code, meaningful user-visible impact, expensive or irreversible validation, broad review surface, or the user asks for orchestration. Lightweight one-off delegation can stay lightweight.
 - **Advisory review**: use fresh-context `reviewer` agents for adversarial code review; fork to `oracle` only for rare escalation where inherited decisions, drift, model routing, root cause, or hard tradeoffs matter
-- **Implementation handoff**: have `oracle` advise, then `worker` implement only after an approved direction
+- **Implementation handoff**: have `oracle` advise when needed; parent implements the approved direction unless a frozen mechanical slice independently passes the user/global child-writer gate
 - **Recon and planning**: use `scout`, then write a plan when needed
 - **Parallel exploration**: run multiple non-conflicting tasks concurrently
 - **Regular skill specialists**: when discovery shows proactive skill subagent suggestions and the current work is broad enough, launch a small fresh-context fanout that asks one subagent per relevant regularly used skill to apply that skill's perspective to the task
@@ -93,7 +93,7 @@ subagent({
 
 ### Review-loop technique
 
-Use this when the user wants implementation or current diff review to continue until reviewers stop finding fixes worth doing now. Keep the loop in the parent session: one async `worker` implements or fixes, fresh-context `reviewer` agents inspect the actual repo and diff, the parent synthesizes accepted fixes, and one async forked `worker` applies them. The parent can express the sequence up front as an async/background `workflowScript` when the workflow is known, or continue with explicit follow-up workflowScript runs after each async completion. For an initial workflow, pass `async: true` so the main chat is unblocked. Treat an async implementation worker handoff as an intermediate state, not final completion, unless the user explicitly asked for worker-only work, review-only output, or to stop after implementation. Stop when reviewers find no P0 blockers or P1 fixes worth doing now, remaining P2 feedback is optional or deferred, an unapproved product/scope/architecture decision appears, or the max review-round cap is reached. Default to 3 review rounds unless the user sets a different cap. Do not loop for optional polish, and do not let children launch subagents or decide the loop outcome.
+Use this when implementation or current-diff review should continue until no fixes worth doing now remain. Keep ownership in the parent. Before every iteration, the parent classifies the next causal slice and codes it directly by default—especially when Sol—or delegates only a frozen mechanical slice that independently passes the user/global eligibility gate. Fresh isolated reviewers inspect the resulting integrated target; parent synthesizes and decides ownership again. Never pre-script writer → reviewers → next writer for uncertain work, and never let an iteration quota force child implementation. Treat eligible worker handoffs as intermediate until parent inspection, integration, and validation. Stop on no P0/P1 work, optional/deferred feedback, an unapproved decision, or the configured round cap.
 
 As a conservative orchestration policy, do not pass a hard `toolBudget` to an implementation worker, fix worker, reviewer with edit authority, or other mutation-capable child. The default tool budget blocks read/search tools rather than mutation tools, but count limits still do not measure delivery safety. Use a narrow task plus an outer elapsed deadline with enough margin, then request a checkpoint after the current tool returns. The checkpoint should report changed files, build/test state, remaining work, and commit or PR state. An elapsed timeout is not a mutation-safe boundary and must not be used as the checkpoint trigger.
 
@@ -105,7 +105,7 @@ Use this when the question needs both external evidence and local implications. 
 
 ### Gather-context-and-clarify technique
 
-Use this at the start of non-trivial work. Launch `scout` for local context and `researcher` only when external docs, recent sources, ecosystem context, or primary evidence would materially improve understanding. Ask children for concise findings plus remaining clarification questions. Then synthesize what is known and use `interview` to ask the unresolved questions needed for shared understanding before planning or implementing.
+Use this only when independent local or external context lanes clearly beat direct parent inspection. Launch `scout` or `researcher` only for an obviously context-light, independently verifiable question. Ask for concise findings plus unresolved questions; parent synthesizes and uses `interview` only when clarification remains necessary.
 
 ### Parallel cleanup technique
 
@@ -113,58 +113,14 @@ Use this after implementation when the user wants cleanup review or when a final
 
 ### Staged fix orchestration technique
 
-Use this when a broad diff has known reviewer findings across several items and the user wants the parent to “orchestrate subagents like a boss.” Keep the active worktree safe with a three-stage `workflowScript`:
+Use staged orchestration only when each delegated stage independently passes user/global eligibility. Do not turn a broad or uncertain finding set into an automatic writer workflow.
 
-When staged seams are available, a low-tier writer should not receive the
-end-to-end issue. Use `runs.lanes` inside `workflowScript` to keep stages narrow:
-a scout/red test, helper-only change, one render seam, validation, minimality
-challenge, or fresh review. Give the writer only its assigned implementation
-stage; keep sequencing and synthesis with the parent.
+1. Optional planning/review lanes handle only obviously independent questions, each in its own isolated workspace.
+2. Parent synthesizes findings and owns the next causal slice. Parent implements by default. Only an already-frozen mechanical slice may go to one eligible child writer in a distinct managed worktree/clone; it returns a scoped commit or patch.
+3. Parent checks artifacts/diff, integrates only accepted work, and validates in the parent target.
+4. Fresh reviewers inspect separate snapshots of that exact integrated target; parent disposes findings and re-runs the ownership gate.
 
-1. A parallel read-only planning fanout, one reviewer per issue cluster. Each child inspects the real diff and returns exact files, line refs, proposed fixes, and focused validation. They must not edit.
-2. One writer worker. It receives the reviewer summaries as the awaited planning results (or their durable output paths) interpolated into its task, plus the parent’s accepted scope, stop rules, and verification contract. It is the only child allowed to edit the active worktree.
-3. A parallel read-only validation fanout. Validators inspect the worker diff from fresh context with distinct angles, report pass/fail, remaining blockers, and missing verification.
-
-Prefer `async: true`, `context: "fresh"` for reviewers/validators, `outputMode: "file-only"` for large summaries, and per-stage output names that will not collide. Use stable `runs` keys plus `phase` and `label` on each launch item to make async status readable, and hold each awaited result in an ordinary JavaScript variable when a later step needs that specific result — interpolate it (or the durable output path you declared for that child) into the later task text instead of passing a whole aggregate blob. Use this pattern instead of launching several writer workers into a dirty worktree. Include non-blocking suggestions in the writer prompt only when they are small, safe, and do not expand product scope; otherwise record them as deferred.
-
-When one child returns a structured target list, use ordinary JavaScript to validate/filter it and map bounded entries into `runs.all`; do not use the removed chain fanout DSL.
-
-Example shape:
-
-```typescript
-subagent({
-  async: true,
-  context: "fresh",
-  workflowScript: `
-    // Stage 1: parallel read-only planning fanout (stable keys, one per issue cluster)
-    const plans = await runs.all([
-      { key: "deploy-plan", agent: "reviewer", phase: "Planning", label: "Deploy docs", task: "Plan fixes for deploy docs/workflow. Inspect the current diff. Do not modify project/source files; returning findings via the configured output artifact is allowed.", output: "plans/deploy.md", outputMode: "file-only" },
-      { key: "scheduler-plan", agent: "reviewer", phase: "Planning", label: "Scheduler contract", task: "Plan fixes for scheduler contract. Inspect the current diff. Do not modify project/source files; returning findings via the configured output artifact is allowed.", output: "plans/scheduler.md", outputMode: "file-only" },
-      { key: "sandbox-plan", agent: "reviewer", phase: "Planning", label: "Sandbox/security", task: "Plan fixes for sandbox/security. Inspect the current diff. Do not modify project/source files; returning findings via the configured output artifact is allowed.", output: "plans/sandbox.md", outputMode: "file-only" }
-    ]);
-
-    // Stage 2: single writer — the only child allowed to edit the active worktree.
-    // Under outputMode "file-only" the awaited .output is the saved-output
-    // reference, so pass those managed artifact references to the writer.
-    const worker = await runs.run("apply-fixes", {
-      agent: "worker",
-      phase: "Implementation",
-      label: "Apply accepted fixes",
-      task: "Apply only the accepted fixes from these planning summaries. You are the sole writer for the active worktree. Run focused validation and report changed files, commands, failures, and remaining issues.\\n\\nDeploy plan: " + plans[0].output + "\\n\\nScheduler plan: " + plans[1].output + "\\n\\nSandbox plan: " + plans[2].output,
-      output: "worker/fixes.md",
-      outputMode: "file-only"
-    });
-
-    // Stage 3: parallel read-only validation fanout
-    const validations = await runs.all([
-      { key: "validate-deploy-scheduler", agent: "reviewer", phase: "Validation", label: "Deploy/scheduler validation", task: "Validate the post-worker diff for deploy and scheduler fixes. Start from the worker result: " + worker.output + ". Do not modify project/source files; returning findings via the configured output artifact is allowed.", output: "validation/deploy-scheduler.md", outputMode: "file-only" },
-      { key: "validate-sandbox", agent: "reviewer", phase: "Validation", label: "Sandbox validation", task: "Validate the post-worker diff for sandbox/security fixes. Start from the worker result: " + worker.output + ". Do not modify project/source files; returning findings via the configured output artifact is allowed.", output: "validation/sandbox.md", outputMode: "file-only" }
-    ]);
-
-    return { worker: worker.output, validations: validations.map(v => v.output) };
-  `
-})
-```
+Keep parent decision and integration boundaries between child waves; do not encode uncertain planning → writer → validation as one pre-scripted `workflowScript`. Use `runs.lanes` only for already-frozen independent child stages, never to force implementation delegation. Prefer managed outputs and stable keys for eligible child waves.
 
 ## Builtin Agents
 
@@ -279,7 +235,7 @@ agent with the same name only when you want a substantially different agent.
 
 ### Recommended model tiering (optional)
 
-Keep the parent/orchestrator on the ordinary strong default model because omission failures are cheaper than unnecessary commissions. Route workers and scouts to a fast, capable worker tier, and keep serious reviews on the strong reviewer tier at high thinking. Do not use `oracle` or a top-reasoning model as the routine fresh-review default. Use that tier only for bounded, read-only critic/oracle/root-cause audits after ordinary review, CI, bot, or source evidence is insufficient; critic-tier high thinking is escalation-only and never an autonomous root. Explicit parent/user model policy wins over these recommendations.
+Keep the parent/orchestrator on the ordinary strong default model because omission failures are cheaper than unnecessary commissions. When delegation independently qualifies, route workers and scouts to a fast, capable worker tier and serious reviews to the strong reviewer tier at high thinking. Do not use `oracle` or a top-reasoning model as the routine fresh-review default. Use that tier only for bounded, read-only critic/oracle/root-cause audits after ordinary review, CI, bot, or source evidence is insufficient; critic-tier high thinking is escalation-only and never an autonomous root. Explicit parent/user model policy wins over these recommendations.
 
 Examples are illustrative, not requirements. Map these tiers to concrete models in user/project settings or a profile. A non-OpenAI setup should choose comparable available models by capability.
 
