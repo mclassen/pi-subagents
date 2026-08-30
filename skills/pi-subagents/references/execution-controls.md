@@ -191,11 +191,11 @@ File-only output mode works for workflowScript child launches. Use relative chil
 
 The `output` field is the API binding; a filename mentioned in task text is only instruction and does not override runtime routing. When a later workflow step or parent needs a durable file, set `output` on `runs.run`/`runs.all` and return the child’s `outputReference`, `outputPathMapping`, or `artifactPaths`; arbitrary literal strings returned by workflow JavaScript are not rewritten. Omitted child output may use a managed aggregate-derived sibling path.
 
-For review fanout where the parent continues a local audit:
+For an eligible review lane where the parent continues a local audit, first provision a clean exact-target snapshot; this deployment requires a distinct workspace even for read-only children:
 
 ```typescript
 const run = subagent({
-  workflowScript: `return runs.run("correctness", { agent: "reviewer", task: "Review the current diff for correctness issues. Do not edit files." })`,
+  workflowScript: `return runs.run("correctness", { agent: "reviewer", task: "Review the exact integrated target for correctness issues. Do not edit files.", worktree: true })`,
   async: true,
   context: "fresh"
 })
@@ -410,8 +410,7 @@ subagent({ action: "mission.close", missionId: "<mission-id>", missionStatus: "c
 
 ## Worktree Isolation
 
-When multiple agents might write concurrently, use worktrees instead of letting
-them share one filesystem view.
+User/global isolation policy requires a distinct execution workspace/resource for every child, including read-only children. For repository work, use a managed worktree or provision a temporary clone/snapshot containing the exact target; never let children share the parent checkout or each other's filesystem view.
 
 ```typescript
 subagent({
@@ -428,8 +427,7 @@ subagent({
 `worktree: true` on a `runs.run` / `runs.all` item gives that child its own git
 worktree branched from HEAD. A top-level workflow `worktree: true` makes this the
 default for every child, and a child can opt out with `worktree: false`. This
-requires a clean git state and is mainly for intentionally parallel write
-workflows. On completion, use each child's handoff path from its
+requires a clean git state. Use it for any child when HEAD exactly represents the target; otherwise provision a separate clone/snapshot and apply the captured target patch before launch. On completion, use each child's handoff path from its
 `artifactPaths` instead of scraping combined text. Each manifest records child status and output references, full
 patch paths and stats, and whether each temporary worktree and branch was
 removed. The manifest is journaled immediately after managed worktree setup, before children run, so abrupt exits retain owned paths and branches for recovery. Dirty or divergent work without a successfully captured patch is preserved with a partial-cleanup warning. Permanently discard recorded preserved work with `subagent({ action: "worktree.discard", handoffPath: "<child handoff path>" })`; authority defaults to interactive confirmation and refuses headlessly, and partial results print manual Git recovery commands. For nested writers, the root parent consumes the durable handoff or patch, performs integration and validation, and confirms the cleanup manifest; nested children do not merge or integrate. If you want one writer thread and several advisory agents, prefer a
@@ -463,7 +461,7 @@ The intended oracle loop is:
 2. `oracle` reviews direction, drift, assumptions, and risks
 3. `oracle` can coordinate back through `contact_supervisor` when the bridge injects it
 4. the main agent decides what direction to approve
-5. only then should `worker` implement
+5. the main agent implements by default; only an independently eligible frozen mechanical slice goes to `worker`
 
 ```typescript
 // Advisory review in a branched thread. Oracle defaults to forked context.
@@ -471,9 +469,9 @@ subagent({
   workflowScript: `return runs.run("oracle-check", { agent: "oracle", task: "Review my current direction, challenge assumptions, and propose the best next move." })`
 })
 
-// Implementation only after explicit approval. Worker defaults to forked context.
+// Only after approval AND the user/global writer gate passes; isolate the child.
 subagent({
-  workflowScript: `return runs.run("implementation", { agent: "worker", task: "Implement the approved approach: ..." })`
+  workflowScript: `return runs.run("implementation", { agent: "worker", task: "Implement only this frozen mechanical slice: ...", worktree: true })`
 })
 ```
 
