@@ -12,8 +12,7 @@ This file is a detailed reference loaded from `skills/pi-subagents/SKILL.md`.
   session exists.
 - **Forked runs inherit parent history.** They are branched threads, not fresh
   filtered contexts. Use fresh context for adversarial reviewers unless the user explicitly asks for forked context.
-- **Default subagent nesting depth is 2.** Deeper recursive delegation is blocked
-  unless configured otherwise.
+- **Default subagent nesting depth is 2.** Policy permits one nested level only: a root-designated fanout child may spawn at most three children, within normally six live descendants total. Nested writers require separate managed temporary worktrees/clones, non-overlapping contracts, scoped commits/patches, and explicit Luna/Terra selection—never Sol/inherited Sol. They cannot recurse, merge, or integrate. Raising runtime depth does not authorize deeper policy nesting.
 - **Attention signals are not lifecycle state.** `needs_attention` means no activity has been observed past the configured threshold. `paused` means the child turn was intentionally interrupted or is awaiting direction; it is not the same as `failed`.
 - **Intercom asks are blocking.** A session can only maintain one pending outbound
   ask wait state at a time.
@@ -52,11 +51,10 @@ This reference keeps cross-cutting policy and failure handling. Load the matchin
 | Independent lanes, repositories, worktrees, and handoffs | [`references/multi-lane-orchestration.md`](multi-lane-orchestration.md) |
 | Agent management, file authoring, prompt integration, or RPC | [`references/management-authoring-rpc.md`](management-authoring-rpc.md) |
 
-After delegation is operator-authorized, choose the smallest recipe that earns
-its overhead. Recipes select a shape; they do not authorize delegation:
+Choose the smallest recipe that fits:
 
-- **Recon → plan → implement:** run one focused `scout`, then one `worker` that consumes its findings.
-- **Implementation:** clarify scope and acceptance, record user-owned decisions and seam/validation contracts, and use a bounded scout, writer, or fresh reviewer only where the requested delegation benefits from that stage. Keep one writer, inspect direct evidence, and require every added stage to earn its overhead. Split large work into serial milestones instead of a writer swarm; do not stop at review without disposition.
+- **Recon → plan → implement:** parent performs the serial path by default. Delegate a scout only for an obviously independent context-light question; delegate a worker only after the resulting frozen mechanical slice passes the user/global eligibility gate.
+- **Non-trivial implementation:** parent owns causality, design, and coding by default—especially when Sol. Clarify scope/acceptance, record decisions and seam/validation contracts, inspect load-bearing code, and plan when useful. An eligible child writer gets a distinct isolated workspace and returns a scoped commit/patch; parent integrates and validates. Use fresh isolated review, apply accepted fixes in parent unless the next slice independently qualifies, then inspect direct evidence and final diff before root acceptance.
 - **Parallel analysis:** fan out only independent read/review/validation work, or isolate each writer in its own worktree. Never run concurrent writers in one checkout.
 
 ## Error Handling

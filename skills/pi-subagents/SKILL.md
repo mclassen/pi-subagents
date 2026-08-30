@@ -1,28 +1,20 @@
 ---
 name: pi-subagents
 description: |
-  Technical guidance for operator-requested delegation to builtin or custom
-  subagents: bounded handoffs, parallel review, scripted workflows, async work,
-  forked context, isolation, and coordinated execution.
+  Delegate to builtin or custom subagents for single-agent handoffs, parallel
+  review, scripted chaining, async work, forked context, and coordinated
+  workflows. Use when one parent agent should stay in control while children
+  supply focused context, planning, review, or execution.
 ---
 
 # Pi Subagents
 
-The parent works directly by default. Invoke subagents only when the operator
-requested delegation in the current request or through applicable user/project
-instructions. Task size, complexity, risk, tool-call count, recipe fit, or an
-available specialist does not independently authorize delegation.
+Choose a mode subject to user/global delegation eligibility:
 
-Once authorized, choose the smallest bounded shape that earns its token and
-elapsed-time overhead through concrete evidence, independent review,
-specialization, useful parallelism, or needed isolation. A single child is
-valid; writer, challenge, and review stages must each earn their overhead rather
-than becoming default ceremony. The parent keeps user intent, constraints,
-routing, arbitration, decisions, final acceptance, and publication authority,
-and may perform the work directly where it is the most efficient owner.
+- **Direct mode:** The parent handles focused, serial, context-heavy, or causally coupled work directly. Skip workflow ceremony.
+- **Orchestrator mode:** Use only for eligible independent child lanes that materially improve evidence, review, or isolated execution. The parent remains causal owner and default coder—especially when Sol—and keeps user intent, constraints, authority, routing, arbitration, integration, final acceptance, and publication. Child implementation is limited to frozen mechanical slices that independently pass the writer gate; never prescribe writer → review → writer merely because work is substantial.
 
-Children do not spawn subagents unless the parent explicitly delegated fanout
-and their resolved `tools` allow `subagent`.
+This skill is for the root parent orchestrator only; do not inject or follow it inside children. Ordinary children do not launch subagents. An explicitly assigned fanout child whose resolved `tools` includes `subagent` may spawn one further level only for assigned work. Nested writers require separate managed temporary worktrees/clones, non-overlapping contracts, and scoped commits or captured patches. Nested children cannot recurse, merge, or integrate; the intermediate synthesizes for the root.
 
 ## Launch shape
 
@@ -47,18 +39,6 @@ use ordinary `runs.run(...)` / `runs.all(...)`. See the [canonical staged-lane
 example](../../docs/workflows.md#parallel-sequential-lanes). Keep assignments
 bounded, but do not add stages or ceremony just to satisfy this skill.
 
-When composing `runs.run(...)`, `runs.all(...)`, or `runs.lanes(...)`, always
-supply a short verb + behavior display `label` derived from the task, unless
-the user supplied an explicit label; preserve that label. Keep the stable
-machine `key` independent (for example, `issue2011-writer` with
-`label: "Fix workflow steering"`). For `runs.lanes`, put labels on stage
-items, not lane objects. Use stage-appropriate labels for reviews and retained-child
-follow-ups too (for example, `Review workflow steering`). Generate labels in
-the orchestrator while composing the launch—no extra model call, runtime
-generator, or schema change. Native direct `{ agent, task }` calls have no
-top-level `label` parameter; do not invent one or wrap a tiny single task in
-a workflow just to label it.
-
 Use async/background by default. Set `async:false` only when the parent must
 block. Final reviews, validation gates, oracle checks, and publication checks
 stay async.
@@ -80,8 +60,6 @@ that runner explicitly supports the option.
 
 ## Read the reference for the branch
 
-For exact API fields and worked examples, call `subagent({action:"guide",topic:"tool-reference"})` or `topic:"workflows"`. The compact tool definition is not the recipe catalog; use `topic:"missions"` for mission updates and schedules.
-
 | Branch | Read |
 | --- | --- |
 | Delegate or choose roles, prompts, models, or slash commands | `references/prompting-and-roles.md` |
@@ -91,18 +69,19 @@ For exact API fields and worked examples, call `subagent({action:"guide",topic:"
 | List, create, edit, disable, eject, or expose agents/RPC | `references/management-authoring-rpc.md` |
 | Check safety constraints, recipes, or error handling | `references/constraints-and-recipes.md` |
 
-For an authorized complex delegated workflow, read `prompting-and-roles.md` and
-`execution-controls.md`, then load `review-and-validation.md` and
-`constraints-and-recipes.md` before launch or review.
+For complex work, read `prompting-and-roles.md` and `execution-controls.md`, then
+load `review-and-validation.md` and `constraints-and-recipes.md` before launch or
+review.
 
 ## Operating rules
 
-- Avoid duplicate scouts, overlapping writers, and vague prompts without a concrete deliverable.
+- Delegation is subordinate to user/global eligibility policy. Keep work local unless a child is obviously independent, context-light, easily parallel, and independently verifiable with less packet/review cost than parent execution. A Sol parent codes by default; delegate implementation only for an eligible frozen mechanical slice. Avoid duplicate scouts, overlapping writers, vague prompts, and delegation merely because work is non-trivial or needs multiple tool calls.
 - Keep the parent on the ordinary strong default model. Route workers/scouts to a fast capable tier, serious reviews to a strong tier, and top reasoning to bounded read-only critique.
 - Exact model names are deployment policy. Put them in user/project settings or profiles, not package guidance.
 - Give every child a compact meta-prompt checklist: objective; repo/cwd/ref; authority/edit boundary; relevant files/contracts and constraints; success/acceptance criteria; validation; expected output/report; and stop/ask conditions. See `references/prompting-and-roles.md`.
-- Before launching a writer for substantial mutation work, classify the implementation as single-seam or multi-seam. Two or more independently testable contracts or source boundaries are multi-seam: partition exclusive component ownership, gates, and durable handoffs before an integration-only owner. Mechanically reject and repartition any writer prompt that owns all major outcomes across those boundaries. One PR does not imply one writer, and one-writer-per-worktree is only a concurrency rule. Use one complete writer only when the lane board records that the work is genuinely one seam or that splitting would create overlapping or artificial handoffs; do not manufacture parallelism. See `references/multi-lane-orchestration.md`.
-- For mutation work, use an isolated lane/worktree when isolation, overlap, or concurrent juggling matters; keep one writer per cwd/worktree. See `references/multi-lane-orchestration.md` for lane mechanics.
+- Give every child a distinct isolated execution workspace/resource, including read-only children. For repository work, provision a managed temporary worktree/clone/snapshot containing the exact target; keep one writer per cwd/worktree. See `references/multi-lane-orchestration.md` for lane mechanics.
+- Normal fanout is at most three depth-one lanes. Permit four to six independent lanes only with distinct seams and outputs, isolated writer workspaces, non-overlapping contracts, recorded integration order, and material benefit; more than six requires explicit user approval. Testing that changes files, generated state, or shared lifecycle resources is mutation.
+- Nested fanout is one additional level, at most three children, and normally no more than six live descendants total. Nested writers use separate managed worktrees or temporary clones and return scoped commits or patches; every nested launch explicitly uses Luna or Terra, never Sol or inherited Sol. The root confirms durable handoffs and managed cleanup, preserving dirty or divergent work rather than force-discarding it.
 - Keep long/high-output validation out of chat: prefer `interactive_shell` dispatch/background monitors, bounded logs, or subagent-owned reports; return a concise summary plus report path unless same-turn output is required. Do not use `interactive_shell` as an implicit fallback for a failed `subagent` lane; see `references/execution-controls.md`.
 - Treat subagent workflow, child launch, prompt runtime, extension load, and child tooling setup failures as lane infrastructure blockers. Stop, report the exact failure and run/worktree state, verify a clean worktree or capture a partial diff, and use only a clear same-protocol retry or an owner-approved execution-mode fallback.
 - For cross-codebase work, record the repo, explicit `cwd`, authority boundary, and expected output before launch.
