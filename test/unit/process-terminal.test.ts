@@ -29,7 +29,7 @@ test("process-terminal proof requires the matching runner instance and writer cl
 					closeObservedAt: 10,
 					exitCode: 0,
 					signal: null,
-					processTree: { state: "observed", mechanism: "posix-process-group", processGroupId: 123, verifiedAt: 11 },
+					processTree: { state: "observed", mechanism: "windows-process-snapshot", rootProcessId: 123, verifiedAt: 11 },
 				}],
 			},
 		});

@@ -44,10 +44,15 @@ function validProcessInstance(value: unknown, kind?: "runner" | "pi-writer"): va
 	if (value.kind === "runner") return value.attempt === undefined;
 	if (typeof value.attempt !== "number" || !Number.isInteger(value.attempt) || value.attempt < 0 || !isRecord(value.processTree)) return false;
 	if (value.processTree.state === "observed") {
-		return value.processTree.mechanism === "posix-process-group"
-			&& typeof value.processTree.processGroupId === "number"
-			&& Number.isInteger(value.processTree.processGroupId)
-			&& value.processTree.processGroupId > 0
+		const validIdentity = value.processTree.mechanism === "posix-process-group"
+			? typeof value.processTree.processGroupId === "number"
+				&& Number.isInteger(value.processTree.processGroupId)
+				&& value.processTree.processGroupId > 0
+			: value.processTree.mechanism === "windows-process-snapshot"
+				&& typeof value.processTree.rootProcessId === "number"
+				&& Number.isInteger(value.processTree.rootProcessId)
+				&& value.processTree.rootProcessId > 0;
+		return validIdentity
 			&& typeof value.processTree.verifiedAt === "number"
 			&& Number.isFinite(value.processTree.verifiedAt);
 	}
