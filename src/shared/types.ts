@@ -655,8 +655,8 @@ export type ProcessTreeTerminal =
 	}
 	| {
 		state: "observed";
-		mechanism: "windows-taskkill";
-		pid: number;
+		mechanism: "windows-process-snapshot";
+		rootProcessId: number;
 		verifiedAt: number;
 	}
 	| {
