@@ -11,9 +11,23 @@ function processIsActive(pid: number): boolean {
 	return result.status === 0 && Boolean(result.stdout.trim()) && !result.stdout.trim().startsWith("Z");
 }
 
-test("owned process tree fails closed when process-group ownership is unsupported", { skip: process.platform !== "win32" }, async () => {
-	const proof = await createOwnedProcessTreeController(999_999).terminate();
-	assert.deepEqual(proof, { state: "unknown", reason: "unsupported-platform" });
+test("owned process tree kills descendants and verifies a Windows process snapshot", { skip: process.platform !== "win32" }, async () => {
+	const writer = spawn(process.execPath, ["-e", `
+		const { spawn } = require("node:child_process");
+		const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+		process.stdout.write(String(child.pid) + "\\n");
+		setInterval(() => {}, 1000);
+	`], { stdio: ["ignore", "pipe", "ignore"] });
+	assert.ok(writer.pid);
+	const childPid = await new Promise<number>((resolve, reject) => {
+		writer.once("error", reject);
+		writer.stdout!.once("data", (chunk) => resolve(Number(String(chunk).trim())));
+	});
+	const proof = await createOwnedProcessTreeController(writer.pid, { killVerifyMs: 3000 }).terminate();
+	assert.equal(proof.state, "observed", JSON.stringify(proof));
+	if (proof.state === "observed") assert.equal(proof.mechanism, "windows-process-snapshot");
+	assert.throws(() => process.kill(writer.pid!, 0));
+	assert.throws(() => process.kill(childPid, 0));
 });
 
 test("owned process tree kills descendants and verifies a TERM-resistant POSIX group", { skip: process.platform === "win32" }, async () => {
