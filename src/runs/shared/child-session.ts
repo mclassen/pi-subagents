@@ -416,7 +416,10 @@ export function createDefaultChildSessionFactory(options: DefaultChildSessionFac
 				try {
 					const runner = session.extensionRunner;
 					if (runner.hasHandlers("session_shutdown")) {
-						await Promise.race([runner.emit({ type: "session_shutdown", reason: "quit" }), new Promise<void>((resolve) => setTimeout(resolve, shutdownTimeoutMs).unref?.())]);
+						await Promise.race([
+							runner.emit({ type: "session_shutdown", reason: "quit" }),
+							new Promise<void>((resolve) => setTimeout(resolve, shutdownTimeoutMs)),
+						]);
 					}
 				} catch (error) {
 					launch.onExtensionError?.({ extensionPath: "<session>", event: "session_shutdown", error });
