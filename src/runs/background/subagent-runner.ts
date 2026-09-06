@@ -24,7 +24,7 @@ function ensureProxyAwareHttpDispatcher(): void {
 }
 ensureProxyAwareHttpDispatcher();
 import { writeAtomicJson } from "../../shared/atomic-json.ts";
-import { writeAsyncResultFile, writePendingAsyncResultFile } from "./result-files.ts";
+import { promotePendingResultFile, writePendingAsyncResultFile } from "./result-files.ts";
 import { createFileCoalescer } from "../../shared/file-coalescer.ts";
 import { createCapacityResilientJsonWriter } from "../../shared/capacity-resilient-json.ts";
 import { isStorageCapacityError } from "../../shared/file-system-retry.ts";
@@ -4908,7 +4908,7 @@ async function runSubagent(
 			shareError,
 			...(taskIndex !== undefined && { taskIndex }),
 			...(totalTasks !== undefined && { totalTasks }),
-		}, (filePath, payload) => { writeAsyncResultFile(filePath, payload as Record<string, unknown>); });
+		}, (filePath, payload) => { writePendingAsyncResultFile(filePath, payload as Record<string, unknown>); });
 		finalResultCommitted = true;
 	} catch (err) {
 		const message = `Failed to write result file ${resultPath}: ${err instanceof Error ? err.message : String(err)}`;
@@ -4982,6 +4982,13 @@ async function runSubagent(
 			writeProcessTerminalCandidate(asyncDir, candidate);
 		} catch (error) {
 			console.error(`Failed to write process-terminal candidate for '${id}':`, error);
+		}
+	}
+	if (finalResultCommitted && config.sessionId) {
+		try {
+			promotePendingResultFile(path.dirname(resultPath), config.sessionId, id, path.basename(resultPath));
+		} catch (error) {
+			console.error(`Failed to promote async result file for '${id}':`, error);
 		}
 	}
 }

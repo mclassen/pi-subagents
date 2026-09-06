@@ -141,15 +141,6 @@ function writeExplicitOutput(outputParent: string, outputPath: string, capture: 
 	}
 }
 
-function terminateProcessTree(pid: number, controller: OwnedProcessTreeController): Promise<ProcessTreeTerminal> {
-	if (process.platform !== "win32") return controller.terminate();
-	return new Promise<ProcessTreeTerminal>((resolve) => {
-		const cleanup = spawn("taskkill", ["/PID", String(pid), "/T", "/F"], { stdio: "ignore", windowsHide: true });
-		cleanup.once("error", () => { void controller.terminate().then(resolve); });
-		cleanup.once("close", () => { void controller.terminate().then(resolve); });
-	});
-}
-
 export async function executeWorkflowHostCommand(input: {
 	key: string;
 	params: WorkflowHostCommandParams;
@@ -183,10 +174,10 @@ export async function executeWorkflowHostCommand(input: {
 		const processTree = typeof child.pid === "number" ? createOwnedProcessTreeController(child.pid, { termGraceMs: 1_000 }) : undefined;
 		let termination: Promise<ProcessTreeCleanup> | undefined;
 		const terminate = (reason: "timeout" | "abort") => {
-			if (settled) return;
+			if (settled || termination) return;
 			timedOut = reason === "timeout";
 			stopped = reason === "abort";
-			if (processTree && child.pid !== undefined) termination ??= terminateProcessTree(child.pid, processTree);
+			if (processTree && child.pid !== undefined) termination = processTree.terminate();
 			else {
 				child.kill("SIGTERM");
 				termination ??= Promise.resolve({ state: "unknown", reason: "missing-process-id" });

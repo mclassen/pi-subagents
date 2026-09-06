@@ -74,7 +74,7 @@ For a persistent role override with a backup model for provider failures:
       "reviewer": {
         "model": "anthropic/claude-sonnet-4",
         "thinking": "high",
-        "fallbackModels": ["openai-codex/gpt-5.6-luna:low"]
+        "fallbackModels": ["openai-codex/gpt-5.6-luna:high"]
       }
     }
   }
@@ -91,11 +91,11 @@ Fast mode fails before launch unless every resolved model candidate is on the al
 
 ## Recommended model tiering (optional)
 
-A setup that works well in practice: route agents by task shape instead of running everything on one model. Four tiers:
+A setup that works well in practice: route agents by task shape instead of running everything on one model. Use Luna medium only for exact deterministic mechanics. The normal task tiers are:
 
-1. **Fast workhorse** — the cheapest capable model at low thinking, for recon, lookups, and mechanical edits. Example: `openai-codex/gpt-5.6-luna:low` on `scout`.
-2. **Standard well-scoped** — a mid-tier model at medium thinking, for most delegations: routine multi-file edits, focused reviews, straightforward implementation. Example: `openai-codex/gpt-5.6-luna:max` on `worker`, `reviewer`, and a lightweight `delegate` agent.
-3. **Deep but bounded** — a top reasoning model at high thinking, only for hard tasks that arrive with explicit goals and completion criteria. These models tend to loop on vague goals, so keep them off open-ended work. Example: `openai-codex/gpt-5.6-sol:high` on oracle-style agents.
+1. **Bounded evidence workhorse** — a cheap capable model at high thinking for recon, research, tests, deterministic verification, and focused review. Example: `openai-codex/gpt-5.6-luna:high` on `scout`, `researcher`, `reviewer`, and lightweight `delegate` agents.
+2. **Frozen implementation worker** — use xhigh only for a bounded implementation slice with fixed contracts and deterministic acceptance. Example: `openai-codex/gpt-5.6-luna:xhigh` on `worker`. Do not route Luna max automatically; Luna max and Sol xhigh/max require explicit manual model selection.
+3. **Deep but bounded** — start the ordinary root/coordinator on Luna high. Use Sol medium when actual code/context complexity, causal debugging, coordination, or final-review evidence requires it. Treat Sol medium as the normal automatic ceiling. For genuinely complex diagnosis, architecture, concurrency, or consequential unresolved review, suggest Sol high but require explicit user selection and explicit goals and completion criteria. Terra is a manual comparison fallback only.
 4. **Taste and intent** — a model that reads human intent well and makes judgment calls without looping, for ambiguous work: UX and design decisions, product tradeoffs, planning from vague requirements, writing quality. Example: `anthropic/claude-fable-5` at `low` for lighter passes and `medium` for harder ones.
 
 The routing rule: use the capability tiers (1–3) when the task is well-scoped, and the intent tier (4) when scoping or judging is the task itself.

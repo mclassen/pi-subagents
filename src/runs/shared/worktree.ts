@@ -8,6 +8,7 @@ import { resolveAuthorityDecision, type AuthorityPolicyConfig } from "../../poli
 import { PROJECT_SUBAGENTS_RELATIVE_DIR } from "../../shared/artifacts.ts";
 import { getAgentDir } from "../../shared/utils.ts";
 import type { ManagedWorktreeProvider, WorktreeNaming, WorktreeProvider } from "../../shared/types.ts";
+import { WINDOWS_HIDDEN_PROCESS_OPTIONS } from "../../shared/windows-launch-safety.ts";
 
 export const DEFAULT_WORKTREE_PROVIDER: WorktreeProvider = "auto";
 export const DEFAULT_WORKTREE_BASE_REF = "HEAD";
@@ -274,7 +275,7 @@ class SetupTransaction {
 }
 
 function runGit(cwd: string, args: string[], env?: NodeJS.ProcessEnv): GitResult {
-	const result = spawnSync("git", ["-C", cwd, ...args], { encoding: "utf-8", windowsHide: true, shell: false, ...(env ? { env: { ...process.env, ...env } } : {}) });
+	const result = spawnSync("git", ["-C", cwd, ...args], { encoding: "utf-8", ...WINDOWS_HIDDEN_PROCESS_OPTIONS, ...(env ? { env: { ...process.env, ...env } } : {}) });
 	return {
 		stdout: result.stdout ?? "",
 		stderr: result.stderr ?? "",
@@ -532,13 +533,36 @@ interface WorktrunkCapability {
 	reason?: string;
 }
 
+export function resolveWorktrunkExecutable(env: NodeJS.ProcessEnv = process.env, platform = process.platform): string | undefined {
+	if (platform !== "win32") return "wt";
+	const localAppData = env.LOCALAPPDATA ?? env.LocalAppData ?? env.localappdata;
+	if (!localAppData?.trim()) return undefined;
+	const windowsAppsDir = path.resolve(localAppData, "Microsoft", "WindowsApps").toLowerCase();
+	const pathValue = env.PATH ?? env.Path ?? env.path ?? "";
+	for (const rawDir of pathValue.split(path.delimiter)) {
+		const dir = rawDir.trim().replace(/^"|"$/g, "");
+		if (!dir) continue;
+		for (const extension of [".exe", ".com"]) {
+			const candidate = path.resolve(dir, `wt${extension}`);
+			if (candidate.toLowerCase().startsWith(`${windowsAppsDir}${path.sep.toLowerCase()}`)) continue;
+			try {
+				if (fs.statSync(candidate).isFile()) return candidate;
+			} catch (error) {
+				if ((error as NodeJS.ErrnoException).code !== "ENOENT") continue;
+			}
+		}
+	}
+	return undefined;
+}
+
 function runWorktrunk(args: string[], cwd?: string): WorktreeCommandResult {
 	try {
-		const result = spawnSync("wt", args, {
+		const executable = resolveWorktrunkExecutable();
+		if (!executable) return { stdout: "", stderr: "", status: null, error: new Error("Worktrunk executable was not found; the Windows Terminal wt.exe app alias is not a valid Worktrunk command") };
+		const result = spawnSync(executable, args, {
 			cwd,
 			encoding: "utf-8",
-			windowsHide: true,
-			shell: false,
+			...WINDOWS_HIDDEN_PROCESS_OPTIONS,
 			maxBuffer: WORKTREE_COMMAND_OUTPUT_MAX_BYTES,
 		});
 		const stdout = result.stdout ?? "";
@@ -588,12 +612,14 @@ async function resolveSetupProvider(tx: SetupTransaction, requested: WorktreePro
 		return "native";
 	}
 	let reason: string | undefined;
-	try {
+	const executable = resolveWorktrunkExecutable();
+	if (!executable) reason = "Worktrunk executable was not found; the Windows Terminal wt.exe app alias is not a valid Worktrunk command";
+	else try {
 		const probeExitCodes = Array.from({ length: 256 }, (_, code) => code);
-		const version = await tx.command("wt", ["--version"], { maxBuffer: WORKTREE_COMMAND_OUTPUT_MAX_BYTES, acceptedExitCodes: probeExitCodes });
+		const version = await tx.command(executable, ["--version"], { maxBuffer: WORKTREE_COMMAND_OUTPUT_MAX_BYTES, acceptedExitCodes: probeExitCodes });
 		if (version.status !== 0 || !/\b(?:wt\s+)?v?(\d+\.\d+(?:\.\d+)?)\b/i.test(version.stdout.trim())) reason = "Worktrunk is unavailable or returned an invalid version";
 		else {
-			const help = await tx.command("wt", ["switch", "--help"], { maxBuffer: WORKTREE_COMMAND_OUTPUT_MAX_BYTES, acceptedExitCodes: probeExitCodes });
+			const help = await tx.command(executable, ["switch", "--help"], { maxBuffer: WORKTREE_COMMAND_OUTPUT_MAX_BYTES, acceptedExitCodes: probeExitCodes });
 			const missing = ["--create", "--base", "--no-cd", "--no-hooks", "--format"].filter((flag) => !`${help.stdout}\n${help.stderr}`.includes(flag));
 			if (help.status !== 0 || missing.length) reason = `Worktrunk switch capability unavailable: ${missing.join(", ")}`;
 		}
@@ -955,8 +981,10 @@ async function createWorktrunkWorktree(
 ): Promise<WorktreeInfo> {
 	const naming = buildWorktreeNaming({ runId, index, agent: agents?.[index], label: labels?.[index], task: tasks?.[index], branchPrefix });
 	const args = ["-C", toplevel, "switch", "--create", naming.requestedBranch, "--base", baseCommit, "--no-cd", "--no-hooks", "--format", "json"];
+	const executable = resolveWorktrunkExecutable();
+	if (!executable) throw new Error("Worktrunk executable was not found; the Windows Terminal wt.exe app alias is not a valid Worktrunk command");
 	tx.attempt(index, naming.requestedBranch);
-	const result = await tx.command("wt", args, { cwd: toplevel, maxBuffer: WORKTREE_COMMAND_OUTPUT_MAX_BYTES });
+	const result = await tx.command(executable, args, { cwd: toplevel, maxBuffer: WORKTREE_COMMAND_OUTPUT_MAX_BYTES });
 	tx.progress.phase = "validation";
 	if (result.status !== 0) {
 		const message = result.error?.message || result.stderr.trim() || result.stdout.trim() || "Worktrunk provisioning failed";

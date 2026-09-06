@@ -13,6 +13,7 @@ import {
 	getAsyncConfigPath,
 	resolveTempScopeId,
 } from "../../src/shared/types.ts";
+import { WINDOWS_HIDDEN_PROCESS_OPTIONS } from "../../src/shared/windows-launch-safety.ts";
 
 describe("resolveTempScopeId", () => {
 	it("prefers uid when available", () => {
@@ -66,6 +67,7 @@ describe("shared temp paths", () => {
 			const result = spawnSync(process.execPath, ["--experimental-strip-types", "--input-type=module", "--eval", script], {
 				encoding: "utf-8",
 				env: { ...process.env, HOME: isolatedHome, USERPROFILE: isolatedHome, PI_SUBAGENTS_TEMP_ROOT: override },
+				...WINDOWS_HIDDEN_PROCESS_OPTIONS,
 			});
 			assert.equal(result.status, 0, result.stderr);
 			assert.deepEqual(JSON.parse(result.stdout.trim()), {
@@ -113,6 +115,7 @@ console.log(JSON.stringify({ agentDir: getAgentDir(), profilePath: path.join(pro
 				cwd: process.cwd(),
 				encoding: "utf-8",
 				env,
+				...WINDOWS_HIDDEN_PROCESS_OPTIONS,
 			});
 			assert.equal(result.status, 0, result.stderr);
 			const output = JSON.parse(result.stdout.trim()) as { agentDir: string; profilePath: string; settingsPath: string };
@@ -133,7 +136,9 @@ console.log(JSON.stringify({ agentDir: getAgentDir(), profilePath: path.join(pro
 		assert.equal(path.dirname(ASYNC_DIR), TEMP_ROOT_DIR);
 		assert.equal(path.dirname(CHAIN_RUNS_DIR), TEMP_ROOT_DIR);
 		assert.equal(path.dirname(TEMP_ARTIFACTS_DIR), TEMP_ROOT_DIR);
-		assert.match(path.basename(TEMP_ROOT_DIR), /^pi-subagents-/);
+		const configuredTempRoot = process.env.PI_SUBAGENTS_TEMP_ROOT?.trim();
+		if (configuredTempRoot) assert.equal(TEMP_ROOT_DIR, path.resolve(configuredTempRoot));
+		else assert.match(path.basename(TEMP_ROOT_DIR), /^pi-subagents-/);
 		assert.equal(path.basename(RESULTS_DIR), "async-subagent-results");
 		assert.equal(path.basename(ASYNC_DIR), "async-subagent-runs");
 		assert.equal(path.basename(CHAIN_RUNS_DIR), "chain-runs");

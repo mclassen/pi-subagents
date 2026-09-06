@@ -7,6 +7,7 @@ import { DEFAULT_FILE_SYSTEM_RETRY_DELAYS_MS, isRetryableFileSystemError, waitFo
 import { assertWorkflowJsonValue } from "../workflows/scripted-workflow.ts";
 import type { MissionStoreLocation } from "./types.ts";
 import { validateMissionId } from "./store.ts";
+import { windowsSystemExecutable } from "../shared/windows-launch-safety.ts";
 
 const STATE_KEY_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const STATE_LOCK_STALE_MS = 60_000;
@@ -65,7 +66,7 @@ function psProcessStartKey(pid: number): string | undefined {
 
 function windowsProcessStartKey(pid: number): string | undefined {
 	try {
-		const raw = execFileSync("powershell.exe", ["-NoProfile", "-Command", `(Get-CimInstance Win32_Process -Filter \"ProcessId=${pid}\").CreationDate`], { encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"], timeout: 1000, windowsHide: true }).trim();
+		const raw = execFileSync(windowsSystemExecutable("WindowsPowerShell", "v1.0", "powershell.exe"), ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", `(Get-CimInstance Win32_Process -Filter \"ProcessId=${pid}\").CreationDate`], { encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"], timeout: 1000, windowsHide: true, shell: false }).trim();
 		return raw ? `win:${raw}` : undefined;
 	} catch {
 		return undefined;

@@ -17,14 +17,16 @@ import {
 	normalizeWorktreeBranchPrefix,
 	resolveExpectedWorktreeAgentCwd,
 	resolveWorktreeProvider,
+	resolveWorktrunkExecutable,
 	sanitizeWorktreePathComponent,
 	shouldDeferWorktreeCwd,
 	WorktreeSetupError,
 	type WorktreeSetup,
 } from "../../src/runs/shared/worktree.ts";
+import { WINDOWS_HIDDEN_PROCESS_OPTIONS } from "../../src/shared/windows-launch-safety.ts";
 
 function git(cwd: string, args: string[]): string {
-	const result = spawnSync("git", ["-C", cwd, ...args], { encoding: "utf-8" });
+	const result = spawnSync("git", ["-C", cwd, ...args], { encoding: "utf-8", ...WINDOWS_HIDDEN_PROCESS_OPTIONS });
 	if (result.status !== 0) {
 		const message = result.stderr.trim() || result.stdout.trim() || `git ${args.join(" ")} failed`;
 		throw new Error(message);
@@ -78,7 +80,7 @@ async function runPoisonCaseInChild(name: string): Promise<boolean> {
 	await promisify(execFile)(process.execPath, [
 		"--experimental-strip-types", "--import", "./test/support/register-loader.mjs",
 		"--test", `--test-name-pattern=${name}`, fileURLToPath(import.meta.url),
-	], { env: { ...process.env, NODE_TEST_CONTEXT: undefined, PI_WORKTREE_POISON_CASE: name } });
+	], { env: { ...process.env, NODE_TEST_CONTEXT: undefined, PI_WORKTREE_POISON_CASE: name }, ...WINDOWS_HIDDEN_PROCESS_OPTIONS });
 	return true;
 }
 
@@ -101,6 +103,24 @@ function assertRetainedHookFailure(error: unknown, message: RegExp): true {
 }
 
 describe("worktree", () => {
+	it("rejects the Windows Terminal app alias while resolving Worktrunk", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-worktree-wt-resolution-"));
+		try {
+			const localAppData = path.join(root, "local");
+			const windowsApps = path.join(localAppData, "Microsoft", "WindowsApps");
+			const cliDir = path.join(root, "cli");
+			fs.mkdirSync(windowsApps, { recursive: true });
+			fs.mkdirSync(cliDir, { recursive: true });
+			fs.writeFileSync(path.join(windowsApps, "wt.exe"), "terminal alias");
+			assert.equal(resolveWorktrunkExecutable({ LOCALAPPDATA: localAppData, PATH: windowsApps }, "win32"), undefined);
+			fs.writeFileSync(path.join(cliDir, "wt.exe"), "worktrunk");
+			assert.equal(resolveWorktrunkExecutable({ LOCALAPPDATA: localAppData, PATH: `${windowsApps}${path.delimiter}${cliDir}` }, "win32"), path.join(cliDir, "wt.exe"));
+			assert.equal(resolveWorktrunkExecutable({ PATH: cliDir }, "win32"), undefined, "missing LOCALAPPDATA must fail closed rather than risk the app alias");
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
 	it("createWorktrees returns expected structure", async () => {
 		const repoDir = createRepo("pi-worktree-structure-");
 		let setup: WorktreeSetup | undefined;

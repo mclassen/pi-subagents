@@ -220,7 +220,7 @@ Agent definitions are not loaded into context by default. Management actions let
   inheritGlobalContext: false,
   inheritSkills: false,
   model: "anthropic/claude-sonnet-4",
-  fallbackModels: ["openai-codex/gpt-5.6-luna:low", "anthropic/claude-haiku-4-5"],
+  fallbackModels: ["openai-codex/gpt-5.6-luna:high", "anthropic/claude-haiku-4-5"],
   tools: "read, bash, mcp:github/search_repositories",
   extensions: "",
   skills: "parallel-scout",

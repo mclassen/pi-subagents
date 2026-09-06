@@ -18,7 +18,7 @@ For every lane, record the delivery target, allowed actions, required validation
 
 Normal fanout is at most three depth-one lanes. Use four to six independent lanes—including mutation/test-writing lanes—only when each has a distinct seam/output, isolated writer workspace, non-overlapping contract, recorded integration order, and material benefit; more than six requires explicit user approval. Testing that changes files, generated state, or shared lifecycle resources is a mutation lane.
 
-Nested delegation is exceptional. A root-designated fanout child with `subagent` may spawn one additional level, at most three children, within a normal total of six live descendants. A nested writer must use `worktree: true` or a recorded temporary clone, own a non-overlapping contract, and return a scoped commit or captured patch plus validation. Every nested launch explicitly uses Luna or Terra, never Sol/inherited Sol. Nested children do not recurse, merge, integrate, or decide scope; the intermediate synthesizes and the root reviews, integrates, accepts, and confirms cleanup.
+Nested delegation is exceptional. A root-designated fanout child with `subagent` may spawn one additional level, at most three children, within a normal total of six live descendants. A nested writer must use `worktree: true` or a recorded temporary clone, own a non-overlapping contract, and return a scoped commit or captured patch plus validation. Every nested launch explicitly uses Luna high/xhigh, never Sol/inherited Sol or Terra. Nested children do not recurse, merge, integrate, or decide scope; the intermediate synthesizes and the root reviews, integrates, accepts, and confirms cleanup.
 
 ## Partitioned runs
 

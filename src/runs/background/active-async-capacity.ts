@@ -279,10 +279,17 @@ function workflowReleaseVerdict(owner: ActiveAsyncCapacityOwner, status: AsyncSt
 		const childStatus = readStatus(childDir);
 		if (!childStatus) return { state: "retained", reason: `async workflow child ${label} status is missing or unreadable` };
 		if (!terminalState(childStatus.state)) return { state: "retained", reason: `async workflow child ${label} is still ${childStatus.state}` };
-		if (!childStatus.processTerminal?.runnerProcessInstanceId) return { state: "retained", reason: `async workflow child ${label} has no runner process identity` };
+		const childProcessTerminal = childStatus.processTerminal;
+		if (childProcessTerminal?.state === "not-started"
+			&& childProcessTerminal.runId === step.runId
+			&& typeof childProcessTerminal.runnerProcessInstanceId === "string"
+			&& childStatus.state === "failed"
+			&& typeof childStatus.error === "string"
+			&& childStatus.error) continue;
+		if (!childProcessTerminal?.runnerProcessInstanceId) return { state: "retained", reason: `async workflow child ${label} has no runner process identity` };
 		const proof = readProcessTerminal(childDir, {
 			runId: step.runId,
-			runnerProcessInstanceId: childStatus.processTerminal.runnerProcessInstanceId,
+			runnerProcessInstanceId: childProcessTerminal.runnerProcessInstanceId,
 		});
 		if (proof?.state !== "observed" || proof.runId !== step.runId) return { state: "retained", reason: `async workflow child ${label} process-terminal proof is ${proof?.state ?? "missing"}` };
 	}

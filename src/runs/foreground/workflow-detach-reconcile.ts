@@ -58,12 +58,11 @@ function workflowResultChildren(status: AsyncStatus, childRunId: string, result:
 			if (!entry || typeof entry !== "object" || Array.isArray(entry)) return entry;
 			const child = entry as Record<string, unknown>;
 			if (child.runId !== childRunId) return child;
-			return {
+			const updated: Record<string, unknown> = {
 				...child,
 				success: result.exitCode === 0 && !result.error && !result.interrupted,
 				output,
 				outputState: output.trim() ? "present" : "absent",
-				detached: undefined,
 				...(usage ? { usage } : {}),
 				...(outputReference ? { outputReference } : {}),
 				...(outputPathMapping ? { outputPathMapping } : {}),
@@ -74,6 +73,8 @@ function workflowResultChildren(status: AsyncStatus, childRunId: string, result:
 				...(result.sessionFile ? { sessionFile: result.sessionFile } : {}),
 				...(result.error ? { error: result.error } : {}),
 			};
+			delete updated.detached;
+			return updated;
 		});
 	}
 	return status.steps?.map((step: WorkflowStatusStep) => ({

@@ -157,7 +157,7 @@ With `"fork"`, the setting uses the existing implicit-fork behavior. A launch st
 {
   "forkContext": {
     "mode": "pruned",
-    "model": "openai-codex/gpt-5.6-luna:max"
+    "model": "openai-codex/gpt-5.6-luna:high"
   }
 }
 ```

@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type { ExtensionConfig, ToolDescriptionMode } from "../shared/types.ts";
 import { getAgentDir, getProjectConfigDir } from "../shared/utils.ts";
+import { WINDOWS_APPLICATION_LAUNCH_SAFETY } from "../shared/windows-launch-safety.ts";
 
 const CUSTOM_TOOL_DESCRIPTION_FILE = "subagent-tool-description.md";
 const CUSTOM_TOOL_DESCRIPTION_MAX_BYTES = 50 * 1024;
@@ -26,6 +27,7 @@ export const SUBAGENT_TOOL_PROMPT_GUIDELINES = [
 	"workflowScript rejects nested async function, arrow, and method helpers; use top-level await, plain helper functions, or explicit Promise chains.",
 	"Inside workflowScript, use runs.run/runs.all and await their results. runs.all returns an ordered array, not a key map; stored runs.run promises must later be observed with direct await, Promise.race, or Promise.all.",
 	'Keep one writer per cwd/worktree; isolate concurrent writers. For durable files, set output on runs.run/runs.all and return the child\'s outputReference, outputPathMapping, or artifactPaths. For advanced workflows, read the bundled pi-subagents skill or call { action: "guide", topic: "workflows" }.',
+	WINDOWS_APPLICATION_LAUNCH_SAFETY,
 ];
 
 export const SUBAGENT_SAFETY_GUIDANCE = `SAFETY-CRITICAL SUBAGENT GUIDANCE:
@@ -39,6 +41,7 @@ export const SUBAGENT_SAFETY_GUIDANCE = `SAFETY-CRITICAL SUBAGENT GUIDANCE:
 • Ordinary child subagents are not orchestrators. Only explicitly configured fanout children may use the child-safe subagent tool, still bounded by depth/session limits.
 • Oracle/advisor consultations should use supervisor dialogue for material unknowns when available; request one-shot only when desired.
 • Keep one writer for the same cwd/worktree. Use fresh-context read-only reviewers for independent review, then have the parent synthesize and apply fixes.
+• ${WINDOWS_APPLICATION_LAUNCH_SAFETY}
 • Async runs expose asyncId/asyncDir with status.json, events.jsonl, output logs, status via { action: "status", id }, and lifecycle diagnostics via { action: "debug.run", id }. Include output paths and residual risks when reporting results.`;
 
 export const FULL_SUBAGENT_TOOL_DESCRIPTION = `Run one child with { agent, task? }; use { workflowScript } for inline orchestration or { workflowScriptPath } to load it from the request cwd. The script inputs are mutually exclusive. Omit action for execution. Use action only for management/control actions.
@@ -91,6 +94,7 @@ ASYNC / SAFETY:
 • ${WORKFLOW_OUTPUT_BINDING_GUIDANCE}
 • ${WORKFLOW_HOST_GUIDANCE}
 • Ordinary children are not orchestrators. Keep one writer per cwd/worktree and use fresh read-only reviewers for independent checks.
+• ${WINDOWS_APPLICATION_LAUNCH_SAFETY}
 • Oracle/advisor consultations use available supervisor dialogue for material unknowns; request one-shot when desired.
 • Status and artifacts live under asyncId/asyncDir with status.json, events.jsonl, output logs, and {action:"status",id:"..."}.`;
 

@@ -271,7 +271,7 @@ excludeTools: bash
 extensions:
 subagentOnlyExtensions: ./tools/child-only-search.ts
 model: claude-haiku-4-5
-fallbackModels: openai-codex/gpt-5.6-luna:low, anthropic/claude-sonnet-4
+fallbackModels: openai-codex/gpt-5.6-luna:high, anthropic/claude-sonnet-4
 thinking: high
 systemPromptMode: replace
 inheritProjectContext: false
@@ -303,7 +303,7 @@ tools:
   - read
   - mcp:github/search_repositories
 fallbackModels:
-  - openai-codex/gpt-5.6-luna:low
+  - openai-codex/gpt-5.6-luna:high
   - anthropic/claude-sonnet-4
 ```
 

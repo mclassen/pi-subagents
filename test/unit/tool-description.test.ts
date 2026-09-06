@@ -16,6 +16,7 @@ import {
 	SUBAGENT_TOOL_PROMPT_SNIPPET,
 } from "../../src/extension/tool-description.ts";
 import { SUBAGENT_CHILD_ENV } from "../../src/runs/shared/child-runtime-config.ts";
+import { WINDOWS_APPLICATION_LAUNCH_SAFETY, WINDOWS_HIDDEN_PROCESS_OPTIONS } from "../../src/shared/windows-launch-safety.ts";
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 
@@ -45,14 +46,15 @@ describe("registered subagent tool description", () => {
 		assert.match(description, /no per-step cwd.*workflow cwd.*outer subagent request.*cd \/path\/to\/worktree/i);
 		assert.equal(metadata.promptSnippet, SUBAGENT_TOOL_PROMPT_SNIPPET);
 		assert.equal(Buffer.byteLength(metadata.promptSnippet!), 62);
-		assert.equal(metadata.promptGuidelines!.length, 5);
-		assert.equal(Buffer.byteLength(metadata.promptGuidelines!.join("\n")), 1243);
+		assert.equal(metadata.promptGuidelines!.length, 6);
+		assert.equal(Buffer.byteLength(metadata.promptGuidelines!.join("\n")), 1741);
 		assert.deepEqual(metadata.promptGuidelines, [
 			'Use subagent only when delegation is needed. Before execution, call { action: "list", capabilities: true } and run only executable, non-disabled agents; for external-cli rows, also require runner.available === true. This is a passive PATH/PATHEXT/X_OK lookup, not authentication, version, or launch proof; launch preflight remains authoritative.',
 			'Omit action for execution; use { agent, task? } for one child. For multi-step or parallel work, make exactly one top-level { workflowScript, async: true } call and launch children only inside it. Use action only for management/control.',
 			"workflowScript rejects nested async function, arrow, and method helpers; use top-level await, plain helper functions, or explicit Promise chains.",
 			"Inside workflowScript, use runs.run/runs.all and await their results. runs.all returns an ordered array, not a key map; stored runs.run promises must later be observed with direct await, Promise.race, or Promise.all.",
 			'Keep one writer per cwd/worktree; isolate concurrent writers. For durable files, set output on runs.run/runs.all and return the child\'s outputReference, outputPathMapping, or artifactPaths. For advanced workflows, read the bundled pi-subagents skill or call { action: "guide", topic: "workflows" }.',
+			WINDOWS_APPLICATION_LAUNCH_SAFETY,
 		]);
 		const promptGuidelines = metadata.promptGuidelines!.join("\n");
 		assert.match(promptGuidelines, /Use subagent only when delegation is needed/i);
@@ -61,6 +63,8 @@ describe("registered subagent tool description", () => {
 		assert.match(promptGuidelines, /stored runs\.run promises must later be observed with direct await, Promise\.race, or Promise\.all/i);
 		assert.match(promptGuidelines, /outputReference.*outputPathMapping.*artifactPaths/i);
 		assert.match(promptGuidelines, /advanced workflows.*action: \"guide\", topic: \"workflows\"/i);
+		assert.match(promptGuidelines, /do not launch GUI applications or file associations/i);
+		assert.match(promptGuidelines, /unless the assigned task explicitly requires/i);
 		assert.doesNotMatch(promptGuidelines, /runs\.lanes|runs\.host|workflow key identifies one result lane|action: \"models\"|External CLI agents|ordinary child subagents/i);
 		assert.match(description, /External CLI agents.*model override.*native Pi tools/i);
 		assert.match(description, /subagent workflow.*child launch.*prompt runtime.*extension load.*child tooling setup.*lane infrastructure blocker/i);
@@ -302,7 +306,7 @@ describe("registered subagent tool description", () => {
 				"--eval",
 				script,
 			],
-			{ cwd: projectRoot, env: parentToolEnv(agentDir), encoding: "utf-8" },
+			{ cwd: projectRoot, env: parentToolEnv(agentDir), encoding: "utf-8", ...WINDOWS_HIDDEN_PROCESS_OPTIONS },
 		);
 		return JSON.parse(output) as { description: string; promptSnippet?: string; promptGuidelines?: string[]; properties: string[] };
 	}

@@ -10,7 +10,7 @@ Default to a maximum of 3 review rounds unless I specify a different cap. Count 
 
 “Implementation requested” does not automatically require a child writer. Apply the global delegation eligibility gate before the initial implementation and before every fix iteration. Context-heavy causal design and real execution remain in the parent, especially when the parent is Sol.
 
-A Sol-medium/high parent is the default implementation owner. Delegate a child writer only when every condition holds:
+The parent is the default implementation owner and starts on Luna high; use Luna xhigh for bounded difficult implementation or concrete reproducible failures. Escalate to Sol medium only when actual code/context complexity, causal debugging, coordination, mixed work, or final-review evidence requires it; treat Sol medium as the normal automatic ceiling. For genuinely complex diagnosis, architecture, or consequential review, suggest Sol high but require explicit user selection. Use Luna high for fresh focused reviewers and Luna xhigh for an eligible frozen child-writer slice. Never route Luna max or Terra automatically; Terra remains a manual comparison fallback only. Delegate a child writer only when every condition holds:
 1. Contract and architecture are frozen.
 2. Defect has an exact causal packet, allowed files, RED test, and acceptance criterion.
 3. Slice is mechanical, context-light, and independently verifiable.
