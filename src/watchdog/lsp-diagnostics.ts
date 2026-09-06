@@ -3,6 +3,8 @@ import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { pathToFileURL } from "node:url";
+import { createOwnedProcessTreeController, type OwnedProcessTreeController } from "../runs/background/owned-process-tree.ts";
+import { WINDOWS_HIDDEN_PROCESS_OPTIONS, windowsSystemExecutable } from "../shared/windows-launch-safety.ts";
 import type {
 	WatchdogLspConfig,
 	WatchdogLspDiagnostic,
@@ -261,14 +263,19 @@ class JsonRpcLspClient {
 	private stderr = "";
 	private exited = false;
 	private terminating = false;
+	private readonly processTree: OwnedProcessTreeController | undefined;
+	private termination: Promise<unknown> | undefined;
 	private readonly exitWaiters: Array<() => void> = [];
 
 	constructor(child: ChildProcessWithoutNullStreams) {
 		this.child = child;
+		this.processTree = child.pid === undefined ? undefined : createOwnedProcessTreeController(child.pid);
 		child.stdout.on("data", (chunk: Buffer) => this.handleStdout(chunk));
 		child.stderr.on("data", (chunk: Buffer) => {
 			this.stderr = `${this.stderr}${chunk.toString("utf-8")}`.slice(-MAX_STDERR_LENGTH);
 		});
+		// The server's stdout protocol or exit event is authoritative; a concurrent stdin EPIPE is only a consequence.
+		child.stdin.on("error", () => {});
 		child.on("error", (error) => {
 			this.exited = true;
 			this.rejectPending(error);
@@ -295,7 +302,11 @@ class JsonRpcLspClient {
 	}
 
 	async shutdown(): Promise<void> {
-		if (this.exited) return;
+		if (this.exited) {
+			this.termination ??= this.processTree?.finishAfterWriterClose();
+			await this.termination;
+			return;
+		}
 		if (!this.terminating) {
 			try {
 				await this.request("shutdown", null, SHUTDOWN_TIMEOUT_MS);
@@ -305,12 +316,16 @@ class JsonRpcLspClient {
 			}
 		}
 		await this.waitForExit(SHUTDOWN_TIMEOUT_MS);
+		if (!this.exited) this.kill();
+		this.termination ??= this.processTree?.finishAfterWriterClose();
+		await this.termination;
 	}
 
 	kill(): void {
 		if (this.exited || this.terminating) return;
 		this.terminating = true;
-		this.child.kill("SIGTERM");
+		this.termination = this.processTree?.terminate();
+		if (!this.termination) this.child.kill("SIGTERM");
 	}
 
 	stderrTail(): string {
@@ -442,15 +457,20 @@ async function collectWithTypeScriptLanguageServer(input: {
 	config: WatchdogLspConfig;
 	signal?: AbortSignal;
 }): Promise<WatchdogLspResult> {
-	const started = Date.now();
-	const child = spawn(input.command.command, input.command.args, {
-		windowsHide: true,
+	const windowsCommandScript = process.platform === "win32" && /\.(cmd|bat)$/i.test(input.command.command);
+	const command = windowsCommandScript ? windowsSystemExecutable("cmd.exe") : input.command.command;
+	const args = windowsCommandScript
+		? ["/d", "/s", "/c", `""${input.command.command}" --stdio"`]
+		: input.command.args;
+	const child = spawn(command, args, {
 		cwd: input.root,
 		stdio: "pipe",
 		env: { ...process.env, NO_COLOR: "1" },
-		shell: process.platform === "win32" && /\.(cmd|bat)$/i.test(input.command.command),
+		...(windowsCommandScript ? { windowsVerbatimArguments: true } : {}),
+		...WINDOWS_HIDDEN_PROCESS_OPTIONS,
 	});
 	const client = new JsonRpcLspClient(child);
+	const started = Date.now();
 	const remaining = () => Math.max(1, input.config.timeoutMs - (Date.now() - started));
 	const abort = () => client.kill();
 	input.signal?.addEventListener("abort", abort, { once: true });

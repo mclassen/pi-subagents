@@ -8,6 +8,7 @@ import { buildExternalCliPrompt, runExternalCli } from "../../src/runs/shared/ex
 import { clearExternalCliPreflightCacheForTests } from "../../src/runs/shared/external-cli-preflight.ts";
 import { resolveExternalCliRunnerStatus } from "../../src/runs/shared/external-cli-contract.ts";
 import { PI_SUBAGENT_EXTENSION_BINDINGS_ENV } from "../../src/runs/shared/extension-bindings.ts";
+import { WINDOWS_APPLICATION_LAUNCH_SAFETY } from "../../src/shared/windows-launch-safety.ts";
 import { writeNodeCommand } from "../support/node-command.ts";
 
 const tempDirs: string[] = [];
@@ -46,6 +47,9 @@ describe("external CLI runner", () => {
 	it("delivers the combined prompt only through stdin and preserves argv", async () => {
 		const dir = tempDir();
 		const prompt = buildExternalCliPrompt("Follow exactly.", "Review $HOME; echo nope");
+		assert.match(prompt, /do not launch GUI applications or file associations/i);
+		assert.match(prompt, /unless the assigned task explicitly requires opening that application/i);
+		assert.equal(prompt.split(WINDOWS_APPLICATION_LAUNCH_SAFETY).length - 1, 1);
 		const result = await runExternalCli({
 			command: process.execPath,
 			args: ["-e", "let s='';process.stdin.on('data',c=>s+=c);process.stdin.on('end',()=>process.stdout.write(JSON.stringify({argv:process.argv.slice(1),stdin:s})))", "argument with spaces", "$NOT_EXPANDED"],

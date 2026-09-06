@@ -3,7 +3,8 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { finished } from "node:stream/promises";
-import type { ExternalProcessStatus, ProcessTreeTerminal } from "../../shared/types.ts";
+import type { ExternalProcessStatus } from "../../shared/types.ts";
+import { WINDOWS_APPLICATION_LAUNCH_SAFETY, WINDOWS_HIDDEN_PROCESS_OPTIONS } from "../../shared/windows-launch-safety.ts";
 import { createOwnedProcessTreeController, type OwnedProcessTreeController } from "../background/owned-process-tree.ts";
 import { omitExtensionBindingsEnv } from "./extension-bindings.ts";
 import {
@@ -24,7 +25,7 @@ const MAX_SKIPPABLE_LINE_BYTES = 1024 * 1024;
 const PARSER_PROGRESS_INTERVAL_MS = 100;
 
 export function buildExternalCliPrompt(systemInstructions: string, task: string): string {
-	return `<System instructions>\n${systemInstructions.trim()}\n\n<Task>\n${task}`;
+	return `<System instructions>\n${systemInstructions.trim()}\n\n${WINDOWS_APPLICATION_LAUNCH_SAFETY}\n\n<Task>\n${task}`;
 }
 
 export interface ExternalCliParserProgress {
@@ -141,15 +142,6 @@ function classifyInvalidation(error: string): "auth" | "permission" | "launch" {
 	return "launch";
 }
 
-function terminateExternalProcessTree(pid: number, controller: OwnedProcessTreeController): Promise<ProcessTreeTerminal> {
-	if (process.platform !== "win32") return controller.terminate();
-	return new Promise((resolve) => {
-		const cleanup = spawn("taskkill", ["/PID", String(pid), "/T", "/F"], { stdio: "ignore", windowsHide: true });
-		cleanup.once("error", () => { void controller.terminate().then(resolve); });
-		cleanup.once("close", () => { void controller.terminate().then(resolve); });
-	});
-}
-
 export function runExternalCli(input: {
 	command: string;
 	args?: string[];
@@ -262,13 +254,13 @@ export function runExternalCli(input: {
 			if (settled || timedOut || stopped || parserError) return;
 			timedOut = reason === "timeout";
 			stopped = reason === "stop";
-			if (processTree && processPid !== undefined) termination = terminateExternalProcessTree(processPid, processTree);
+			if (processTree && processPid !== undefined) termination = processTree.terminate();
 		};
 		const failParser = (error: unknown) => {
 			if (parserError) return;
 			parserError = error instanceof Error ? error : new Error(String(error));
 			if (input.preflight) invalidateExternalCliPreflight(input.command, input.preflight, "parser");
-			if (processTree && processPid !== undefined) termination = terminateExternalProcessTree(processPid, processTree);
+			if (processTree && processPid !== undefined) termination = processTree.terminate();
 		};
 		const parseLine = (line: Buffer, byteLength = line.length): boolean => {
 			if (!input.parser || parserError) return false;
@@ -331,8 +323,7 @@ export function runExternalCli(input: {
 			cwd: input.cwd,
 			env,
 			stdio: ["pipe", "pipe", "pipe"],
-			shell: false,
-			windowsHide: true,
+			...WINDOWS_HIDDEN_PROCESS_OPTIONS,
 			detached: process.platform !== "win32",
 		}) as ChildProcessWithoutNullStreams;
 		if (typeof child.pid === "number") {

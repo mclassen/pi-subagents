@@ -21,6 +21,28 @@ describe("local orchestration policy", () => {
 		assert.match(reviewLoop, /Implementation requested.*does not automatically require a child writer/i);
 	});
 
+	it("routes bounded child work to Luna high/xhigh without automatic Terra or Luna max", () => {
+		const skill = readProjectFile("skills/pi-subagents/SKILL.md");
+		const prompting = readProjectFile("skills/pi-subagents/references/prompting-and-roles.md");
+		const reviewLoop = readProjectFile("prompts/review-loop.md");
+		const worker = readProjectFile("agents/worker.md");
+		const scout = readProjectFile("agents/scout.md");
+		const researcher = readProjectFile("agents/researcher.md");
+		const oracle = readProjectFile("agents/oracle.md");
+
+		for (const text of [skill, prompting, reviewLoop]) {
+			assert.match(text, /Luna high/i);
+			assert.match(text, /Luna xhigh/i);
+			assert.match(text, /Terra[^.\n]*manual[^.\n]*comparison fallback/i);
+			assert.match(text, /Luna max.*never automatic|never route Luna max/i);
+		}
+		assert.match(worker, /Luna xhigh/);
+		assert.match(scout, /thinking: high/);
+		assert.match(researcher, /thinking: high/);
+		assert.match(oracle, /thinking: medium/);
+		assert.match(oracle, /Sol high only when.*complex|Sol high only for.*complex/i);
+	});
+
 	it("keeps every child in a distinct isolated workspace", () => {
 		const skill = readProjectFile("skills/pi-subagents/SKILL.md");
 		const execution = readProjectFile("skills/pi-subagents/references/execution-controls.md");

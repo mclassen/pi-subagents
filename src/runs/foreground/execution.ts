@@ -1189,9 +1189,7 @@ async function runSingleAttempt(
 					if (sessionSettled || lifecycleFinished) return;
 					settle(undefined, true);
 				}, 4000);
-				timeoutHardFinishTimer.unref?.();
 			}, attemptTimeout.remainingMs);
-			timeoutTimer.unref?.();
 		}
 
 		let toolTimeoutSequence = 0;
@@ -1238,7 +1236,6 @@ async function runSingleAttempt(
 				if (sessionSettled || lifecycleFinished) return;
 				settle(undefined, true);
 			}, 4000);
-			toolTimeoutHardFinishTimer.unref?.();
 		};
 		const armToolTimeout = (event: { toolCallId?: unknown; toolName: string }): void => {
 			const timeoutForTool = effectiveToolTimeoutMs(event.toolName, options.toolTimeoutMs);
@@ -1315,7 +1312,6 @@ async function runSingleAttempt(
 					if (sessionSettled || lifecycleFinished) return;
 					settle(undefined, true);
 				}, 3000);
-				hardTimer.unref?.();
 			};
 			if (options.signal.aborted) kill();
 			else {
@@ -1342,7 +1338,6 @@ async function runSingleAttempt(
 					if (sessionSettled || lifecycleFinished) return;
 					settle(undefined, true);
 				}, 3000);
-				hardTimer.unref?.();
 			};
 			if (options.interruptSignal.aborted) interrupt();
 			else {

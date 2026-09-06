@@ -10,6 +10,7 @@ import { MISSION_BINDING_FILE } from "../../missions/lifecycle.ts";
 import { ACTIVE_RUN_INDEX_DIR } from "./active-run-index.ts";
 import { encodeIndexSegment } from "./index-segment.ts";
 import { reconcileAsyncRun } from "./stale-run-reconciler.ts";
+import { windowsSystemExecutable } from "../../shared/windows-launch-safety.ts";
 
 export const ASYNC_RETENTION_DAYS = 30;
 export const ASYNC_RETENTION_BATCH_SIZE = 100;
@@ -342,7 +343,7 @@ function computeProcessStartIdentity(pid: number): string | undefined {
 		}
 	}
 	if (process.platform === "win32") {
-		const result = spawnSync("powershell.exe", ["-NoProfile", "-Command", `(Get-CimInstance Win32_Process -Filter "ProcessId=${pid}").CreationDate`], { encoding: "utf-8", windowsHide: true });
+		const result = spawnSync(windowsSystemExecutable("WindowsPowerShell", "v1.0", "powershell.exe"), ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", `(Get-CimInstance Win32_Process -Filter "ProcessId=${pid}").CreationDate`], { encoding: "utf-8", windowsHide: true, shell: false });
 		const started = result.status === 0 ? result.stdout.trim() : "";
 		return started ? `win:${started}` : undefined;
 	}
