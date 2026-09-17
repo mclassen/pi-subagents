@@ -2,7 +2,7 @@
 description: Parallel subagents review
 ---
 
-Launch parallel reviewers for an adversarial review of the current work.
+Launch parallel reviewers for an adversarial review of the current work only when independent review materially improves confidence. A Sol-medium or Sol-high parent reviews directly by default; do not launch one or two Luna reviewers reflexively.
 
 Use fresh context, not forked context, unless I explicitly ask for forked context. Reviewers should inspect the repository, relevant instructions, and current diff directly from files and commands. Do not rely on the main conversation history.
 
@@ -26,9 +26,9 @@ Choose or adapt angles when the work calls for it:
 - Docs-heavy changes: include clarity, accuracy, completeness, reader flow, and non-robotic prose.
 - Large multi-file changes: consider a fourth reviewer for structural friction, module boundaries, and testability.
 
-Prefer three strong reviewers over many vague reviewers.
+For a genuinely simple read-only review, use at most one Luna-high reviewer and give it a context-complete packet containing the exact diff/ref, relevant source/contracts, acceptance criteria, user constraints, and validation command. Use multiple reviewers only for independent high-impact risks with explicit justification. Prefer parent review or one strong context-complete reviewer over fanout.
 
-Give every reviewer a specific task prompt naming its angle. Ask reviewers to return concise, evidence-backed findings with file/line references and suggested fixes. Filter on evidence, not severity: a finding must be concrete, current, caused or made reachable by the target diff, and supported by source proof, a test or repro, or a contract contradiction. Label findings P0/P1/P2. P0 blocks merge. P1 should be fixed before release. P2 is report-only. End each review with `Merge verdict: BLOCK`, `Merge verdict: OK`, or `Merge verdict: OK with notes`. If nothing qualifies, ask the reviewer to say exactly `No issues found.` The response should be review feedback, not a context summary. Reviewers must not edit files unless I explicitly ask for a writer pass.
+Give every reviewer a specific task prompt naming its angle. Ask reviewers to return concise, evidence-backed findings with file/line references and suggested fixes. Filter on evidence, not severity: a finding must be concrete and current within the named review target, and supported by source proof, a test or repro, or a contract contradiction. For a diff review, require that the issue is caused or made reachable by that diff. Label findings P0/P1/P2. P0 blocks merge. P1 should be fixed before release. P2 is report-only. End each review with `Merge verdict: BLOCK`, `Merge verdict: OK`, or `Merge verdict: OK with notes`. If nothing qualifies, ask the reviewer to say exactly `No issues found.` The response should be review feedback, not a context summary. Reviewers must not edit files unless I explicitly ask for a writer pass.
 
 Do not default first-pass reviews to `blockers only`. That phrase is valid only for final pre-merge re-checks after P1/P2 findings are already inventoried, or for explicit emergency hotfix lanes where non-blocking findings are intentionally deferred.
 

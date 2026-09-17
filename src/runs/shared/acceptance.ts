@@ -11,6 +11,7 @@ import type {
 	AcceptanceLedger,
 	AcceptanceLevel,
 	AcceptanceReport,
+	AcceptanceReviewGate,
 	AcceptanceRole,
 	AcceptanceRuntimeCheck,
 	AcceptanceRuntimeCheckStatus,
@@ -49,7 +50,7 @@ const VALID_EVIDENCE_KINDS: AcceptanceEvidenceKind[] = [
 const VALID_EVIDENCE = new Set<AcceptanceEvidenceKind>(VALID_EVIDENCE_KINDS);
 const ACCEPTANCE_EVIDENCE_HELP = `Supported evidence kinds: ${VALID_EVIDENCE_KINDS.join(", ")}. Example: { level: "checked", evidence: ["commands-run", "changed-files"] }.`;
 const ACCEPTANCE_OBJECT_EXAMPLE = "Example: { level: \"checked\", evidence: [\"commands-run\", \"changed-files\"] }.";
-const ACCEPTANCE_CONFIG_KEYS = new Set(["level", "report", "criteria", "evidence", "verify", "review", "stopRules", "reason"]);
+const ACCEPTANCE_CONFIG_KEYS = new Set(["level", "report", "preserveStagedIndex", "criteria", "evidence", "verify", "review", "stopRules", "reason"]);
 const ACCEPTANCE_GATE_KEYS = new Set(["id", "must", "evidence", "severity"]);
 const ACCEPTANCE_VERIFY_KEYS = new Set(["id", "command", "timeoutMs", "cwd", "env", "allowFailure"]);
 const ACCEPTANCE_REVIEW_KEYS = new Set(["agent", "focus", "required"]);
@@ -105,11 +106,15 @@ function inferLevel(input: {
 	const inferredReadOnly = readOnlyTask || ((readOnlyAgent || input.acceptanceRole === "read-only") && !taskMayWrite);
 	const roleResolvesReadOnly = input.acceptanceRole !== undefined && inferredReadOnly;
 	const dynamicResolvesReadOnly = inferredReadOnly && !writeTask;
-	const keywordRiskReadOnly = input.acceptanceRole === undefined ? intent.kind === "read-only" : inferredReadOnly;
+	const riskyKeywordPattern = /\b(?:release|migration|migrate|security|data[- ]loss|destructive|post-review|fix pass)\b/;
+	// Topic keywords cannot override classified read-only intent; unknown tasks keep their risk gate.
+	const keywordRiskReadOnly = input.acceptanceRole === undefined
+		? intent.kind === "read-only"
+		: inferredReadOnly;
 	const risky = Boolean(input.async && writeTask)
 		|| (Boolean(input.dynamic) && !roleResolvesReadOnly && !dynamicResolvesReadOnly)
 		|| (Boolean(input.dynamicGroup) && !roleResolvesReadOnly && !dynamicResolvesReadOnly)
-		|| (!keywordRiskReadOnly && /\b(?:release|migration|migrate|security|data[- ]loss|destructive|post-review|fix pass)\b/.test(task));
+		|| (!keywordRiskReadOnly && riskyKeywordPattern.test(task));
 
 	if (risky) {
 		reasons.push(input.async ? "async write-capable or risky run" : "risky write-capable run");
@@ -262,6 +267,12 @@ export function validateAcceptanceInput(input: unknown, pathLabel = "acceptance"
 	if (value.report !== undefined && value.report !== "on" && value.report !== "off") {
 		errors.push(`${pathLabel}.report must be on or off.`);
 	}
+	if (value.preserveStagedIndex !== undefined && value.preserveStagedIndex !== true) {
+		errors.push(`${pathLabel}.preserveStagedIndex must be true when provided.`);
+	}
+	if (value.preserveStagedIndex === true && value.level !== "checked" && value.level !== "verified") {
+		errors.push(`${pathLabel}.preserveStagedIndex requires level checked or verified.`);
+	}
 	if (value.level === "none" && (typeof value.reason !== "string" || !value.reason.trim())) {
 		errors.push(`${pathLabel}.reason is required when level is none.`);
 	}
@@ -367,7 +378,7 @@ export function validateAcceptanceInput(input: unknown, pathLabel = "acceptance"
 	return errors;
 }
 
-export function validateExecutionAcceptance(input: {
+type ExecutionAcceptanceInput = {
 	acceptance?: unknown;
 	outputSchema?: unknown;
 	tasks?: Array<{ acceptance?: unknown; outputSchema?: unknown }>;
@@ -376,23 +387,39 @@ export function validateExecutionAcceptance(input: {
 		outputSchema?: unknown;
 		parallel?: Array<{ acceptance?: unknown; outputSchema?: unknown }> | { acceptance?: unknown; outputSchema?: unknown };
 	}>;
-}): string[] {
+};
+
+export function validateExecutionAcceptancePolicy(input: ExecutionAcceptanceInput): string[] {
 	const errors = validateAcceptanceInput(input.acceptance, "acceptance");
-	errors.push(...validateAcceptanceReportMode(input.acceptance, input.outputSchema, "acceptance"));
 	for (const [index, task] of (input.tasks ?? []).entries()) {
 		errors.push(...validateAcceptanceInput(task.acceptance, `tasks[${index}].acceptance`));
-		errors.push(...validateAcceptanceReportMode(task.acceptance, task.outputSchema, `tasks[${index}].acceptance`));
 	}
 	for (const [stepIndex, step] of (input.chain ?? []).entries()) {
 		errors.push(...validateAcceptanceInput(step.acceptance, `chain[${stepIndex}].acceptance`));
-		errors.push(...validateAcceptanceReportMode(step.acceptance, step.outputSchema, `chain[${stepIndex}].acceptance`));
 		if (Array.isArray(step.parallel)) {
 			for (const [taskIndex, task] of step.parallel.entries()) {
 				errors.push(...validateAcceptanceInput(task.acceptance, `chain[${stepIndex}].parallel[${taskIndex}].acceptance`));
-				errors.push(...validateAcceptanceReportMode(task.acceptance, task.outputSchema, `chain[${stepIndex}].parallel[${taskIndex}].acceptance`));
 			}
 		} else if (step.parallel) {
 			errors.push(...validateAcceptanceInput(step.parallel.acceptance, `chain[${stepIndex}].parallel.acceptance`));
+		}
+	}
+	return errors;
+}
+
+export function validateExecutionAcceptance(input: ExecutionAcceptanceInput): string[] {
+	const errors = validateExecutionAcceptancePolicy(input);
+	errors.push(...validateAcceptanceReportMode(input.acceptance, input.outputSchema, "acceptance"));
+	for (const [index, task] of (input.tasks ?? []).entries()) {
+		errors.push(...validateAcceptanceReportMode(task.acceptance, task.outputSchema, `tasks[${index}].acceptance`));
+	}
+	for (const [stepIndex, step] of (input.chain ?? []).entries()) {
+		errors.push(...validateAcceptanceReportMode(step.acceptance, step.outputSchema, `chain[${stepIndex}].acceptance`));
+		if (Array.isArray(step.parallel)) {
+			for (const [taskIndex, task] of step.parallel.entries()) {
+				errors.push(...validateAcceptanceReportMode(task.acceptance, task.outputSchema, `chain[${stepIndex}].parallel[${taskIndex}].acceptance`));
+			}
+		} else if (step.parallel) {
 			errors.push(...validateAcceptanceReportMode(step.parallel.acceptance, step.parallel.outputSchema, `chain[${stepIndex}].parallel.acceptance`));
 		}
 	}
@@ -405,7 +432,7 @@ function validateAcceptanceReportMode(acceptance: unknown, outputSchema: unknown
 	acceptance = normalized.value;
 	if (!acceptance || typeof acceptance !== "object" || Array.isArray(acceptance)) return [];
 	if (!("report" in acceptance)) return [];
-	return outputSchema === undefined ? [`${pathLabel}.report requires outputSchema.`] : [];
+	return outputSchema === undefined || outputSchema === false ? [`${pathLabel}.report requires outputSchema.`] : [];
 }
 
 function normalizeCriteria(criteria: Array<string | { id?: string; must?: string; evidence?: AcceptanceEvidenceKind[]; severity?: "required" | "recommended" }> | undefined, evidence: AcceptanceEvidenceKind[]): ResolvedAcceptanceGate[] {
@@ -450,6 +477,7 @@ export function resolveEffectiveAcceptance(input: {
 			inferredReason: [],
 			criteria,
 			evidence,
+			preserveStagedIndex: explicit.preserveStagedIndex,
 			verify: explicit.verify ?? [],
 			review: explicit.review,
 			stopRules: explicit.stopRules ?? [],
@@ -475,6 +503,7 @@ export function resolveEffectiveAcceptance(input: {
 		inferredReason: inferred.reasons,
 		criteria: level === "none" ? [] : criteria,
 		evidence: level === "none" ? [] : evidence,
+		preserveStagedIndex: explicit.preserveStagedIndex,
 		verify: explicit.verify ?? [],
 		review,
 		stopRules: explicit.stopRules ?? [],
@@ -484,6 +513,12 @@ export function resolveEffectiveAcceptance(input: {
 
 function acceptanceRequiresChildReport(acceptance: ResolvedAcceptanceConfig): boolean {
 	return acceptance.criteria.length > 0 || acceptance.evidence.length > 0;
+}
+
+/** Label a declared review gate the same way in prompts and capability summaries. */
+export function formatReviewGateLabel(review: AcceptanceReviewGate): string {
+	const status = review.required === false ? "optional" : "required";
+	return review.agent ? `${status} by ${review.agent}` : status;
 }
 
 export function formatAcceptancePrompt(acceptance: ResolvedAcceptanceConfig, options: { reportOptional?: boolean; structuredOutput?: boolean } = {}): string {
@@ -500,12 +535,15 @@ export function formatAcceptancePrompt(acceptance: ResolvedAcceptanceConfig, opt
 		"",
 		`Required evidence: ${acceptance.evidence.join(", ") || "none"}`,
 	];
+	if (acceptance.preserveStagedIndex) {
+		lines.push("The host will verify that the staged index is unchanged from launch; report noStagedFiles truthfully even when the preserved index is non-empty.");
+	}
 	if (acceptance.verify.length > 0) {
 		lines.push("", "Runtime verification commands configured by parent:");
 		for (const command of acceptance.verify) lines.push(`- ${command.id}: ${command.command}`);
 	}
 	if (acceptance.review) {
-		lines.push("", `Review gate: ${acceptance.review.required === false ? "optional" : "required"}${acceptance.review.agent ? ` by ${acceptance.review.agent}` : ""}.`);
+		lines.push("", `Review gate: ${formatReviewGateLabel(acceptance.review)}.`);
 		if (acceptance.review.focus) lines.push(`Review focus: ${acceptance.review.focus}`);
 	}
 	if (acceptance.stopRules.length > 0) {
@@ -1052,9 +1090,32 @@ function checkNoStagedFiles(cwd: string): AcceptanceRuntimeCheck {
 		: { id: "no-staged-files", status: "failed", message: `Staged files present: ${staged.join(", ")}` };
 }
 
+/** Capture the repository-wide index tree. Throws when Git cannot provide trustworthy evidence. */
+export function captureStagedIndexBaseline(cwd: string): string {
+	const result = spawnSync("git", ["write-tree"], { cwd, encoding: "utf-8", windowsHide: true });
+	const oid = result.stdout.trim();
+	if (result.status !== 0 || !oid) {
+		const detail = result.stderr.trim();
+		throw new Error(`Unable to capture staged index baseline${detail ? `: ${detail}` : "."}`);
+	}
+	return oid;
+}
+
+function checkStagedIndexUnchanged(cwd: string, baseline: string): AcceptanceRuntimeCheck {
+	try {
+		const terminal = captureStagedIndexBaseline(cwd);
+		return terminal === baseline
+			? { id: "staged-index-unchanged", status: "passed", message: "Staged index matches the launch baseline." }
+			: { id: "staged-index-unchanged", status: "failed", message: "Staged index changed after launch." };
+	} catch (error) {
+		return { id: "staged-index-unchanged", status: "failed", message: error instanceof Error ? error.message : String(error) };
+	}
+}
+
 function runStructuralChecks(acceptance: ResolvedAcceptanceConfig, report: AcceptanceReport, cwd: string): AcceptanceRuntimeCheck[] {
 	const checks: AcceptanceRuntimeCheck[] = [];
 	for (const kind of acceptance.evidence) {
+		if (kind === "no-staged-files" && acceptance.preserveStagedIndex) continue;
 		if (kind === "no-staged-files" && report.noStagedFiles === undefined) continue;
 		const status = reportEvidenceStatus(report, kind);
 		checks.push({
@@ -1067,7 +1128,7 @@ function runStructuralChecks(acceptance: ResolvedAcceptanceConfig, report: Accep
 					: `${kind} evidence missing from child report.`,
 		});
 	}
-	if (acceptance.evidence.includes("no-staged-files")) checks.push(checkNoStagedFiles(cwd));
+	if (!acceptance.preserveStagedIndex && acceptance.evidence.includes("no-staged-files")) checks.push(checkNoStagedFiles(cwd));
 	return checks;
 }
 
@@ -1360,6 +1421,8 @@ export async function evaluateAcceptance(input: {
 	acceptance: ResolvedAcceptanceConfig;
 	output: string;
 	cwd: string;
+	/** Host-captured launch index tree; required by preserveStagedIndex. */
+	stagedIndexBaseline?: string;
 	/**
 	 * Content the child sent to its configured output file (from its own write
 	 * tool calls, not from disk, so a concurrent writer to the same path cannot
@@ -1394,7 +1457,7 @@ export async function evaluateAcceptance(input: {
 	if (input.watchdog) {
 		const unresolved = unresolvedChildWatchdogBlockers(input.watchdog);
 		ledger.runtimeChecks.push(unresolved.length
-			? { id: "watchdog-blocker", status: "failed", message: `Unresolved watchdog blocker: ${unresolved[0]!.summary}` }
+			? { id: "watchdog-blocker", status: "failed", message: "Unresolved watchdog blocker (details are available in child watchdog status)." }
 			: { id: "watchdog-blocker", status: "passed", message: "No unresolved watchdog blockers." });
 	}
 
@@ -1455,30 +1518,34 @@ export async function evaluateAcceptance(input: {
 			ledger.runtimeChecks.push({ id: "verification-config", status: "failed", message: "verified acceptance requires runtime verify commands." });
 			ledger.status = "rejected";
 			ledger.evidenceStatus = "rejected";
-			return ledger;
-		}
-		ledger.verifyRuns = [];
-		for (const command of acceptance.verify) {
-			ledger.verifyRuns.push(await runMemoizedVerifyCommand(command, input.cwd, {
-				signal: input.signal,
-				abortMessage: input.abortMessage,
-				artifactsDir: input.artifactsDir,
-				runId: input.runId,
-			}));
-			if (input.signal?.aborted) break;
-		}
-		if (ledger.verifyRuns.some((run) => run.status === "failed" || run.status === "timed-out")) {
-			ledger.status = "rejected";
-			ledger.evidenceStatus = "rejected";
-			return ledger;
-		}
-		if (!ledger.runtimeChecks.some((check) => check.status === "failed")) {
-			ledger.status = "verified";
-			ledger.evidenceStatus = "verified";
+		} else {
+			ledger.verifyRuns = [];
+			for (const command of acceptance.verify) {
+				ledger.verifyRuns.push(await runMemoizedVerifyCommand(command, input.cwd, {
+					signal: input.signal,
+					abortMessage: input.abortMessage,
+					artifactsDir: input.artifactsDir,
+					runId: input.runId,
+				}));
+				if (input.signal?.aborted) break;
+			}
+			if (ledger.verifyRuns.some((run) => run.status === "failed" || run.status === "timed-out")) {
+				ledger.status = "rejected";
+				ledger.evidenceStatus = "rejected";
+			} else if (!ledger.runtimeChecks.some((check) => check.status === "failed")) {
+				ledger.status = "verified";
+				ledger.evidenceStatus = "verified";
+			}
 		}
 	}
 
-	if (ledger.runtimeChecks.some((check) => check.status === "failed")) {
+	if (acceptance.preserveStagedIndex) {
+		ledger.runtimeChecks.push(input.stagedIndexBaseline
+			? checkStagedIndexUnchanged(input.cwd, input.stagedIndexBaseline)
+			: { id: "staged-index-unchanged", status: "failed", message: "Staged index launch baseline is unavailable." });
+	}
+
+	if (ledger.status === "rejected" || ledger.runtimeChecks.some((check) => check.status === "failed")) {
 		ledger.status = "rejected";
 		ledger.evidenceStatus = "rejected";
 		return ledger;

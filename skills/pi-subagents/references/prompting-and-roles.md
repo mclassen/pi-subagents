@@ -8,12 +8,17 @@ Parent extensions may register a session-scoped, out-of-band ceiling through `pi
 
 ## When to Use
 
-- **Complex work orchestration**: start the parent on Luna high, use Luna xhigh for bounded difficult implementation or concrete reproducible failures, and escalate to Sol medium when actual code/context complexity, causal debugging, coordination, mixed work, or final-review evidence requires it. Delegate only when another child materially improves evidence, independent review, or isolated execution; omission failures are cheaper than unnecessary commissions. For genuinely complex orchestration or root-cause questions, suggest Sol high but require explicit user selection; if selected, keep it to a bounded read-only critic/oracle review, never an autonomous root. Complex means the task has multiple moving parts, unclear acceptance, cross-cutting code, meaningful user-visible impact, expensive or irreversible validation, broad review surface, or the user asks for orchestration. Lightweight one-off delegation can stay lightweight.
-- **Advisory review**: use fresh-context `reviewer` agents for adversarial code review; fork to `oracle` only for rare escalation where inherited decisions, drift, model routing, root cause, or hard tradeoffs matter
+All launch guidance below assumes delegation was requested by the operator in
+the current request or applicable user/project instructions. Complexity,
+workflow fit, and potential quality gains help choose a shape after that gate;
+they do not authorize a launch.
+
+- **Complex work orchestration**: start the parent on Luna high, use Luna xhigh for bounded difficult implementation or concrete reproducible failures, and escalate to Sol medium when actual code/context complexity, causal debugging, coordination, mixed work, or final-review evidence requires it. Delegate only when another child materially improves evidence, independent review, specialization, useful parallelism, or isolated execution; omission failures are cheaper than unnecessary commissions. For genuinely complex orchestration or root-cause questions, Sol high is manual-only and reserved for the most complex cases. If selected, keep it to direct parent reasoning or a bounded read-only critic/oracle review, never an autonomous root. Lightweight one-off delegation can stay lightweight.
+- **Advisory review**: a Sol-medium or Sol-high parent reviews directly by default. Use at most one Luna-high `reviewer` only for a genuinely simple read-only review with a context-complete packet; use multiple reviewers only for independent high-impact risks with explicit justification. Fork to `oracle` only for rare escalation where inherited decisions, drift, model routing, root cause, or hard tradeoffs matter.
 - **Implementation handoff**: have `oracle` advise when needed; parent implements the approved direction unless a frozen mechanical slice independently passes the user/global child-writer gate
 - **Recon and planning**: use `scout`, then write a plan when needed
 - **Parallel exploration**: run multiple non-conflicting tasks concurrently
-- **Regular skill specialists**: when discovery shows proactive skill subagent suggestions and the current work is broad enough, launch a small fresh-context fanout that asks one subagent per relevant regularly used skill to apply that skill's perspective to the task
+- **Regular skill specialists**: when authorized delegation names or benefits from a relevant specialization, discovery suggestions may help select a small fresh-context fanout
 - **Long-running work**: launch async/background runs and inspect them later. For mutation-capable work, bound the delivery slice and elapsed runtime, then request checkpoints after active tool work returns. Reserve hard tool-call caps for explicitly read-only children.
 - **Subagent control**: watch needs-attention signals and soft-interrupt only when a delegated run is genuinely blocked
 - **Agent authoring**: create, update, or override project agents. Treat saved chain records as legacy inspection or migration inputs, not as a current authoring target.
@@ -29,7 +34,7 @@ Agents use the `subagent(...)` tool for execution, management, status, and contr
 - `/subagents-detach [run-id]` — detach an active foreground single-subagent run without terminating its child
 - `/subagents-steer <run-id> [--child <child-id>] <message>` — steer a live async run (or one child of it) from non-TUI sessions and RPC hosts
 - `/subagent-cost` — show parent plus child token usage and cost for the session
-- `/subagents-fleet` — open the live fleet inspector with per-child controls; `Ctrl+Alt+F` opens it during an active foreground turn, `↑↓`/`jk` selects children, `PgUp`/`PgDn` scrolls transcript detail, `s` steers the selected live async child, and `D` stops its top-level async run after confirmation
+- `/subagents-fleet` — open the live fleet inspector with per-child controls; `↑↓`/`jk` selects children, `PgUp`/`PgDn` scrolls transcript detail, `s` steers the selected live async child, and `D` stops its top-level async run after confirmation
 - `/subagents-watchdog` — inspect or configure the opt-in adversarial change watchdog (model, on/off, recommend-model, check)
 - `/subagents-doctor` — diagnose setup, discovery, async paths, and intercom bridge state
 - `/subagents-models [agent]` — show the live runtime-loaded builtin model mapping
@@ -39,7 +44,7 @@ Agents use the `subagent(...)` tool for execution, management, status, and contr
 Prefer the tool when you are writing agent logic. Prefer the slash commands when
 you are guiding a human through an interactive flow.
 
-Packaged prompt shortcuts are also available for repeatable workflows. Treat them as reusable orchestration recipes, not just human slash commands. When the user asks for one of these shapes, or when the workflow clearly fits, apply the same pattern directly with `subagent(...)` and other tools:
+Packaged prompt shortcuts are also available for repeatable workflows. Treat them as reusable orchestration recipes, not just human slash commands. When the user asks for one of these shapes, apply the same pattern directly with `subagent(...)` and other tools:
 - `/parallel-review` — fresh-context reviewers with distinct review angles, then synthesis
 - `/review-loop` — parent-orchestrated worker, fresh-reviewer, and fix-worker cycles until clean or capped
 - `/parallel-research` — combine `researcher` and `scout` for external evidence plus local code context
@@ -53,7 +58,7 @@ The prompt templates in `prompts/` encode workflows the parent agent can run on 
 
 ### Commission-risk and cold-start packets
 
-Delegate only when the child materially improves evidence, independent review, or isolated execution; do not manufacture parallelism. Every child packet must be cold-start complete: state the goal, exact target/cwd/ref, authority and edit boundary, relevant context/evidence, success criteria, validation, output, and stop/escalation rules. For an orchestration audit by the critic tier, make the child read-only and request at most three omissions, each cited to a file, line, or decision; high thinking is an explicit escalation, not a default.
+After the operator-authority gate above, delegate only when the child materially improves evidence, independent review, specialization, useful parallelism, or isolated execution; do not manufacture parallelism. Every child packet must be cold-start complete: state the goal, exact target/cwd/ref, authority and edit boundary, relevant context/evidence, success criteria, validation, output, and stop/escalation rules. For an orchestration audit by the critic tier, make the child read-only and request at most three omissions, each cited to a file, line, or decision; high thinking is an explicit escalation, not a default.
 
 ### Council Mode technique
 
@@ -63,11 +68,11 @@ Council advisors are read-only. User or project `council-*` profiles choose allo
 
 ### Parallel review technique
 
-Use this when the user wants adversarial review of a diff, plan, issue, file, or implemented work. Launch fresh-context `reviewer` agents with distinct angles generated from the actual target. Common angles are correctness/regressions, tests/validation, and simplicity/maintainability; adapt for TypeScript, UI, security, docs, or large structural changes. Reviewers should inspect files and diffs directly, return concise evidence-backed findings with file/line references, and avoid edits unless the user explicitly asks for a writer pass. Filter on evidence, not severity: report only concrete current issues caused or made reachable by the target diff, with source proof, a test or repro, or a contract contradiction. Label findings P0/P1/P2 and end with `Merge verdict: BLOCK`, `Merge verdict: OK`, or `Merge verdict: OK with notes`. Use `blockers only` only for final pre-merge re-checks after P1/P2 findings are already captured, or for explicit emergency hotfix lanes where non-blocking findings are intentionally deferred. For targeted follow-up, ask only whether the named finding was resolved, whether the fix introduced a new defect in the fix blast radius, and whether prior P1/P2 notes still stand. For bot or PR-comment triage, classify each comment as VALID, STALE, INVALID, or OUT-OF-POLICY against current HEAD, then assign P0/P1/P2 only to VALID comments. The parent synthesizes fixes worth doing now, optional improvements, and feedback to ignore/defer before applying anything.
+Use this when the user wants adversarial review of a diff, plan, issue, file, or implemented work. The parent reviews directly by default when running at Sol Medium or Sol High. For a genuinely simple read-only review, one fresh-context Luna-high `reviewer` is allowed only with a context-complete packet: exact target diff/ref, relevant source and contracts, acceptance criteria, user constraints, and exact validation command. Do not launch one or two Luna reviewers as a default pattern. Multiple reviewers require independent high-impact risks and explicit justification. Reviewers should inspect files and diffs directly, return concise evidence-backed findings with file/line references, and avoid edits unless the user explicitly asks for a writer pass. Filter on evidence, not severity: report only concrete current issues caused or made reachable by the target diff, with source proof, a test or repro, or a contract contradiction. Label findings P0/P1/P2 and end with `Merge verdict: BLOCK`, `Merge verdict: OK`, or `Merge verdict: OK with notes`. Use `blockers only` only for final pre-merge re-checks after P1/P2 findings are already captured, or for explicit emergency hotfix lanes where non-blocking findings are intentionally deferred. For targeted follow-up, ask only whether the named finding was resolved, whether the fix introduced a new defect in the fix blast radius, and whether prior P1/P2 notes still stand. For bot or PR-comment triage, classify each comment as VALID, STALE, INVALID, or OUT-OF-POLICY against current HEAD, then assign P0/P1/P2 only to VALID comments. The parent synthesizes fixes worth doing now, optional improvements, and feedback to ignore/defer before applying anything.
 
 ### Proactive skill-specialist technique
 
-Use this when `{ action: "list" }` reports proactive skill subagent suggestions and the user's task would benefit from perspectives the parent regularly uses. These suggestions are conservative: a skill is recommended only when it is available and referenced repeatedly by configured agents or saved chains. Treat the list as an opt-in hint for the current task, not a command to always fan out.
+Use this only within operator-authorized delegation when `{ action: "list" }` reports skill subagent suggestions relevant to the requested handoff. Availability is a selection hint, not authority or a command to fan out.
 
 Default guardrails:
 - Keep the fanout small: usually one or two skill-specialist children, never more than the listed recommendations or configured cap.
@@ -93,7 +98,7 @@ subagent({
 
 ### Review-loop technique
 
-Use this when implementation or current-diff review should continue until no fixes worth doing now remain. Keep ownership in the parent. Before every iteration, the parent classifies the next causal slice and codes it directly by default—especially when Sol—or delegates only a frozen mechanical slice that independently passes the user/global eligibility gate. Fresh isolated reviewers inspect the resulting integrated target; parent synthesizes and decides ownership again. Never pre-script writer → reviewers → next writer for uncertain work, and never let an iteration quota force child implementation. Treat eligible worker handoffs as intermediate until parent inspection, integration, and validation. Stop on no P0/P1 work, optional/deferred feedback, an unapproved decision, or the configured round cap.
+Use this when implementation or current-diff review should continue until no fixes worth doing now remain. Keep ownership in the parent. Before every iteration, the parent classifies the next causal slice and codes it directly by default—especially when Sol—or delegates only a frozen mechanical slice that independently passes the user/global eligibility gate. Fresh isolated reviewers inspect the resulting integrated target; parent synthesizes and decides ownership again. At round 2 and every second round thereafter, reread the applicable global Pi `~/.pi/agent/AGENTS.md` and nearest target-repository `AGENTS.override.md`/`AGENTS.md` from the exact repo/cwd, then include any changed constraints in reviewer packets. This refresh does not add rounds. Never pre-script writer → reviewers → next writer for uncertain work, and never let an iteration quota force child implementation. Treat eligible worker handoffs as intermediate until parent inspection, integration, and validation. Stop on no P0/P1 work, optional/deferred feedback, an unapproved decision, or the configured round cap.
 
 As a conservative orchestration policy, do not pass a hard `toolBudget` to an implementation worker, fix worker, reviewer with edit authority, or other mutation-capable child. The default tool budget blocks read/search tools rather than mutation tools, but count limits still do not measure delivery safety. Use a narrow task plus an outer elapsed deadline with enough margin, then request a checkpoint after the current tool returns. The checkpoint should report changed files, build/test state, remaining work, and commit or PR state. An elapsed timeout is not a mutation-safe boundary and must not be used as the checkpoint trigger.
 
@@ -105,11 +110,11 @@ Use this when the question needs both external evidence and local implications. 
 
 ### Gather-context-and-clarify technique
 
-Use this only when independent local or external context lanes clearly beat direct parent inspection. Launch `scout` or `researcher` only for an obviously context-light, independently verifiable question. Ask for concise findings plus unresolved questions; parent synthesizes and uses `interview` only when clarification remains necessary.
+Use this when the operator requests delegated context gathering and independent local or external lanes clearly beat direct parent inspection. Launch `scout` for an obviously context-light, independently verifiable local question and `researcher` only when external docs, recent sources, ecosystem context, or primary evidence would materially improve understanding. Ask for concise findings plus unresolved questions; parent synthesizes and uses `interview` only when clarification remains necessary before planning or implementing.
 
 ### Parallel cleanup technique
 
-Use this after implementation when the user wants cleanup review or when a final pass would reduce AI-slop. Launch two fresh-context `reviewer` tasks with `output: false` and `progress: false`: one deslop pass and one verbosity pass. If the `deslop` or `verbosity-cleaner` skills are available, pass the relevant skill to that reviewer; otherwise inline the criteria. Both reviewers are review-only and should flag concrete issues with severity, file/line references, and smallest safe fixes. Phrase the constraint as “Do not modify project/source files; returning findings through the configured output artifact is allowed” when you use `output` or `outputMode: "file-only"`. The parent decides what to apply and asks before making changes unless cleanup was already authorized.
+Use this after implementation when the user or applicable instructions request delegated cleanup review. Launch two fresh-context `reviewer` tasks with `output: false` and `progress: false`: one deslop pass and one verbosity pass. If the `deslop` or `verbosity-cleaner` skills are available, pass the relevant skill to that reviewer; otherwise inline the criteria. Both reviewers are review-only and should flag concrete issues with severity, file/line references, and smallest safe fixes. Phrase the constraint as “Do not modify project/source files; returning findings through the configured output artifact is allowed” when you use `output` or `outputMode: "file-only"`. The parent decides what to apply and asks before making changes unless cleanup was already authorized.
 
 ### Staged fix orchestration technique
 
@@ -159,7 +164,7 @@ For one run, use inline config:
 
 For persistent tweaks, edit `subagents.agentOverrides` in user or project settings. User overrides apply everywhere. Project overrides apply only in that repo and win over user overrides. Use `/subagents-models` or `subagent({ action: "models" })` to inspect the live mapping after settings and overrides load.
 
-Provider-scoped entries can layer on top of the default override for the active parent session provider. The provider is selected once from the parent model before child model fallback starts, so fallback attempts cannot switch configuration. Within each settings file, the provider entry wins per field; project settings still win over user settings.
+Provider-scoped entries can layer on top of the default override for the active parent session provider. The provider is selected once from the parent model. Within each settings file, the provider entry wins per field; project settings still win over user settings.
 
 ```json
 {
@@ -217,7 +222,6 @@ Direct settings example:
       "reviewer": {
         "model": "provider/strong-review-model",
         "thinking": "high",
-        "fallbackModels": ["backup-provider/strong-review-model"],
         "acceptanceRole": "read-only"
       }
     }
@@ -225,7 +229,7 @@ Direct settings example:
 }
 ```
 
-Useful override fields: `description`, `model`, `fallbackModels`, `thinking`,
+Useful override fields: `description`, `model`, `thinking`,
 `systemPromptMode`, `inheritProjectContext`, `inheritGlobalContext`, `inheritSkills`, `defaultContext`,
 `acceptanceRole`, `disabled`, `skills`, `tools`, `extensions`, and `systemPrompt`.
 `description` replaces the discovered description for builtin and custom agents
@@ -235,11 +239,11 @@ agent with the same name only when you want a substantially different agent.
 
 ### Recommended model tiering (optional)
 
-Start the parent/orchestrator on Luna high because omission failures are cheaper than unnecessary commissions; use Luna xhigh for bounded difficult implementation or concrete reproducible failures, then escalate to Sol medium only when concrete complexity, causal debugging, coordination, mixed work, or final-review evidence requires it. When delegation independently qualifies, use Luna high for scouts, research, tests, verification, and focused review; use Luna xhigh for a frozen bounded implementation slice. Use Sol medium for final review and ordinary decision-consistency work; suggest Sol high for genuinely complex bounded critic/oracle/root-cause audits or consequential review after ordinary evidence is insufficient, but require explicit user selection. Terra is a manual comparison fallback only, and Luna max is never automatic. Explicit parent/user model policy wins over these recommendations.
+Start the parent/orchestrator on Luna high because omission failures are cheaper than unnecessary commissions; use Luna xhigh for bounded difficult implementation or concrete reproducible failures, then escalate to Sol medium only when concrete complexity, causal debugging, coordination, mixed work, or final-review evidence requires it. When delegation independently qualifies, use Luna high for scouts, research, tests, verification, and focused review; use Luna xhigh for a frozen bounded implementation slice. Use Sol medium for high-stakes final review, final/adversarial review of high-impact code, and decision-consistency work after concrete Luna insufficiency, conflicting evidence, or materially consequential synthesis. Sol high is manual-only and reserved for the most complex scenarios possible. Terra is a manual comparison fallback only, and Luna max is never automatic. Explicit parent/user model policy wins over these recommendations.
 
 Examples are illustrative, not requirements. Map these tiers to concrete models in user/project settings or a profile. A non-OpenAI setup should choose comparable available models by capability.
 
-Use `fallbackModels` when a tier has provider quota or availability risk. Prefer fresh context for cross-provider children when inherited provider-specific reasoning blocks would force thinking off.
+Each child launch uses one resolved model exactly once. If quota or availability fails, surface that failure and let the parent or operator explicitly launch a later attempt with another model. Forked children keep their requested thinking level even when provider-specific reasoning blocks are stripped from the inherited transcript.
 
 If a provider rejects model IDs with thinking suffixes, use
 `subagents.disableThinking: true` in user or project settings to clear bundled

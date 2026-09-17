@@ -14,7 +14,7 @@
 pi install npm:pi-subagents
 ```
 
-That is the only required step. Background children require pi installed as the npm package (`@earendil-works/pi-coding-agent`): the detached runner imports pi's packages from that package directory. A standalone single-file pi binary has no package directory and cannot run background children; foreground children (`async: false`) still work there.
+That is the only required step. Background children use the host's SDK: npm Pi keeps its detached Node runner; the official Pi 0.85.1 Linux x64 standalone release loads the same runner through Pi's embedded SDK, without a separate SDK install. See [Standalone background execution](docs/standalone-background.md) for the supported boundary and validation gate.
 
 ## Try this first
 
@@ -57,13 +57,14 @@ The extension ships with agents you can use immediately:
 | Agent | Use it when you want... |
 |-------|--------------------------|
 | `scout` | Fast local codebase recon: relevant files, entry points, data flow, risks. |
-| `researcher` | Web/docs research with sources and a concise research brief. |
+| `researcher` | Web/docs research with sources and a concise research brief. Requires [pi-web-access in the child](docs/agents.md#web-research-prerequisites). |
+| `evidence-auditor` | Independently checks whether important research claims are supported by their sources. Requires [pi-web-access in the child](docs/agents.md#web-research-prerequisites). |
 | `worker` | Implementation work. Edits files, validates, escalates unapproved decisions instead of guessing. |
 | `reviewer` | Code review and small fixes against the task/plan, tests, edge cases, and simplicity. |
 | `oracle` | A second opinion before acting. Challenges assumptions without editing. |
 | `delegate` | A lightweight general delegate that behaves close to the parent session. |
 
-Rule of thumb: `scout` before you understand the code, `researcher` before you trust external facts, `worker` to implement, `reviewer` to check, and `oracle` when the decision itself feels risky.
+Rule of thumb: `scout` before you understand the code, `researcher` before you trust external facts, `evidence-auditor` before you rely on important research, `worker` to implement, `reviewer` to check, and `oracle` when the decision itself feels risky.
 
 ## Common workflows
 
@@ -87,7 +88,7 @@ The package includes `/council` and `council-mode`, plus documented model-based
 | See running work | "Show active async runs." or "Show the subagent fleet." |
 | Check setup | "Check whether subagents are configured correctly." |
 
-For implementation work, the recommended loop is `clarify → scout → worker → fresh reviewers → worker`. Packaged prompt shortcuts like `/parallel-review` and `/review-loop` make these patterns repeatable — see [Workflows](https://github.com/nicobailon/pi-subagents/blob/main/docs/workflows.md).
+For implementation work, use the smallest loop that proves the change: `clarify → (optional scout) → parent implementation/review`; add one context-complete Luna reviewer only for a genuinely simple review, or justified independent reviewers for high-impact risks. A Sol parent reviews directly by default. Packaged prompt shortcuts like `/parallel-review` and `/review-loop` are explicit tools, not mandatory ceremony — see [Workflows](https://github.com/nicobailon/pi-subagents/blob/main/docs/workflows.md).
 
 ## Where running work shows up
 
@@ -116,7 +117,7 @@ The full reference lives in `docs/`:
 | Doc | What's in it |
 |-----|--------------|
 | [Agents](https://github.com/nicobailon/pi-subagents/blob/main/docs/agents.md) | Custom agents, frontmatter reference, overriding builtins, tools, extensions, skills, per-agent memory. |
-| [Models](https://github.com/nicobailon/pi-subagents/blob/main/docs/models.md) | Default models, per-role overrides, recommended tiering, fallbacks, thinking levels, model scope enforcement, profiles. |
+| [Models](https://github.com/nicobailon/pi-subagents/blob/main/docs/models.md) | Single-model selection and launch, defaults, per-role overrides, recommended tiering, thinking levels, model scope enforcement, profiles. |
 | [Workflows](https://github.com/nicobailon/pi-subagents/blob/main/docs/workflows.md) | Orchestration patterns, prompt shortcuts, scripted workflows, worktree isolation, child-to-parent coordination, the recursion guard. |
 | [Watchdog](https://github.com/nicobailon/pi-subagents/blob/main/docs/watchdog.md) | The opt-in adversarial change reviewer, scope monitoring, LSP checks, and child tool permissions. |
 | [Tool reference](https://github.com/nicobailon/pi-subagents/blob/main/docs/tool-reference.md) | Every `subagent` parameter, management actions, status/control actions, acceptance gates, external CLI runners. |

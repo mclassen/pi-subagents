@@ -1,17 +1,21 @@
 ---
 name: pi-subagents
 description: |
-  Delegate to builtin or custom subagents for single-agent handoffs, parallel
-  review, scripted chaining, async work, forked context, and coordinated
-  workflows. Use when one parent agent should stay in control while children
-  supply focused context, planning, review, or execution.
+  Technical guidance for operator-requested delegation to builtin or custom
+  subagents: bounded handoffs, parallel review, scripted workflows, async work,
+  forked context, isolation, and coordinated execution.
 ---
 
 # Pi Subagents
 
-Choose a mode subject to user/global delegation eligibility:
+The parent works directly by default. Invoke subagents only when the operator
+requested delegation in the current request or through applicable user/project
+instructions. Task size, complexity, risk, tool-call count, recipe fit, or an
+available specialist does not independently authorize delegation.
 
-- **Direct mode:** The parent handles focused, serial, context-heavy, or causally coupled work directly. Skip workflow ceremony.
+Once authorized, choose the smallest bounded mode that earns its token and elapsed-time overhead:
+
+- **Direct mode:** The parent handles focused, serial, context-heavy, or causally coupled work directly. Skip workflow ceremony. A Sol parent (medium or high) reviews and reasons directly by default; do not reflexively commission one or two Luna reviewers.
 - **Orchestrator mode:** Use only for eligible independent child lanes that materially improve evidence, review, or isolated execution. The parent remains causal owner and default coder—especially when Sol—and keeps user intent, constraints, authority, routing, arbitration, integration, final acceptance, and publication. Child implementation is limited to frozen mechanical slices that independently pass the writer gate; never prescribe writer → review → writer merely because work is substantial.
 
 This skill is for the root parent orchestrator only; do not inject or follow it inside children. Ordinary children do not launch subagents. An explicitly assigned fanout child whose resolved `tools` includes `subagent` may spawn one further level only for assigned work. Nested writers require separate managed temporary worktrees/clones, non-overlapping contracts, and scoped commits or captured patches. Nested children cannot recurse, merge, or integrate; the intermediate synthesizes for the root.
@@ -39,6 +43,18 @@ use ordinary `runs.run(...)` / `runs.all(...)`. See the [canonical staged-lane
 example](../../docs/workflows.md#parallel-sequential-lanes). Keep assignments
 bounded, but do not add stages or ceremony just to satisfy this skill.
 
+When composing `runs.run(...)`, `runs.all(...)`, or `runs.lanes(...)`, always
+supply a short verb + behavior display `label` derived from the task, unless
+the user supplied an explicit label; preserve that label. Keep the stable
+machine `key` independent (for example, `issue2011-writer` with
+`label: "Fix workflow steering"`). For `runs.lanes`, put labels on stage
+items, not lane objects. Use stage-appropriate labels for reviews and retained-child
+follow-ups too (for example, `Review workflow steering`). Generate labels in
+the orchestrator while composing the launch—no extra model call, runtime
+generator, or schema change. Native direct `{ agent, task }` calls have no
+top-level `label` parameter; do not invent one or wrap a tiny single task in
+a workflow just to label it.
+
 Use async/background by default. Set `async:false` only when the parent must
 block. Final reviews, validation gates, oracle checks, and publication checks
 stay async.
@@ -60,6 +76,8 @@ that runner explicitly supports the option.
 
 ## Read the reference for the branch
 
+For exact API fields and worked examples, call `subagent({action:"guide",topic:"tool-reference"})` or `topic:"workflows"`. The compact tool definition is not the recipe catalog; use `topic:"missions"` for mission updates and schedules.
+
 | Branch | Read |
 | --- | --- |
 | Delegate or choose roles, prompts, models, or slash commands | `references/prompting-and-roles.md` |
@@ -69,14 +87,14 @@ that runner explicitly supports the option.
 | List, create, edit, disable, eject, or expose agents/RPC | `references/management-authoring-rpc.md` |
 | Check safety constraints, recipes, or error handling | `references/constraints-and-recipes.md` |
 
-For complex work, read `prompting-and-roles.md` and `execution-controls.md`, then
-load `review-and-validation.md` and `constraints-and-recipes.md` before launch or
-review.
+For an authorized complex delegated workflow, read `prompting-and-roles.md` and
+`execution-controls.md`, then load `review-and-validation.md` and
+`constraints-and-recipes.md` before launch or review.
 
 ## Operating rules
 
-- Delegation is subordinate to user/global eligibility policy. Keep work local unless a child is obviously independent, context-light, easily parallel, and independently verifiable with less packet/review cost than parent execution. A Sol parent codes by default; delegate implementation only for an eligible frozen mechanical slice. Avoid duplicate scouts, overlapping writers, vague prompts, and delegation merely because work is non-trivial or needs multiple tool calls.
-- Start the parent on Luna high and use Luna xhigh for bounded difficult implementation or concrete reproducible failures. Escalate to Sol medium only when actual code/context complexity, causal debugging, coordination, mixed work, or final-review evidence requires it; treat Sol medium as the normal automatic ceiling. For genuinely complex diagnosis, architecture, or consequential review, suggest Sol high but require explicit user selection. Route ordinary child scouting, research, tests, verification, and focused review to Luna high; route an eligible frozen writer slice to Luna xhigh.
+- Delegation is subordinate to user/global eligibility policy. Keep work local unless a child is obviously independent, context-light, easily parallel, and independently verifiable with less packet/review cost than parent execution. A Sol parent codes and reviews by default; delegate implementation only for an eligible frozen mechanical slice. Avoid duplicate scouts, overlapping writers, vague prompts, and delegation merely because work is non-trivial or needs multiple tool calls.
+- Start the parent on Luna high and use Luna xhigh for bounded difficult implementation or concrete reproducible failures. Escalate to Sol medium only when actual code/context complexity, causal debugging, coordination, mixed work, or final-review evidence requires it; treat Sol medium as the normal automatic ceiling. Sol high is manual-only and reserved for the most complex scenarios possible. Route ordinary child scouting, research, tests, verification, and focused review to Luna high; route an eligible frozen writer slice to Luna xhigh.
 - Terra is retired from automatic routing and Luna max is never automatic. Keep Terra manually selectable only as a representative comparison fallback; exact deployment overrides still belong in user/project settings or profiles.
 - Give every child a compact meta-prompt checklist: objective; repo/cwd/ref; authority/edit boundary; relevant files/contracts and constraints; success/acceptance criteria; validation; expected output/report; and stop/ask conditions. See `references/prompting-and-roles.md`.
 - Give every child a distinct isolated execution workspace/resource, including read-only children. For repository work, provision a managed temporary worktree/clone/snapshot containing the exact target; keep one writer per cwd/worktree. See `references/multi-lane-orchestration.md` for lane mechanics.
@@ -86,7 +104,7 @@ review.
 - Treat subagent workflow, child launch, prompt runtime, extension load, and child tooling setup failures as lane infrastructure blockers. Stop, report the exact failure and run/worktree state, verify a clean worktree or capture a partial diff, and use only a clear same-protocol retry or an owner-approved execution-mode fallback.
 - For cross-codebase work, record the repo, explicit `cwd`, authority boundary, and expected output before launch.
 - Make parallel prompts distinct by source seam, evidence, and decision. Do not clone prompts with only item numbers swapped.
-- Prefer fresh-context review/validation fanout, then synthesize and apply fixes in the parent.
+- Prefer parent review for Sol-medium or Sol-high work. A single Luna-high reviewer is permitted only for a genuinely simple, read-only review when the parent supplies a context-complete packet containing the exact target diff, relevant contracts/source, acceptance criteria, and validation command. Do not launch one or two Luna reviewers by default; multiple reviewers require independent high-impact risks and explicit justification.
 - For Pi extension repos under `~/.pi/agent/extensions`, put lane worktrees outside extension auto-discovery, such as `~/.pi/agent/worktrees`.
 - Preserve capability ceilings, including child tool limits and allowed-agent restrictions.
 - Preserve parent authority and escalate unresolved choices.

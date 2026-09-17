@@ -202,7 +202,7 @@ export async function executeWorkflowHostCommand(input: {
 			clearTimeout(timeout);
 			input.signal.removeEventListener("abort", onAbort);
 			const terminal = termination ? await termination : await processTree?.finishAfterWriterClose();
-			const cleanupError = process.platform !== "win32" && terminal?.state === "unknown" ? terminal.reason : undefined;
+			const cleanupError = terminal?.state === "unknown" ? terminal.reason : undefined;
 			const state = timedOut ? "timed-out" : stopped ? "stopped" : exitCode === 0 && !spawnError && !cleanupError ? "passed" : "failed";
 			const error = spawnError instanceof Error ? spawnError.message : spawnError ? String(spawnError) : cleanupError ? `Process-tree cleanup failed: ${cleanupError}.` : state === "timed-out" ? `Command timed out after ${input.params.timeoutMs}ms.` : state === "stopped" ? "Command stopped because the workflow was aborted." : state === "failed" ? `Command exited with code ${exitCode ?? "unknown"}.` : undefined;
 			try {

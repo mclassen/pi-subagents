@@ -1,6 +1,6 @@
 import type { AsyncJobStep, HostStepNode, WorkflowGraphNode, WorkflowGraphSnapshot, WorkflowPreflightLane, WorkflowPreflight } from "../shared/types.ts";
 import { sanitizeDisplayText } from "../shared/display-text.ts";
-import { workflowPreflightLaneForRuntimeKey } from "./workflow-preflight.ts";
+import { workflowPreflightLaneForRuntimeKey as laneFor } from "./workflow-preflight.ts";
 
 export type WorkflowChecklistState = "complete" | "running" | "queued" | "blocked" | "failed" | "paused" | "stopped";
 
@@ -186,12 +186,8 @@ function duration(step: Pick<WorkflowChecklistStep, "durationMs" | "startedAt" |
 	const startedAt = finite(step.startedAt);
 	if (explicit !== undefined) return Math.max(0, explicit);
 	if (startedAt === undefined) return undefined;
-	const end = state === "running" ? now : finite(step.endedAt) ?? now;
+	const end = state === "running" ? now : finite(step.endedAt);
 	return end === undefined ? undefined : Math.max(0, end - startedAt);
-}
-
-function laneFor(preflight: WorkflowPreflight | undefined, key: string, preferredKeys: readonly (string | undefined)[] = []): WorkflowPreflightLane | undefined {
-	return workflowPreflightLaneForRuntimeKey(preflight, key, preferredKeys);
 }
 
 function stepKey(step: WorkflowChecklistStep): string | undefined {
@@ -300,7 +296,7 @@ function priority(item: WorkflowChecklistItem): number {
 }
 
 function applyNow(item: WorkflowChecklistItem, now: number | undefined): WorkflowChecklistItem {
-	return item.durationMs === undefined && item.startedAt !== undefined && now !== undefined ? { ...item, durationMs: Math.max(0, now - item.startedAt) } : item;
+	return item.state === "running" && item.startedAt !== undefined && now !== undefined ? { ...item, durationMs: Math.max(0, now - item.startedAt) } : item;
 }
 
 function finalize(phase: WorkflowChecklistPhase): void {

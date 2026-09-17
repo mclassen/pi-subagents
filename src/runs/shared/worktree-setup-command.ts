@@ -19,6 +19,7 @@ export interface SetupCommandOptions {
 
 export interface SetupCommandResult {
 	stdout: string;
+	stdoutBuffer: Buffer;
 	stderr: string;
 	status: number | null;
 	signal: NodeJS.Signals | null;
@@ -46,7 +47,7 @@ export async function runSetupCommand(
 	options: SetupCommandOptions,
 ): Promise<SetupCommandResult> {
 	const result: SetupCommandResult = {
-		stdout: "", stderr: "", status: null, signal: null, outputIncomplete: false,
+		stdout: "", stdoutBuffer: Buffer.alloc(0), stderr: "", status: null, signal: null, outputIncomplete: false,
 	};
 	const maxBuffer = options.maxBuffer ?? 1024 * 1024;
 	if (!Number.isSafeInteger(maxBuffer) || maxBuffer <= 0) throw new Error("Invalid setup command maxBuffer");
@@ -84,7 +85,8 @@ export async function runSetupCommand(
 	let directSettled = false;
 	const releaseUnknownIO = () => {
 		if (!directSettled || result.processTree?.state !== "unknown") return;
-		result.error ??= commandError("Worktree setup process tree settlement is unverified", "PROCESS_TREE_UNVERIFIED");
+		const detail = result.processTree.diagnostic ? `: ${result.processTree.diagnostic}` : "";
+		result.error = commandError(`Worktree setup process tree settlement is unverified${detail}`, "PROCESS_TREE_UNVERIFIED");
 		result.outputIncomplete = true;
 		// Only local I/O is released; unknown descendant ownership remains retained.
 		child.stdin.destroy();
@@ -177,7 +179,8 @@ export async function runSetupCommand(
 		if (termination) result.processTree = await termination;
 		const cancelled = cancellation();
 		if (cancelled) fail(cancelled);
-		result.stdout = Buffer.concat(stdout).toString("utf8");
+		result.stdoutBuffer = Buffer.concat(stdout);
+		result.stdout = result.stdoutBuffer.toString("utf8");
 		result.stderr = Buffer.concat(stderr).toString("utf8");
 		return result;
 	} finally {

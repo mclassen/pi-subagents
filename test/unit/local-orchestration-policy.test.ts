@@ -13,7 +13,7 @@ describe("local orchestration policy", () => {
 		const reviewLoop = readProjectFile("prompts/review-loop.md");
 
 		assert.match(skill, /Delegation is subordinate to user\/global eligibility policy/);
-		assert.match(skill, /A Sol parent codes by default/);
+		assert.match(skill, /A Sol parent codes and reviews by default/);
 		assert.doesNotMatch(skill, /delegate asynchronously.*most non-trivial requests/i);
 		assert.match(prompting, /Parent implements by default/);
 		assert.doesNotMatch(prompting, /one async `worker` implements or fixes/);
@@ -41,6 +41,18 @@ describe("local orchestration policy", () => {
 		assert.match(researcher, /thinking: high/);
 		assert.match(oracle, /thinking: medium/);
 		assert.match(oracle, /Sol high only when.*complex|Sol high only for.*complex/i);
+	});
+
+	it("keeps Sol and Astra review loops from defaulting to Luna reviewers", () => {
+		const reviewLoop = readProjectFile("prompts/review-loop.md");
+
+		assert.match(reviewLoop, /Sol-medium or Astra-low parent reviews directly by default/i);
+		assert.match(reviewLoop, /In a Sol- or Astra-parent session, never launch a Luna reviewer/i);
+		assert.match(reviewLoop, /explicitly launch the reviewer at Sol medium or higher/i);
+		assert.match(reviewLoop, /use Astra low only when the review itself meets the extreme-complexity threshold/i);
+		assert.match(reviewLoop, /Luna reviewers are limited to Luna-parent sessions/i);
+		assert.match(reviewLoop, /Luna medium more often for bounded mechanical reading/i);
+		assert.match(reviewLoop, /do not rely on a configured Luna default in a Sol- or Astra-parent session/i);
 	});
 
 	it("keeps every child in a distinct isolated workspace", () => {

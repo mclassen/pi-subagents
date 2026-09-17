@@ -3,7 +3,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { finished } from "node:stream/promises";
-import type { ExternalProcessStatus } from "../../shared/types.ts";
+import type { ExternalProcessStatus, ProcessTreeTerminal } from "../../shared/types.ts";
 import { WINDOWS_APPLICATION_LAUNCH_SAFETY, WINDOWS_HIDDEN_PROCESS_OPTIONS } from "../../shared/windows-launch-safety.ts";
 import { createOwnedProcessTreeController, type OwnedProcessTreeController } from "../background/owned-process-tree.ts";
 import { omitExtensionBindingsEnv } from "./extension-bindings.ts";
@@ -142,6 +142,7 @@ function classifyInvalidation(error: string): "auth" | "permission" | "launch" {
 	return "launch";
 }
 
+
 export function runExternalCli(input: {
 	command: string;
 	args?: string[];
@@ -231,7 +232,7 @@ export function runExternalCli(input: {
 		let settled = false;
 		let processTree: OwnedProcessTreeController | undefined;
 		let processPid: number | undefined;
-		let termination: Promise<unknown> | undefined;
+		let termination: Promise<ProcessTreeTerminal> | undefined;
 		const flushProgress = () => {
 			if (!latestProgress) return;
 			input.onParserProgress?.(latestProgress);
@@ -372,8 +373,7 @@ export function runExternalCli(input: {
 			input.registerTimeout?.(undefined);
 			input.registerStop?.(undefined);
 			void (async () => {
-				if (termination) await termination;
-				else if (processTree) await processTree.finishAfterWriterClose();
+				const treeProof = termination ? await termination : processTree ? await processTree.finishAfterWriterClose() : undefined;
 				const endedAt = Date.now();
 				const externalProcess: ExternalProcessStatus = {
 					...initialProcess,
@@ -389,15 +389,18 @@ export function runExternalCli(input: {
 				input.onProcess?.(externalProcess);
 				const stderr = stderrTail.text().trim();
 				const parserFailure = parserError?.message ?? (parserTerminal?.state === "failed" ? parserTerminal.error ?? "External CLI parser reported terminal failure." : undefined);
+				const treeFailure = treeProof?.state === "unknown"
+					? `Process-tree cleanup failed: ${treeProof.reason}.`
+					: undefined;
 				const error = stopped
 					? input.stopMessage ?? "Subagent stopped by user."
 					: timedOut
 						? input.timeoutMessage ?? "Subagent timed out."
-						: spawnError?.message ?? parserFailure ?? (exitCode === 0 ? undefined : stderr || `External CLI exited with code ${exitCode}.`);
+						: spawnError?.message ?? parserFailure ?? treeFailure ?? (exitCode === 0 ? undefined : stderr || `External CLI exited with code ${exitCode}.`);
 				if (error && input.preflight && !parserError) invalidateExternalCliPreflight(input.command, input.preflight, classifyInvalidation(error));
 				const result: ExternalCliRunResult = {
 					output: (!parserError && parserTerminal?.state === "completed" ? parserTerminal.output ?? "" : stdoutTail.text()).trim(),
-					exitCode: timedOut || stopped || spawnError || parserFailure ? 1 : exitCode,
+					exitCode: timedOut || stopped || spawnError || parserFailure || treeFailure ? 1 : exitCode,
 					...(error ? { error } : {}),
 					...(timedOut ? { timedOut: true } : {}),
 					...(stopped ? { stopped: true } : {}),
