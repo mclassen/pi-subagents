@@ -3,7 +3,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { finished } from "node:stream/promises";
-import type { ExternalProcessStatus } from "../../shared/types.ts";
+import type { ExternalProcessStatus, ProcessTreeTerminal } from "../../shared/types.ts";
 import { WINDOWS_APPLICATION_LAUNCH_SAFETY, WINDOWS_HIDDEN_PROCESS_OPTIONS } from "../../shared/windows-launch-safety.ts";
 import { createOwnedProcessTreeController, type OwnedProcessTreeController } from "../background/owned-process-tree.ts";
 import { omitExtensionBindingsEnv } from "./extension-bindings.ts";
@@ -388,7 +388,7 @@ export function runExternalCli(input: {
 				input.onProcess?.(externalProcess);
 				const stderr = stderrTail.text().trim();
 				const parserFailure = parserError?.message ?? (parserTerminal?.state === "failed" ? parserTerminal.error ?? "External CLI parser reported terminal failure." : undefined);
-				const treeFailure = process.platform !== "win32" && treeProof?.state === "unknown"
+				const treeFailure = treeProof?.state === "unknown"
 					? `Process-tree cleanup failed: ${treeProof.reason}.`
 					: undefined;
 				const error = stopped

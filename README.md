@@ -88,7 +88,7 @@ The package includes `/council` and `council-mode`, plus documented model-based
 | See running work | "Show active async runs." or "Show the subagent fleet." |
 | Check setup | "Check whether subagents are configured correctly." |
 
-For implementation work, the recommended loop is `clarify → scout → worker → fresh reviewers → worker`. Packaged prompt shortcuts like `/parallel-review` and `/review-loop` make these patterns repeatable — see [Workflows](https://github.com/nicobailon/pi-subagents/blob/main/docs/workflows.md).
+For implementation work, use the smallest loop that proves the change: `clarify → (optional scout) → parent implementation/review`; add one context-complete Luna reviewer only for a genuinely simple review, or justified independent reviewers for high-impact risks. A Sol parent reviews directly by default. Packaged prompt shortcuts like `/parallel-review` and `/review-loop` are explicit tools, not mandatory ceremony — see [Workflows](https://github.com/nicobailon/pi-subagents/blob/main/docs/workflows.md).
 
 ## Where running work shows up
 

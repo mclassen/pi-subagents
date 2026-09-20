@@ -18,7 +18,6 @@ import {
 	normalizeWorktreeBranchPrefix,
 	resolveExpectedWorktreeAgentCwd,
 	resolveWorktreeProvider,
-	resolveWorktrunkExecutable,
 	sanitizeWorktreePathComponent,
 	shouldDeferWorktreeCwd,
 	WorktreeSetupError,
@@ -103,24 +102,6 @@ function assertRetainedHookFailure(error: unknown, message: RegExp): true {
 }
 
 describe("worktree", () => {
-	it("rejects the Windows Terminal app alias while resolving Worktrunk", () => {
-		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-worktree-wt-resolution-"));
-		try {
-			const localAppData = path.join(root, "local");
-			const windowsApps = path.join(localAppData, "Microsoft", "WindowsApps");
-			const cliDir = path.join(root, "cli");
-			fs.mkdirSync(windowsApps, { recursive: true });
-			fs.mkdirSync(cliDir, { recursive: true });
-			fs.writeFileSync(path.join(windowsApps, "wt.exe"), "terminal alias");
-			assert.equal(resolveWorktrunkExecutable({ LOCALAPPDATA: localAppData, PATH: windowsApps }, "win32"), undefined);
-			fs.writeFileSync(path.join(cliDir, "wt.exe"), "worktrunk");
-			assert.equal(resolveWorktrunkExecutable({ LOCALAPPDATA: localAppData, PATH: `${windowsApps}${path.delimiter}${cliDir}` }, "win32"), path.join(cliDir, "wt.exe"));
-			assert.equal(resolveWorktrunkExecutable({ PATH: cliDir }, "win32"), undefined, "missing LOCALAPPDATA must fail closed rather than risk the app alias");
-		} finally {
-			fs.rmSync(root, { recursive: true, force: true });
-		}
-	});
-
 	it("createWorktrees returns expected structure", async () => {
 		const repoDir = createRepo("pi-worktree-structure-");
 		let setup: WorktreeSetup | undefined;

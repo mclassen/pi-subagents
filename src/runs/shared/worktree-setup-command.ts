@@ -2,24 +2,8 @@ import { spawn } from "node:child_process";
 import { createOwnedProcessTreeController } from "../background/owned-process-tree.ts";
 import type { ProcessTreeTerminal } from "../../shared/types.ts";
 
-function terminateCommandTree(pid: number, controller: ReturnType<typeof createOwnedProcessTreeController>): Promise<ProcessTreeTerminal> {
-	if (process.platform !== "win32") return controller.terminate();
-	return new Promise((resolve) => {
-		let settled = false;
-		const fallback = () => {
-			if (settled) return;
-			settled = true;
-			void controller.terminate().then(resolve);
-		};
-		const cleanup = spawn("taskkill", ["/PID", String(pid), "/T", "/F"], { stdio: "ignore", windowsHide: true });
-		cleanup.once("error", fallback);
-		cleanup.once("close", (status) => {
-			if (settled) return;
-			if (status !== 0) return fallback();
-			settled = true;
-			resolve({ state: "observed", mechanism: "windows-taskkill", pid, verifiedAt: Date.now() });
-		});
-	});
+function terminateCommandTree(controller: ReturnType<typeof createOwnedProcessTreeController>): Promise<ProcessTreeTerminal> {
+	return controller.terminate();
 }
 
 export interface SetupCommandOptions {
@@ -123,7 +107,7 @@ export async function runSetupCommand(
 			releaseUnknownIO();
 			return;
 		}
-		termination = terminateCommandTree(result.pid!, tree).then((proof) => {
+		termination = terminateCommandTree(tree).then((proof) => {
 			result.processTree = proof;
 			releaseUnknownIO();
 			return proof;

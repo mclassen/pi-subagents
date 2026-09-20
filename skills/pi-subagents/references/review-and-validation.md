@@ -9,7 +9,7 @@ Use the smallest loop that proves the change:
 1. Inspect the source, diff, issue, or plan directly.
 2. Keep one writer for each cwd or worktree.
 3. Run focused validation that can fail for the changed behavior.
-4. Use fresh-context read-only review for substantial, risky, public, or hard-to-see changes; give each reviewer a distinct isolated snapshot of the exact integrated target.
+4. For a Sol-medium or Sol-high parent, perform the review directly by default. Use one fresh-context Luna-high read-only reviewer only for a genuinely simple review when a context-complete packet and isolated snapshot materially improve confidence. Use multiple reviewers only for independent high-impact risks with explicit justification.
 5. Apply only accepted findings inside the same writer boundary.
 6. Re-run affected validation and review only the changed blast radius.
 7. Inspect the final diff and evidence before parent acceptance.
@@ -20,12 +20,12 @@ Skip review ceremony for trivial wording, renames, or local-only probes when dir
 
 | Situation | Shape |
 | --- | --- |
-| One coherent diff or one risk | one reviewer |
-| Independent risks, such as correctness, tests, security, or UI | parallel reviewers with distinct contracts |
-| Possible over-scope or needless complexity | same-writer challenge before fresh review |
+| One coherent diff or one risk | parent review; one Luna-high reviewer only if the review is genuinely simple and context-complete |
+| Independent high-impact risks, such as correctness, security, or release | parallel reviewers with distinct contracts and explicit justification |
+| Possible over-scope or needless complexity | same-writer challenge before any fresh review |
 | Material design tradeoff | council mode |
 
-Reviewers are fresh-context by default. Use the ordinary `reviewer` role for routine code review. Forked oracle/advisor runs are escalation-only for parent-history, drift, root-cause, model-routing, or hard tradeoff evidence.
+Reviewers are fresh-context when used. A reviewer must receive the exact target diff/ref, relevant source and contracts, acceptance criteria, user constraints, and validation command; repository discovery alone is not sufficient context for a Sol-parent review. Use the ordinary `reviewer` role for the one permitted simple review. Forked oracle/advisor runs are escalation-only for parent-history, drift, root-cause, model-routing, or hard tradeoff evidence.
 
 ## Finding disposition
 

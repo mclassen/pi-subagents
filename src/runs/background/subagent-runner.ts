@@ -10,7 +10,7 @@ const isRunnerEntrypoint = Boolean(process.argv[1] && import.meta.url === pathTo
 // Detached Node runners skip Pi's CLI dispatcher setup; install the runner's own.
 if (isRunnerEntrypoint) installRunnerHttpDispatcher({ agentDir: getAgentDir(), cwd: process.cwd() });
 import { writeAtomicJson } from "../../shared/atomic-json.ts";
-import { promotePendingResultFile, writePendingAsyncResultFile } from "./result-files.ts";
+import { writeAsyncResultFile, writePendingAsyncResultFile } from "./result-files.ts";
 import { createFileCoalescer } from "../../shared/file-coalescer.ts";
 import { createCapacityResilientJsonWriter } from "../../shared/capacity-resilient-json.ts";
 import { isStorageCapacityError } from "../../shared/file-system-retry.ts";
@@ -5018,7 +5018,7 @@ export async function runSubagent(
 			shareError,
 			...(taskIndex !== undefined && { taskIndex }),
 			...(totalTasks !== undefined && { totalTasks }),
-		}, (filePath, payload) => { writePendingAsyncResultFile(filePath, payload as Record<string, unknown>); });
+		}, (filePath, payload) => { writeAsyncResultFile(filePath, payload as Record<string, unknown>); });
 		// Only capacity deferral releases settled sessions before terminal publication.
 		if (!finalResultCommitted) await Promise.all([publication, disposeChildSessions()]);
 	} catch (err) {
@@ -5094,13 +5094,6 @@ export async function runSubagent(
 			writeProcessTerminalCandidate(asyncDir, candidate);
 		} catch (error) {
 			console.error(`Failed to write process-terminal candidate for '${id}':`, error);
-		}
-	}
-	if (finalResultCommitted && config.sessionId) {
-		try {
-			promotePendingResultFile(path.dirname(resultPath), config.sessionId, id, path.basename(resultPath));
-		} catch (error) {
-			console.error(`Failed to promote async result file for '${id}':`, error);
 		}
 	}
 }

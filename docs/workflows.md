@@ -4,11 +4,13 @@ How to compose subagents: the recommended pattern, packaged prompt shortcuts, sc
 
 ## Recommended orchestration pattern
 
-Use orchestration as parent-agent guidance, not as a runtime workflow mode. For implementation work, the recommended loop is:
+Use orchestration as parent-agent guidance, not as a runtime workflow mode. For implementation work, use the smallest loop that proves the change:
 
 ```text
-clarify → scout → worker → fresh reviewers → worker
+clarify → (optional scout) → parent implementation/review
 ```
+
+A Sol-medium or Sol-high parent reviews directly by default. Add one context-complete Luna-high reviewer only for a genuinely simple read-only review, or justified independent reviewers for high-impact risks. Add a worker only for an eligible frozen mechanical slice; do not add stages or reviewers merely because the task is substantial.
 
 Packaged `worker`, `oracle`, and `advisor` default to forked context when a launch omits `context`. If the parent has no persisted session file or current leaf yet, that implicit default falls back to `fresh`. Pass `context: "fresh"` when you intentionally want a fresh child run, or `context: "fork"` when fork must remain strict.
 
