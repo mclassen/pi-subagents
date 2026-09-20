@@ -12,8 +12,8 @@
 
 ## Remotes and publication
 
-- `origin` is upstream `nicobailon/pi-subagents`; use it for fetch/sync. `fork` is writable `mclassen/pi-subagents`; push feature branches there. Do not push to `origin` without explicit current-session authorization.
-- Before first publication, fetch `origin/main` and integrate the current upstream base without discarding work or force-pushing. Open or update an upstream PR only when explicitly requested.
+- `upstream` is upstream `nicobailon/pi-subagents`; use it for fetch/sync. `origin` is writable `mclassen/pi-subagents`; push feature branches and customized `main` there. Do not push to `upstream` without explicit current-session authorization.
+- Before first publication, fetch `upstream/main` and integrate the current upstream base without discarding work or force-pushing. Open or update an upstream PR only when explicitly requested.
 
 ## Boston publication window
 
