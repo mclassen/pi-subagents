@@ -53,8 +53,8 @@ This reference keeps cross-cutting policy and failure handling. Load the matchin
 
 Choose the smallest recipe that fits:
 
-- **Recon → plan → implement:** parent performs the serial path by default. Delegate a scout only for an obviously independent context-light question; delegate a worker only after the resulting frozen mechanical slice passes the user/global eligibility gate.
-- **Non-trivial implementation:** parent owns causality, design, and coding by default—especially when Sol. Clarify scope/acceptance, record decisions and seam/validation contracts, inspect load-bearing code, and plan when useful. An eligible child writer gets a distinct isolated workspace and returns a scoped commit/patch; parent integrates and validates. Use fresh isolated review, apply accepted fixes in parent unless the next slice independently qualifies, then inspect direct evidence and final diff before root acceptance.
+- **Recon → plan → implement:** parent performs the serial path by default. When operator-authorized delegation materially helps, use one focused `scout` for an independent context-light question; delegate a worker only after the resulting frozen mechanical slice passes the user/global eligibility gate.
+- **Implementation:** parent owns causality, design, and coding by default—especially when Sol. Clarify scope/acceptance, record user-owned decisions and seam/validation contracts, inspect load-bearing code, and use a bounded scout, writer, or fresh reviewer only where that authorized stage earns its overhead. An eligible child writer gets a distinct isolated workspace and returns a scoped commit/patch; parent integrates, validates, disposes review findings, and inspects direct evidence before acceptance.
 - **Parallel analysis:** fan out only independent read/review/validation work, or isolate each writer in its own worktree. Never run concurrent writers in one checkout.
 
 ## Error Handling

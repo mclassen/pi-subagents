@@ -137,7 +137,7 @@ export interface DefaultChildSessionFactoryOptions {
 	 * installed package by absolute path.
 	 */
 	loadPiCodingAgent?: () => Promise<PiCodingAgentModule>;
-	/** Upper bound on a disposed child's `session_shutdown` handlers before the session is dropped anyway. */
+	/** Upper bound on shutdown handlers; exceeding it rejects disposal rather than certifying cleanup. */
 	shutdownTimeoutMs?: number;
 }
 
@@ -313,6 +313,9 @@ export function createDefaultChildSessionFactory(options: DefaultChildSessionFac
 	const live = new Set<ChildSession>();
 	/** Extension shutdowns still running for disposed children; `dispose()` waits for them. */
 	const shutdowns = new Set<Promise<void>>();
+	const shutdownFailures: unknown[] = [];
+	const openings = new Set<Promise<ChildSession>>();
+	let closing = false;
 	const sharedRuntime = async (pi: PiCodingAgentModule) => {
 		runtime ??= pi.ModelRuntime.create().catch((error: unknown) => {
 			runtime = undefined;
@@ -320,7 +323,7 @@ export function createDefaultChildSessionFactory(options: DefaultChildSessionFac
 		});
 		return runtime;
 	};
-	return {
+	const factory: ChildSessionFactory = {
 		async create(launch) {
 			const pi = await loadPiCodingAgent();
 			const modelRuntime = launch.parentProviderRegistry
@@ -349,6 +352,7 @@ export function createDefaultChildSessionFactory(options: DefaultChildSessionFac
 				...(launch.systemPrompt !== undefined ? { systemPrompt: launch.systemPrompt } : {}),
 				...(launch.appendSystemPrompt !== undefined ? { appendSystemPrompt: [launch.appendSystemPrompt] } : {}),
 			});
+			let shutdownFailure: unknown;
 			const open = async () => {
 				const requiredPaths = new Set((launch.requiredExtensions ?? []).map(({ path }) => path));
 				applyProcessEnv(launch.processEnv);
@@ -397,7 +401,10 @@ export function createDefaultChildSessionFactory(options: DefaultChildSessionFac
 				try {
 					await session.bindExtensions({
 						mode: "print",
-						onError: (error) => launch.onExtensionError?.({ extensionPath: error.extensionPath, event: error.event, error: error.error }),
+						onError: (error) => {
+							if (error.event === "session_shutdown") shutdownFailure = error.error;
+							launch.onExtensionError?.({ extensionPath: error.extensionPath, event: error.event, error: error.error });
+						},
 					});
 				} catch (error) {
 					session.dispose();
@@ -409,38 +416,69 @@ export function createDefaultChildSessionFactory(options: DefaultChildSessionFac
 			loading = opened;
 			const session = await opened;
 			let pending: Promise<void> | undefined;
+			let acceptingPrompts = true;
+			const activePrompts = new Set<Promise<void>>();
+			const runPrompt = (text: string): Promise<void> => {
+				if (!acceptingPrompts) return Promise.reject(new Error("Child session is disposing and cannot accept a prompt."));
+				const prompt = session.prompt(text);
+				activePrompts.add(prompt);
+				void prompt.then(() => { activePrompts.delete(prompt); }, () => { activePrompts.delete(prompt); });
+				return prompt;
+			};
 			// pi's own hosts emit `session_shutdown` before disposing a session so the
 			// extensions loaded into it (ambient extensions included) release their
 			// watchers, servers, and timers. Do the same, then dispose.
 			const shutdown = async (): Promise<void> => {
+				let timer: ReturnType<typeof setTimeout> | undefined;
 				try {
+					acceptingPrompts = false;
+					if (activePrompts.size > 0) {
+						const aborting = session.abort().catch((error: unknown) => {
+							throw new Error(`Child prompt abort failed: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
+						});
+						await Promise.race([
+							Promise.allSettled(activePrompts).then(() => aborting),
+							aborting.then(() => new Promise<never>(() => {})),
+							new Promise<never>((_resolve, reject) => {
+								timer = setTimeout(() => reject(new Error("Child prompt did not settle after abort; cleanup is unverified.")), shutdownTimeoutMs);
+							}),
+						]);
+						if (timer !== undefined) {
+							clearTimeout(timer);
+							timer = undefined;
+						}
+					}
 					const runner = session.extensionRunner;
 					if (runner.hasHandlers("session_shutdown")) {
 						await Promise.race([
 							runner.emit({ type: "session_shutdown", reason: "quit" }),
-							new Promise<void>((resolve) => setTimeout(resolve, shutdownTimeoutMs)),
+							new Promise<never>((_resolve, reject) => {
+								timer = setTimeout(() => reject(new Error("Child session shutdown timed out; cleanup is unverified.")), shutdownTimeoutMs);
+							}),
 						]);
 					}
-				} catch (error) {
-					launch.onExtensionError?.({ extensionPath: "<session>", event: "session_shutdown", error });
+					if (shutdownFailure !== undefined) throw new Error(`Child session shutdown failed: ${String(shutdownFailure)}`);
 				} finally {
+					if (timer !== undefined) clearTimeout(timer);
 					session.dispose();
 				}
 			};
 			const child: ChildSession = {
 				subscribe: (listener) => session.subscribe((event) => listener(event as unknown as ChildSessionEvent)),
-				prompt: (text) => session.prompt(text),
+				prompt: runPrompt,
 				steer: (text) => session.steer(text),
 				followUp: (text) => session.followUp(text),
 				abort: () => session.abort(),
 				hasQueuedMessages: () => session.agent?.hasQueuedMessages?.() === true,
 				dispose: () => {
 					if (!pending) {
-						live.delete(child);
 						const shutdownDone = shutdown();
 						pending = shutdownDone;
 						shutdowns.add(shutdownDone);
-						void shutdownDone.finally(() => shutdowns.delete(shutdownDone));
+						void shutdownDone.then(
+							() => { live.delete(child); shutdowns.delete(shutdownDone); },
+							(error: unknown) => { shutdownFailures.push(error); shutdowns.delete(shutdownDone); },
+						);
 					}
 					return pending;
 				},
@@ -450,18 +488,39 @@ export function createDefaultChildSessionFactory(options: DefaultChildSessionFac
 				get modelId() { return session.model ? `${session.model.provider}/${session.model.id}` : undefined; },
 			};
 			live.add(child);
+			if (shutdownFailures.length > 0) {
+				await child.dispose();
+				throw new Error("Child session opened during failed cleanup.");
+			}
 			return child;
 		},
 		async dispose() {
-			const children = [...live].filter((child) => !child.detached);
-			for (const child of children) child.shutDown = true;
-			await Promise.allSettled(children.map((child) => child.abort()));
-			for (const child of children) {
-				try { void child.dispose(); } catch { /* best effort */ }
+			closing = true;
+			try {
+				// An opening session is not in `live` yet and cannot be certified as disposed.
+				if (openings.size > 0) shutdownFailures.push(new Error("Child session creation is still in progress; cleanup is unverified."));
+				const children = [...live].filter((child) => !child.detached);
+				for (const child of children) child.shutDown = true;
+				await Promise.allSettled(children.map((child) => child.dispose()));
+				await Promise.allSettled([...shutdowns]);
+				if (shutdownFailures.length > 0) {
+					throw new AggregateError(shutdownFailures, `Child session cleanup failed: ${shutdownFailures.map(String).join("; ")}`);
+				}
+				if (live.size === 0) runtime = undefined;
+			} finally {
+				closing = false;
 			}
-			await Promise.allSettled([...shutdowns]);
-			if (live.size === 0) runtime = undefined;
 		},
+	};
+	return {
+		create(launch) {
+			if (closing || shutdownFailures.length > 0) return Promise.reject(new Error("Child factory cleanup is in progress or failed."));
+			const opening = factory.create(launch);
+			openings.add(opening);
+			void opening.then(() => { openings.delete(opening); }, () => { openings.delete(opening); });
+			return opening;
+		},
+		dispose: () => factory.dispose(),
 	};
 }
 

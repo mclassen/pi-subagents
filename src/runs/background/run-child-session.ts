@@ -540,7 +540,7 @@ export function runChildSession(input: RunChildSessionInput): Promise<RunChildSe
 		};
 
 		/** Stops observing the child and returns when its extensions have shut down. */
-		const finish = (): Promise<void> => {
+		const finish = async (): Promise<unknown> => {
 			clearFinalDrainTimers();
 			clearWatchdogTailTimer();
 			clearAllToolTimeouts();
@@ -554,7 +554,12 @@ export function runChildSession(input: RunChildSessionInput): Promise<RunChildSe
 			input.registerSteer?.(undefined);
 			input.registerWatchdogStatus?.(undefined);
 			unsubscribe?.();
-			return Promise.resolve().then(() => session?.dispose()).catch(() => undefined);
+			try {
+				await session?.dispose();
+				return undefined;
+			} catch (cleanupError) {
+				return cleanupError;
+			}
 		};
 
 		/** The child run ended (or was forced to end); fold in the outcome once the child's shutdown work is done. */
@@ -599,16 +604,29 @@ export function runChildSession(input: RunChildSessionInput): Promise<RunChildSe
 				: interrupted || (forcedDrainAfterFinalSuccess && !forcedDrainAfterEmptyTerminal)
 					? 0
 					: finalError || promptError !== undefined ? 1 : 0;
-			void closed.then(() => {
+			void closed.then((cleanupError) => {
+				if (cleanupError !== undefined) {
+					const cleanupMessage = cleanupError instanceof Error ? cleanupError.message : String(cleanupError);
+					finalError = finalError ? `${finalError}\nChild cleanup failed: ${cleanupMessage}` : `Child cleanup failed: ${cleanupMessage}`;
+				}
+				const settledExitCode = cleanupError !== undefined ? 1 : exitCode;
 				const result: RunChildSessionResult = omitUndefined({
-					exitCode,
+					exitCode: settledExitCode,
 					messages,
 					usage: terminalUsage,
 					toolCount,
 					durationMs: Date.now() - startedAt,
 					model,
 					nativeMachine: session?.machineEvidence ? { provider: "herdr", machineId: session.machineEvidence.machineId, ...(session.machineEvidence.initial ? { initialGit: session.machineEvidence.initial } : {}), ...(session.machineEvidence.final ? { finalGit: session.machineEvidence.final } : {}) } : undefined,
-					error: stopped ? stopMessage() : timedOut ? (error ?? timeoutMessage()) : interrupted || (forcedDrainAfterFinalSuccess && !forcedDrainAfterEmptyTerminal) ? undefined : finalError,
+					error: cleanupError !== undefined
+						? finalError
+						: stopped
+							? stopMessage()
+							: timedOut
+								? (error ?? timeoutMessage())
+								: interrupted || (forcedDrainAfterFinalSuccess && !forcedDrainAfterEmptyTerminal)
+									? undefined
+									: finalError,
 					finalOutput: (timedOut || stopped) && !finalOutput.trim() ? (stopped ? stopMessage() : error ?? timeoutMessage()) : finalOutput,
 					outputState: finalOutput.trim() ? "present" : "absent",
 					interrupted: interrupted || undefined,
@@ -684,8 +702,12 @@ export function runChildSession(input: RunChildSessionInput): Promise<RunChildSe
 					}
 					return queued;
 				});
-				if (interrupted || timedOut || stopped) abortChild();
-				messageBaseline = created.messages.length;
+				if (interrupted || timedOut || stopped) {
+					session = created;
+					settle(undefined);
+					return;
+				}
+				messageBaseline = created.messages.length
 				await created.prompt(input.prompt);
 				promptSettled = true;
 				settle(undefined);

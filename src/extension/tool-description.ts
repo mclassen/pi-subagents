@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type { ExtensionConfig, ToolDescriptionMode } from "../shared/types.ts";
 import { getAgentDir, getProjectConfigDir } from "../shared/utils.ts";
+import { WINDOWS_APPLICATION_LAUNCH_SAFETY } from "../shared/windows-launch-safety.ts";
 
 const CUSTOM_TOOL_DESCRIPTION_FILE = "subagent-tool-description.md";
 const CUSTOM_TOOL_DESCRIPTION_MAX_BYTES = 50 * 1024;
@@ -18,6 +19,7 @@ export const SUBAGENT_SAFETY_GUIDANCE = `SAFETY-CRITICAL SUBAGENT GUIDANCE:
 • Bind durable output on runs.run/runs.all, not task filename prose; return actual outputReference/outputPathMapping/artifactPaths, evidence and residual risks.
 • children.list: resume only resumable rows. {action:"resume",id,message} detaches a follow-up/challenge with stored agent/model/tool contract. If none is resumable, label a same-role fallback challenge. Scripts await runs.run(newKey,{resume:runId,task}); continue from latest returned runId. Each distinct resume pass needs a new stable key; same-key reuse requires identical launch parameters.
 • Named resources own authority; raw workflowScript/workflowScriptPath cannot use runs.host. Granted commands/relative outputs use workflow cwd, never per-step cwd.
+• ${WINDOWS_APPLICATION_LAUNCH_SAFETY}
 • Inspect asyncId/asyncDir (status.json, events.jsonl, logs) with status/debug.run; control with interrupt/stop/resume/steer. Read {action:"guide",topic:"tool-reference"} for controls/evidence gates.`;
 
 const EXECUTION_GUIDANCE = `Delegate one child with {agent,task?}; otherwise choose exactly one of {workflowScript,args?}, {workflowScriptPath,args?} or {workflow,args}. agent/task exclude workflow inputs; task excludes action. agent may target management actions. action is management/control; validate accepts either script without launching. workflowScriptPath loads from request cwd before sandbox execution.

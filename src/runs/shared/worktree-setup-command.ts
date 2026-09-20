@@ -5,7 +5,6 @@ import type { ProcessTreeTerminal } from "../../shared/types.ts";
 function terminateCommandTree(controller: ReturnType<typeof createOwnedProcessTreeController>): Promise<ProcessTreeTerminal> {
 	return controller.terminate();
 }
-
 export interface SetupCommandOptions {
 	cwd?: string;
 	env?: NodeJS.ProcessEnv;

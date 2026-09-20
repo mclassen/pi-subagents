@@ -11,9 +11,10 @@ description: |
 
 Choose a mode subject to user/global delegation eligibility:
 
+Once authorized, choose the smallest bounded mode that earns its token and elapsed-time overhead:
+
 - **Direct mode:** The parent handles focused, serial, context-heavy, or causally coupled work directly. Skip workflow ceremony. A Sol parent (medium or high) reviews and reasons directly by default; do not reflexively commission one or two Luna reviewers.
 - **Orchestrator mode:** Use only for eligible independent child lanes that materially improve evidence, review, or isolated execution. The parent remains causal owner and default coder—especially when Sol—and keeps user intent, constraints, authority, routing, arbitration, integration, final acceptance, and publication. Child implementation is limited to frozen mechanical slices that independently pass the writer gate; never prescribe writer → review → writer merely because work is substantial.
-
 This skill is for the root parent orchestrator only; do not inject or follow it inside children. Ordinary children do not launch subagents. An explicitly assigned fanout child whose resolved `tools` includes `subagent` may spawn one further level only for assigned work. Nested writers require separate managed temporary worktrees/clones, non-overlapping contracts, and scoped commits or captured patches. Nested children cannot recurse, merge, or integrate; the intermediate synthesizes for the root.
 
 ## Launch shape

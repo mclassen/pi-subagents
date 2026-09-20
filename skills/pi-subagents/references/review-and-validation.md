@@ -9,7 +9,7 @@ Use the smallest loop that proves the change:
 1. Inspect the source, diff, issue, or plan directly.
 2. Keep one writer for each cwd or worktree.
 3. Run focused validation that can fail for the changed behavior.
-4. For a Sol-medium or Sol-high parent, perform the review directly by default. Use one fresh-context Luna-high read-only reviewer only for a genuinely simple review when a context-complete packet and isolated snapshot materially improve confidence. Use multiple reviewers only for independent high-impact risks with explicit justification.
+4. For a Sol-medium or Sol-high parent, perform the review directly by default. When the operator/project delegation contract calls for independent review, use one fresh-context Luna-high read-only reviewer only for a genuinely simple review when a context-complete packet and isolated snapshot materially improve confidence. Use multiple reviewers only for independent high-impact risks with explicit justification.
 5. Apply only accepted findings inside the same writer boundary.
 6. Re-run affected validation and review only the changed blast radius.
 7. Inspect the final diff and evidence before parent acceptance.

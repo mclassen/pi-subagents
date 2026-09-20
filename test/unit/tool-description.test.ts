@@ -16,6 +16,7 @@ import {
 	SUBAGENT_TOOL_PROMPT_SNIPPET,
 } from "../../src/extension/tool-description.ts";
 import { SUBAGENT_CHILD_ENV } from "../../src/runs/shared/child-runtime-config.ts";
+import { WINDOWS_APPLICATION_LAUNCH_SAFETY, WINDOWS_HIDDEN_PROCESS_OPTIONS } from "../../src/shared/windows-launch-safety.ts";
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 
@@ -45,6 +46,7 @@ describe("registered subagent tool description", () => {
 			buildSubagentToolDescription({ toolDescriptionMode: "custom" }, { cwd, agentDir }),
 		]) {
 			assert.ok(description.includes(authorityGate));
+			assert.match(description, /do not launch GUI applications or file associations/i);
 		}
 
 		const fallbackCwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-tool-desc-authority-fallback-"));
@@ -272,7 +274,7 @@ describe("registered subagent tool description", () => {
 				"--eval",
 				script,
 			],
-			{ cwd: projectRoot, env: parentToolEnv(agentDir), encoding: "utf-8" },
+			{ cwd: projectRoot, env: parentToolEnv(agentDir), encoding: "utf-8", ...WINDOWS_HIDDEN_PROCESS_OPTIONS },
 		);
 		return JSON.parse(output) as { description: string; promptSnippet?: string; promptGuidelines?: string[]; properties: string[] };
 	}

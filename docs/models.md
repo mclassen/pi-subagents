@@ -92,7 +92,7 @@ Fast mode fails before launch unless the resolved model is on the allowlist. The
 
 ## Recommended model tiering (optional)
 
-A setup that works well in practice: route agents by task shape instead of running everything on one model. Four tiers:
+A setup that works well in practice: route agents by task shape instead of running everything on one model. Use Luna medium only for exact deterministic mechanics. The normal task tiers are:
 
 1. **Bounded evidence workhorse** — a cheap capable model at high thinking for recon, research, tests, deterministic verification, and focused review. Example: `openai-codex/gpt-5.6-luna:high` on `scout`, `researcher`, `reviewer`, and lightweight `delegate` agents.
 2. **Frozen implementation worker** — use xhigh only for a bounded implementation slice with fixed contracts and deterministic acceptance. Example: `openai-codex/gpt-5.6-luna:xhigh` on `worker`. Do not route Luna max automatically; Luna max and Sol xhigh/max require explicit manual model selection.

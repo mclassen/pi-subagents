@@ -8,7 +8,9 @@ Parent extensions may register a session-scoped, out-of-band ceiling through `pi
 
 ## When to Use
 
-- **Complex work orchestration**: start the parent on Luna high, use Luna xhigh for bounded difficult implementation or concrete reproducible failures, and escalate to Sol medium when actual code/context complexity, causal debugging, coordination, mixed work, or final-review evidence requires it. Delegate only when another child materially improves evidence, independent review, or isolated execution; omission failures are cheaper than unnecessary commissions. For genuinely complex orchestration or root-cause questions, Sol high is manual-only and reserved for the most complex cases. If selected, keep it to direct parent reasoning or a bounded read-only critic/oracle review, never an autonomous root. Complex means the task has multiple moving parts, unclear acceptance, cross-cutting code, meaningful user-visible impact, expensive or irreversible validation, broad review surface, or the user asks for orchestration. Lightweight one-off delegation can stay lightweight.
+All launch guidance below assumes delegation was requested by the operator in the current request or applicable user/project instructions. Complexity, workflow fit, and potential quality gains help choose a shape after that gate; they do not authorize a launch.
+
+- **Complex work orchestration**: start the parent on Luna high, use Luna xhigh for bounded difficult implementation or concrete reproducible failures, and escalate to Sol medium when actual code/context complexity, causal debugging, coordination, mixed work, or final-review evidence requires it. Delegate only when another child materially improves evidence, independent review, specialization, useful parallelism, or isolated execution; omission failures are cheaper than unnecessary commissions. For genuinely complex orchestration or root-cause questions, Sol high is manual-only and reserved for the most complex cases. If selected, keep it to direct parent reasoning or a bounded read-only critic/oracle review, never an autonomous root. Lightweight one-off delegation can stay lightweight.
 - **Advisory review**: a Sol-medium or Sol-high parent reviews directly by default. Use at most one Luna-high `reviewer` only for a genuinely simple read-only review with a context-complete packet; use multiple reviewers only for independent high-impact risks with explicit justification. Fork to `oracle` only for rare escalation where inherited decisions, drift, model routing, root cause, or hard tradeoffs matter.
 - **Implementation handoff**: have `oracle` advise when needed; parent implements the approved direction unless a frozen mechanical slice independently passes the user/global child-writer gate
 - **Recon and planning**: use `scout`, then write a plan when needed
@@ -105,7 +107,7 @@ Use this when the question needs both external evidence and local implications. 
 
 ### Gather-context-and-clarify technique
 
-Use this only when independent local or external context lanes clearly beat direct parent inspection. Launch `scout` or `researcher` only for an obviously context-light, independently verifiable question. Ask for concise findings plus unresolved questions; parent synthesizes and uses `interview` only when clarification remains necessary.
+Use this when the operator requests delegated context gathering and independent local or external lanes clearly beat direct parent inspection. Launch `scout` for an obviously context-light, independently verifiable local question and `researcher` only when external docs, recent sources, ecosystem context, or primary evidence would materially improve understanding. Ask for concise findings plus unresolved questions; parent synthesizes and uses `interview` only when clarification remains necessary before planning or implementing.
 
 ### Parallel cleanup technique
 

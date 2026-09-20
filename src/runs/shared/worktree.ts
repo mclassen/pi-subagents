@@ -8,6 +8,7 @@ import { resolveAuthorityDecision, type AuthorityPolicyConfig } from "../../poli
 import { PROJECT_SUBAGENTS_RELATIVE_DIR } from "../../shared/artifacts.ts";
 import { getAgentDir } from "../../shared/utils.ts";
 import type { ManagedWorktreeProvider, WorktreeNaming, WorktreeProvider } from "../../shared/types.ts";
+import { WINDOWS_HIDDEN_PROCESS_OPTIONS } from "../../shared/windows-launch-safety.ts";
 
 export const DEFAULT_WORKTREE_PROVIDER: WorktreeProvider = "auto";
 export const DEFAULT_WORKTREE_BASE_REF = "HEAD";
@@ -275,7 +276,7 @@ class SetupTransaction {
 }
 
 function runGit(cwd: string, args: string[], env?: NodeJS.ProcessEnv): GitResult {
-	const result = spawnSync("git", ["-C", cwd, ...args], { encoding: "utf-8", windowsHide: true, shell: false, ...(env ? { env: { ...process.env, ...env } } : {}) });
+	const result = spawnSync("git", ["-C", cwd, ...args], { encoding: "utf-8", ...WINDOWS_HIDDEN_PROCESS_OPTIONS, ...(env ? { env: { ...process.env, ...env } } : {}) });
 	return {
 		stdout: result.stdout ?? "",
 		stderr: result.stderr ?? "",
@@ -561,8 +562,7 @@ function runWorktrunk(args: string[], cwd?: string): WorktreeCommandResult {
 		const result = spawnSync(WORKTRUNK_COMMAND, [...WORKTRUNK_ARG_PREFIX, ...args], {
 			cwd,
 			encoding: "utf-8",
-			windowsHide: true,
-			shell: false,
+			...WINDOWS_HIDDEN_PROCESS_OPTIONS,
 			maxBuffer: WORKTREE_COMMAND_OUTPUT_MAX_BYTES,
 		});
 		const stdout = result.stdout ?? "";

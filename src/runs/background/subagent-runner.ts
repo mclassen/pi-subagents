@@ -10,7 +10,7 @@ const isRunnerEntrypoint = Boolean(process.argv[1] && import.meta.url === pathTo
 // Detached Node runners skip Pi's CLI dispatcher setup; install the runner's own.
 if (isRunnerEntrypoint) installRunnerHttpDispatcher({ agentDir: getAgentDir(), cwd: process.cwd() });
 import { writeAtomicJson } from "../../shared/atomic-json.ts";
-import { writeAsyncResultFile, writePendingAsyncResultFile } from "./result-files.ts";
+import { promotePendingResultFile, writePendingAsyncResultFile } from "./result-files.ts";
 import { createFileCoalescer } from "../../shared/file-coalescer.ts";
 import { createCapacityResilientJsonWriter } from "../../shared/capacity-resilient-json.ts";
 import { isStorageCapacityError } from "../../shared/file-system-retry.ts";
@@ -2063,6 +2063,7 @@ export async function runSubagent(
 			updateActiveRunIndex(asyncDir, indexPayload.state, indexPayload.toolCallId, { retryCapacityErrors: true });
 		});
 	};
+	let childSessionsDisposed = false;
 	let finalResultCommitted = false;
 	let finalResultPublication: { resolve(): void; reject(error: unknown): void } | undefined;
 	const runPersistence = createCapacityResilientJsonWriter({
@@ -2186,7 +2187,7 @@ export async function runSubagent(
 	};
 	const writeRecoverableStatusResult = (): void => {
 		const state = statusResultState();
-		if (!state || finalResultCommitted || !config.sessionId) return;
+		if (!childSessionsDisposed || !state || finalResultCommitted || !config.sessionId) return;
 		if ((state as string) === "complete") return;
 		const now = statusPayload.endedAt ?? statusPayload.lastUpdate ?? Date.now();
 		const summary = statusResultSummary(state);
@@ -4861,9 +4862,8 @@ export async function runSubagent(
 	const partialWithEvidence = !stopped && !signalTerminated && !timedOut && !usageBudgetExceeded && !interrupted && results.some(partialEvidenceResult) && !results.some(concreteFailureResult);
 	// Flush while still nonterminal; deferred status retries retain that state snapshot.
 	statusWriteCoalescer.flush(statusPath);
-	const publication = new Promise<void>((resolve, reject) => {
-		finalResultPublication = { resolve, reject };
-	});
+	// Suppress recoverable terminal-result writes until child-session disposal finishes.
+	finalResultPublication = { resolve() {}, reject() {} };
 	statusPayload.state = stopped || signalTerminated ? "stopped" : timedOut || usageBudgetExceeded ? "failed" : interrupted ? "paused" : results.every((r) => r.success) ? "complete" : partialWithEvidence ? "partial" : "failed";
 	closeSteerInbox(asyncDir, statusPayload.state, (filePath, payload) => runPersistence.write(filePath, payload));
 	for (const request of consumeSteerRequests(asyncDir)) deliverSteerRequest(request);
@@ -4921,11 +4921,7 @@ export async function runSubagent(
 			statusPayload.error = `Step failed: ${failedStep.agent}`;
 		}
 	}
-	let childSessionDisposal: Promise<void> | undefined;
-	const disposeChildSessions = (): Promise<void> => childSessionDisposal ??= childSessions.dispose()
-		.catch((error: unknown) => console.error("Failed to dispose runner child sessions:", error));
-	try {
-		runPersistence.write(resultPath, {
+	const finalResultPayload = {
 			lifecycleArtifactVersion: SUBAGENT_LIFECYCLE_ARTIFACT_VERSION,
 			id,
 			agent: agentName,
@@ -5017,20 +5013,8 @@ export async function runSubagent(
 			gistUrl,
 			shareError,
 			...(taskIndex !== undefined && { taskIndex }),
-			...(totalTasks !== undefined && { totalTasks }),
-		}, (filePath, payload) => { writeAsyncResultFile(filePath, payload as Record<string, unknown>); });
-		// Only capacity deferral releases settled sessions before terminal publication.
-		if (!finalResultCommitted) await Promise.all([publication, disposeChildSessions()]);
-	} catch (err) {
-		const message = `Failed to write result file ${resultPath}: ${err instanceof Error ? err.message : String(err)}`;
-		console.error(message, err);
-		statusPayload.state = "failed";
-		statusPayload.error = message;
-		statusPayload.lastUpdate = Date.now();
-	} finally {
-		finalResultPublication = undefined;
-	}
-	writeStatusPayload();
+		...(totalTasks !== undefined && { totalTasks }),
+	};
 	await orcaProgressTab?.finish(statusPayload.state === "complete" ? "completed" : statusPayload.state === "stopped" ? "stopped" : "failed", effectiveSessionFile);
 	appendJsonl(
 		eventsPath,
@@ -5066,8 +5050,42 @@ export async function runSubagent(
 	}), (filePath, content) => runPersistence.write(filePath, { content }, (_path, payload) => {
 		fs.writeFileSync(_path, (payload as { content: string }).content, "utf-8");
 	}));
-	// Preserve normal-success disposal ordering, then drain remaining persistence retries.
-	await disposeChildSessions();
+	// A result becomes discoverable only after child sessions have finished disposing.
+	try {
+		await childSessions.dispose();
+		childSessionsDisposed = true;
+	} catch (error) {
+		statusPayload.state = "failed";
+		statusPayload.error = `Failed to dispose runner child sessions: ${error instanceof Error ? error.message : String(error)}`;
+		statusPayload.lastUpdate = Date.now();
+		try {
+			// Keep failure visible without publishing a result or certifying cleanup.
+			runPersistence.write(statusPath, { ...statusPayload });
+			while (runPersistence.pendingCount() + indexPersistence.pendingCount() > 0) {
+				await new Promise((resolve) => setTimeout(resolve, 200));
+			}
+		} finally {
+			runPersistence.dispose();
+			indexPersistence.dispose();
+		}
+		throw error;
+	}
+	try {
+		runPersistence.write(resultPath, finalResultPayload, (filePath, payload) => {
+			writePendingAsyncResultFile(filePath, payload as Record<string, unknown>);
+		});
+	} catch (err) {
+		const message = `Failed to write result file ${resultPath}: ${err instanceof Error ? err.message : String(err)}`;
+		console.error(message, err);
+		statusPayload.state = "failed";
+		statusPayload.error = message;
+		statusPayload.lastUpdate = Date.now();
+	}
+	while (runPersistence.pendingCount() + indexPersistence.pendingCount() > 0) {
+		await new Promise((resolve) => setTimeout(resolve, 200));
+	}
+	finalResultPublication = undefined;
+	writeStatusPayload();
 	while (runPersistence.pendingCount() + indexPersistence.pendingCount() > 0) {
 		await new Promise((resolve) => setTimeout(resolve, 200));
 	}
@@ -5094,6 +5112,13 @@ export async function runSubagent(
 			writeProcessTerminalCandidate(asyncDir, candidate);
 		} catch (error) {
 			console.error(`Failed to write process-terminal candidate for '${id}':`, error);
+		}
+	}
+	if (finalResultCommitted && config.sessionId) {
+		try {
+			promotePendingResultFile(path.dirname(resultPath), config.sessionId, id, path.basename(resultPath));
+		} catch (error) {
+			console.error(`Failed to promote async result file for '${id}':`, error);
 		}
 	}
 }
