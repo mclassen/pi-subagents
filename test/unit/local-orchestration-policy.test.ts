@@ -21,7 +21,7 @@ describe("local orchestration policy", () => {
 		assert.match(reviewLoop, /Implementation requested.*does not automatically require a child writer/i);
 	});
 
-	it("routes bounded child work to Luna high/xhigh without automatic Terra or Luna max", () => {
+	it("routes child work to Luna high by default and keeps higher effort manual-only", () => {
 		const skill = readProjectFile("skills/pi-subagents/SKILL.md");
 		const prompting = readProjectFile("skills/pi-subagents/references/prompting-and-roles.md");
 		const reviewLoop = readProjectFile("prompts/review-loop.md");
@@ -32,11 +32,12 @@ describe("local orchestration policy", () => {
 
 		for (const text of [skill, prompting, reviewLoop]) {
 			assert.match(text, /Luna high/i);
-			assert.match(text, /Luna xhigh/i);
-			assert.match(text, /Terra[^.\n]*manual[^.\n]*comparison fallback/i);
-			assert.match(text, /Luna max.*never automatic|never route Luna max/i);
+			assert.match(text, /Luna xhigh\/max.*manual-only|manual-only.*Luna xhigh\/max/i);
+			assert.doesNotMatch(text, /(?:select|route) Terra automatically|automatically (?:select|route) Terra/i);
+			assert.match(text, /Luna max.*never automatic|never route Luna max|Luna xhigh\/max.*manual-only/i);
 		}
-		assert.match(worker, /Luna xhigh/);
+		assert.match(worker, /Default to Luna high/i);
+		assert.match(worker, /higher effort is user-selected and never automatic/i);
 		assert.match(scout, /thinking: high/);
 		assert.match(researcher, /thinking: high/);
 		assert.match(oracle, /thinking: medium/);
@@ -51,7 +52,7 @@ describe("local orchestration policy", () => {
 		assert.match(reviewLoop, /explicitly launch the reviewer at Sol medium or higher/i);
 		assert.match(reviewLoop, /use Astra low only when the review itself meets the extreme-complexity threshold/i);
 		assert.match(reviewLoop, /Luna reviewers are limited to Luna-parent sessions/i);
-		assert.match(reviewLoop, /Luna medium more often for bounded mechanical reading/i);
+		assert.match(reviewLoop, /Luna medium for bounded mechanics/i);
 		assert.match(reviewLoop, /do not rely on a configured Luna default in a Sol- or Astra-parent session/i);
 	});
 

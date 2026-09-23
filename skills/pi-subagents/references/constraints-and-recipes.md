@@ -12,7 +12,7 @@ This file is a detailed reference loaded from `skills/pi-subagents/SKILL.md`.
   session exists.
 - **Forked runs inherit parent history.** They are branched threads, not fresh
   filtered contexts. Use fresh context for adversarial reviewers unless the user explicitly asks for forked context.
-- **Default subagent nesting depth is 2.** Policy permits one nested level only: a root-designated fanout child may spawn at most three children, within normally six live descendants total. Nested writers require separate managed temporary worktrees/clones, non-overlapping contracts, scoped commits/patches, and explicit Luna high/xhigh selection—never Sol/inherited Sol or Terra. They cannot recurse, merge, or integrate. Raising runtime depth does not authorize deeper policy nesting.
+- **Default subagent nesting depth is 2.** Policy permits one nested level only: a root-designated fanout child may spawn at most three children, within normally six live descendants total. Nested writers require separate managed temporary worktrees/clones, non-overlapping contracts, scoped commits/patches, and Luna high by default; higher effort is explicit-only. They cannot recurse, merge, or integrate. Raising runtime depth does not authorize deeper policy nesting.
 - **Attention signals are not lifecycle state.** `needs_attention` means no activity has been observed past the configured threshold. `paused` means the child turn was intentionally interrupted or is awaiting direction; it is not the same as `failed`.
 - **Intercom asks are blocking.** A session can only maintain one pending outbound
   ask wait state at a time.

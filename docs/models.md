@@ -92,11 +92,7 @@ Fast mode fails before launch unless the resolved model is on the allowlist. The
 
 ## Recommended model tiering (optional)
 
-A setup that works well in practice: route agents by task shape instead of running everything on one model. Use Luna medium only for exact deterministic mechanics. The normal task tiers are:
-
-1. **Bounded evidence workhorse** — a cheap capable model at high thinking for recon, research, tests, deterministic verification, and focused review. Example: `openai-codex/gpt-5.6-luna:high` on `scout`, `researcher`, `reviewer`, and lightweight `delegate` agents.
-2. **Frozen implementation worker** — use xhigh only for a bounded implementation slice with fixed contracts and deterministic acceptance. Example: `openai-codex/gpt-5.6-luna:xhigh` on `worker`. Do not route Luna max automatically; Luna max and Sol xhigh/max require explicit manual model selection.
-3. **Deep but bounded** — start the ordinary root/coordinator on Luna high. Use Sol medium when actual code/context complexity, causal debugging, coordination, or final-review evidence requires it. Treat Sol medium as the normal automatic ceiling. Sol high is manual-only and reserved for the most complex scenarios possible, with explicit goals and completion criteria. Terra is a manual comparison fallback only.
+Route agents by task shape instead of running everything on one model. Use Luna medium for bounded mechanics and Luna high for ordinary reconnaissance, research, tests, deterministic verification, review, and eligible frozen implementation. The normal escalation path is direct to Sol 5.6 medium when difficult diagnosis, interacting invariants, substantive Luna failure, conflicting evidence, or high-impact review warrants it; do not require an xhigh attempt first. Keep semantic task risk separate from selected model because correctness and critical may share Sol medium. Luna xhigh/max and Sol high/max are manual-only; Astra low is reserved for stuck/looping work or repeated concrete failures after Sol medium. Explicit parent/user model policy wins.
 4. **Taste and intent** — a model that reads human intent well and makes judgment calls without looping, for ambiguous work: UX and design decisions, product tradeoffs, planning from vague requirements, writing quality. Example: `anthropic/claude-fable-5` at `low` for lighter passes and `medium` for harder ones.
 
 The routing rule: use the capability tiers (1–3) when the task is well-scoped, and the intent tier (4) when scoping or judging is the task itself.
