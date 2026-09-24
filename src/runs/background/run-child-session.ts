@@ -93,6 +93,7 @@ export interface RunChildSessionInput {
 	timeoutMessage?: string;
 	stopMessage?: string;
 	onChildEvent?: (event: ChildEvent) => void;
+	onContextWindow?: (contextWindow: number) => void;
 	transcriptWriter?: ChildTranscriptWriter;
 	toolTimeoutMs?: number;
 	runDeadlineAt?: number;
@@ -119,6 +120,7 @@ export interface RunChildSessionResult {
 	observedMutationAttempt?: boolean;
 	structuredOutputToolInvoked?: boolean;
 	structuredOutputMessageStartIndex?: number;
+	structuredOutputFailed?: boolean;
 	watchdog?: ChildWatchdogStateSnapshot;
 	sessionFile?: string;
 	currentTool?: string;
@@ -244,10 +246,14 @@ export function runChildSession(input: RunChildSessionInput): Promise<RunChildSe
 			refreshCurrentTool();
 		};
 
-		const abortChild = (): void => {
+		const abortChild = (settleOpeningImmediately = false): void => {
 			if (settled || promptSettled) return;
-			// A hung session creation has no session to abort yet; the settle timer below is the only
-			// thing that ends the run, and a session created afterwards is disposed by the launch block.
+			// Session creation is not cancellable. A run timeout settles immediately; an explicit
+			// stop or interrupt keeps the bounded grace period so late cleanup failures stay visible.
+			if (!session && settleOpeningImmediately) {
+				settle(undefined, true);
+				return;
+			}
 			void session?.abort().catch(() => {
 				// The run settles through its prompt promise; abort failures are not separately actionable.
 			});
@@ -256,7 +262,6 @@ export function runChildSession(input: RunChildSessionInput): Promise<RunChildSe
 					abortSettleTimer = undefined;
 					if (!settled && !promptSettled) settle(undefined, true);
 				}, ABORT_SETTLE_MS);
-				abortSettleTimer.unref?.();
 			}
 		};
 
@@ -387,7 +392,7 @@ export function runChildSession(input: RunChildSessionInput): Promise<RunChildSe
 			timedOut = true;
 			interrupted = false;
 			error = message;
-			abortChild();
+			abortChild(true);
 		};
 		const armToolTimeout = (event: { toolCallId?: unknown; toolName: string }): void => {
 			const timeoutForTool = effectiveToolTimeoutMs(event.toolName, input.toolTimeoutMs);
@@ -670,6 +675,7 @@ export function runChildSession(input: RunChildSessionInput): Promise<RunChildSe
 					return;
 				}
 				session = created;
+				if (created.contextWindow !== undefined) input.onContextWindow?.(created.contextWindow);
 				const steer = created.steer.bind(created);
 				const followUp = created.followUp.bind(created);
 				created.steer = async (text) => {

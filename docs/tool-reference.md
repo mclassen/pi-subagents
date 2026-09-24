@@ -2,6 +2,8 @@
 
 Parameters and actions for the `subagent` tool. These are what the LLM passes when it calls the tool; most users ask naturally or use slash commands instead.
 
+In a fresh parent session, `subagents_enable({})` makes the full `subagent` tool available on the immediately following model request without launching work. Pi may call it when delegation is authorized by the current request or applicable instructions, or to manage existing runs. Direct execution remains the default; task complexity does not grant delegation authority. The public `subagent` name and parameters are unchanged after activation.
+
 Call `{ action: "guide", topic: "tool-reference" }` for this reference or `topic: "workflows"` for [workflow recipes](workflows.md). Use `topic: "agents"` for authoring, `topic: "missions"` for missions/schedules, and `topic: "watchdog"` for watchdog controls. Guide reads do not change the schema or grant authority.
 
 ## Execution examples
@@ -93,9 +95,9 @@ The complete plain-JSON inventory is validated before the first launch (maximum 
 | `agent` | string | - | One direct child or agent-management target. Workflow child agents are set inside `runs.run` or `runs.all`. |
 | `task` | string | agent default | Direct child's task; requires `agent`, excludes `action` and workflow inputs. `agent` may also select a management target. |
 | `action` | string | - | Offline workflow `validate`, agent management (including `guide`, `children.list`, and `refine`/`refine.show`/`refine.rollback`), lane evidence (`lane.status`, `lane.recordMerge`, `lane.recordSupersession`), mission (`mission.create/list/show/update/resolve-decision/attach-run/close`), Inspect actions (`inspector.command/open/status/close`), Herdr project pane (`project.open/status/close`), status/control, plan-only `worktree.cleanup`, schedule, watchdog, or doctor action. |
-| `topic` | `overview \| workflows \| agents \| missions \| observability \| tool-reference \| configuration \| models \| watchdog \| extension-api` | `overview` | Packaged guide topic for `action: "guide"`. |
+| `topic` | `overview \| workflows \| agents \| missions \| observability \| tool-reference \| configuration \| models \| watchdog \| extension-api \| council` | `overview` | Packaged guide topic for `action: "guide"`. |
 | `config` | object/string | - | Agent config for management create/update. |
-| `context` | `fresh \| fork \| profile` | global or per-agent default, else `fresh` | Explicit `fresh` or `fork` overrides every workflow child. `profile` requires the selected agent's declared `defaultContext` and ignores config `defaultSubagentContext`; missing agent defaults fail. When omitted, [`defaultSubagentContext`](configuration.md#defaultsubagentcontext) wins over each agent's `defaultContext`; implicit fork falls back to fresh without a persisted parent session and leaf. Explicit fork is strict. Packaged `worker`, `oracle`, and `advisor` default to `fork`. |
+| `context` | `fresh \| fork \| profile` | global or per-agent default, else `fresh` | Explicit `fresh` or `fork` overrides every workflow child. `profile` requires the selected agent's declared `defaultContext` and ignores config `defaultSubagentContext`; missing agent defaults fail. When omitted, [`defaultSubagentContext`](configuration.md#defaultsubagentcontext) wins over each agent's `defaultContext`; implicit fork falls back to fresh without a persisted parent session and leaf. Explicit fork is strict. Packaged `worker` defaults to `fresh`; packaged `oracle` and `advisor` default to `fork`. |
 | `model` | string | agent default | Call `{action:"models"}` first and copy an exact `provider/id`; bare ids resolve only if unique, and agent names are not model ids. A suffix such as `provider/id:high` (`off/minimal/low/medium/high/xhigh/max`) overrides agent thinking. The `thinking` field is only for `watchdog.configure`, ignored on dispatch. |
 | `missionId` | string | - | Attach a workflow to an existing project mission instead of creating its default enclosing mission. |
 | `mission` | object/false | auto-create | Override the default enclosing mission with `{ title \| summary, objective?, goal?, budget?, labels? }`. Set exactly one non-empty `title` or `summary`; `objective` and `labels` are optional. `goal` may only be `true`, requires `budget.tokens`, and enables continuation notices. Pass `false` for an intentionally ephemeral workflow with no mission for it or its children and no `state` global. Explicit mission persistence failures are strict. |
@@ -142,7 +144,7 @@ Explicit `context: "fork"` fails fast when the parent session is not persisted, 
 
 When the inherited transcript contains signed Anthropic `thinking` / `redacted_thinking` blocks, `pi-subagents` strips those provider-private blocks from the forked child session: a thinking signature is bound to the session that produced it and cannot be replayed into a branch. The child keeps its requested thinking level and reasons fresh from its first turn; sanitizing the inherited transcript is not a downgrade. Explicit `context: "fork"` never silently downgrades to `fresh`.
 
-In workflow runs that omit `context`, each `runs.run` child follows the global `defaultSubagentContext` when set, then its own `defaultContext`. Without the global setting, a fresh-default scout can run fresh beside a fork-default worker. If the parent session file or current leaf is not available yet, implicit fork-default children run fresh. Pass explicit `context: "fork"` or `context: "fresh"` when you intentionally want one context for every child.
+In workflow runs that omit `context`, each `runs.run` child follows the global `defaultSubagentContext` when set, then its own `defaultContext`. Without the global setting, a fresh-default worker can run fresh beside a fork-default oracle. If the parent session file or current leaf is not available yet, implicit fork-default children run fresh. Pass explicit `context: "fork"` or `context: "fresh"` when you intentionally want one context for every child.
 
 ### Workflow steering
 
@@ -179,7 +181,7 @@ Workflows get `await state.get(key)` and `await state.set(key, value)` through t
 
 ### Retained children
 
-Completed workflow children from the current parent session stay addressable as retained children. `{ action: "children.list" }` lists up to the last 10 with their run ids and explicit `resumable` or `not resumable` state. Resume only rows reported `resumable`; if no row is resumable, start a same-role fallback challenge and label it as fallback. A later workflow continues a resumable child by passing `resume` instead of `agent`:
+Completed workflow children from the current parent session stay addressable as retained children. `{ action: "children.list" }` lists up to the last 10 with their run ids and explicit `resumable` or `not resumable` state. This workflow-only roster is not an exhaustive list of direct native children. Resume only rows reported `resumable`. When the exact run id of an intended direct child is known, inspect it with `{ action: "status", id: "<run-id>" }`; if status identifies the candidate, attempt `{ action: "resume", id: "<run-id>", message: "..." }`. Resume performs the authoritative eligibility check and may reject the attempt. Start a same-role fallback challenge, labeled as fallback, only when no known candidate exists or resume rejects eligibility. A later workflow continues a resumable child by passing `resume` instead of `agent`:
 
 ```js
 { workflowScript: `
@@ -196,7 +198,7 @@ Each workflow key identifies one result lane. Use a new stable workflow key for 
 
 Inside `workflowScript`, `await runs.run(key, { resume, task })` waits for the revived child to finish and returns its completed output and new `runId`. Each resume can return a new retained run id, so loops must continue from the latest returned `runId`. Top-level `{ action: "resume" }` remains detached and returns a background-run receipt.
 
-For a simple implementation challenge outside a workflow script, send the challenge through `subagent({ action: "resume", id: "<retained-writer-run>", message: "Reconsider the implementation and make any better current-scope change." })` only when `children.list` reports that retained writer as `resumable`. If no retained writer is resumable, start a same-role fallback challenge and record why it is a fallback. Use workflow `runs.run({ resume })` only when the script must await the revived writer output before the next step. Do not use `steer` as the sole challenge action for a completed retained child; `steer` with `mode: "follow_up"` only queues text for the next `resume`.
+For a simple implementation challenge outside a workflow script, send the challenge through `subagent({ action: "resume", id: "<retained-writer-run>", message: "Reconsider the implementation and make any better current-scope change." })` when `children.list` reports that retained writer as `resumable`, or attempt it after exact-id status inspection identifies a known direct-child candidate. Status is advisory; resume authoritatively checks eligibility and may reject missing recovery requirements. If there is no known candidate or resume rejects eligibility, start a same-role fallback challenge and record why it is a fallback. Use workflow `runs.run({ resume })` only when the script must await the revived writer output before the next step. Do not use `steer` as the sole challenge action for a completed retained child; `steer` with `mode: "follow_up"` only queues text for the next `resume`.
 
 `resume` and `agent` are mutually exclusive. The revived child keeps its stored agent, model, and tool contract. `gate` is rejected on retained resume items because resume uses the retained child contract.
 
@@ -204,7 +206,7 @@ For a simple implementation challenge outside a workflow script, send the challe
 
 ### Guide
 
-`{ action: "guide" }` reads the packaged `README.md` from the installed version. Pass `topic` to read its packaged `docs/<topic>.md` file instead. Valid topics are `overview`, `workflows`, `agents`, `missions`, `observability`, `tool-reference`, `configuration`, `models`, `watchdog`, and `extension-api`. Unknown topics list the valid values and do not change files. Use `/subagents-guide [topic]` for the slash equivalent.
+`{ action: "guide" }` reads the packaged `README.md` from the installed version. Pass `topic` to read its packaged `docs/<topic>.md` file instead, except `council`, which returns the packaged `skills/council-mode/SKILL.md` with the references it asks for, so `/council` works when Pi runs with `--no-skills`. Valid topics are `overview`, `workflows`, `agents`, `missions`, `observability`, `tool-reference`, `configuration`, `models`, `watchdog`, `extension-api`, and `council`. Unknown topics list the valid values and do not change files. Use `/subagents-guide [topic]` for the slash equivalent.
 
 Agent definitions are not loaded into context by default. Management actions let the LLM discover, inspect, create, update, and delete agents at runtime. An unknown action returns safe next steps (`status` and `list`) and may suggest a close non-destructive action. Destructive actions are only named for a near-complete one-character typo, and suggestions never execute an action.
 
@@ -349,7 +351,7 @@ subagent({ action: "doctor" })
 
 - Multi-child async runs and remembered foreground single, parallel, or chain runs can be revived by passing `index` to choose the child.
 - Nested runs can be resumed by nested id when their live route or persisted nested session metadata is available.
-- Completed external-job runs can use the same `resume` action as a provider follow-up when the registered provider exposes `followUp(input)`. Running external-job parents fail closed with guidance to wait for completion. Unsupported providers fail with an update/reload message.
+- Completed external-job runs, including nested runs, can use the same `resume` action as a provider follow-up when the registered provider exposes `followUp(input)`. Running external-job parents fail closed with guidance to wait for completion. Unsupported providers fail with an update/reload message.
 - Revive starts a new child session from the old session context; it does not resume the live session, and it requires the chosen child to have a persisted `.jsonl` session file.
 - Direct revival takes an exclusive cross-process lease on the canonical session file until the new child finishes. A concurrent attempt fails before Pi is spawned and identifies the owning revived run; dead-owner leases are reclaimed only when staleness can be proved.
 

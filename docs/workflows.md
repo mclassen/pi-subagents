@@ -12,7 +12,7 @@ clarify → (optional scout) → parent implementation/review
 
 A Sol-medium or Sol-high parent reviews directly by default. Add one context-complete Luna-high reviewer only for a genuinely simple read-only review, or justified independent reviewers for high-impact risks. Add a worker only for an eligible frozen mechanical slice; do not add stages or reviewers merely because the task is substantial.
 
-Packaged `worker`, `oracle`, and `advisor` default to forked context when a launch omits `context`. If the parent has no persisted session file or current leaf yet, that implicit default falls back to `fresh`. Pass `context: "fresh"` when you intentionally want a fresh child run, or `context: "fork"` when fork must remain strict.
+Packaged `worker` defaults to fresh context so implementation starts from its assigned brief instead of the parent's unfinished conversation. Packaged `oracle` and `advisor` default to forked context; if the parent has no persisted session file or current leaf yet, that implicit default falls back to `fresh`. Explicit `context`, `context: "profile"`, and global `defaultSubagentContext` still override these profile defaults.
 
 Child-safety boundaries are enforced at runtime:
 

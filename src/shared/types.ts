@@ -706,7 +706,28 @@ export type ProcessTerminal =
 		state: "unknown";
 		reason: ProcessTerminalReason;
 		diagnostic?: string;
+		/** The runner's own exit, when observed even though the process tree could not be verified. */
+		instances?: RunnerProcessInstanceExit[];
 	});
+
+export type WorkflowTerminalProof =
+	| {
+		version: 1;
+		kind: "workflow";
+		runId: string;
+		state: "observed";
+		dispatchClosed: true;
+		observedAt: number;
+		children: ProcessTerminal[];
+	}
+	| {
+		version: 1;
+		kind: "workflow";
+		runId: string;
+		state: "pending" | "unknown";
+		dispatchClosed: boolean;
+		reason: string;
+	};
 
 /** Identifies the durable schedule that launched a run, so its completion is attributable. */
 export interface ScheduleOrigin {
@@ -959,6 +980,9 @@ export interface AgentProgress {
 	thinking?: string;
 	inputTokens?: number;
 	outputTokens?: number;
+	/** Cumulative cache-read/cache-write tokens for the current attempt, alongside inputTokens/outputTokens. */
+	cacheRead?: number;
+	cacheWrite?: number;
 	window?: number;
 	windowPeak?: number;
 	durationMs: number;
@@ -1410,6 +1434,7 @@ export interface Details {
 	context?: "fresh" | "fork" | "mixed";
 	results: SingleResult[];
 	workflowChildren?: WorkflowChildSummary;
+	workflowTerminalProof?: WorkflowTerminalProof;
 	/**
 	 * Terminal completion payloads for runs this bg_wait call observed
 	 * finishing. Async completions travel as result files that are consumed and
@@ -1686,9 +1711,9 @@ export interface AsyncStartedEvent {
 	mode?: SubagentRunMode;
 	agent?: string;
 	agents?: string[];
-	/** Truncated first child task retained for backwards compatibility. */
+	/** Redacted prompt marker for the first child task; workflow roots may omit this field. */
 	task?: string;
-	/** Workflow-level caller task, falling back to the first child task. */
+	/** Redacted prompt marker for the workflow-level caller task or first-child fallback. */
 	goal?: string;
 	chain?: string[];
 	chainStepCount?: number;
@@ -1895,6 +1920,8 @@ export interface AsyncStatus {
 	launchResolvedExtensions?: LaunchResolvedChildExtensions;
 	runtimeAcknowledgedExtensions?: RuntimeAcknowledgedChildExtensions;
 	capabilityCeiling?: ResolvedSubagentCapabilityCeiling;
+	/** Parent admission authority before the selected workflow child's descendant restrictions. */
+	admissionCapabilityCeiling?: ResolvedSubagentCapabilityCeiling;
 	capabilityAudit?: SubagentCapabilityAudit;
 	workflow?: Details["workflow"];
 	workflowChildren?: WorkflowChildSummary;
@@ -2360,6 +2387,8 @@ export interface IntercomEventBus {
 
 export const INTERCOM_DETACH_REQUEST_EVENT = "pi-intercom:detach-request";
 export const INTERCOM_DETACH_RESPONSE_EVENT = "pi-intercom:detach-response";
+/** pi-intercom asks each session for a fixed intercom ID at session start; `claim(id)` answers synchronously. */
+export const INTERCOM_SESSION_IDENTITY_EVENT = "intercom:session-identity";
 export const SUBAGENT_ASYNC_STARTED_EVENT = "subagent:async-started";
 export const SUBAGENT_ASYNC_COMPLETE_EVENT = "subagent:async-complete";
 export const SUBAGENT_PROCESS_TERMINAL_EVENT = "subagent:process-terminal";
@@ -2376,7 +2405,7 @@ export interface SubagentChildStatusEvent {
 	version: 1;
 	runId: string;
 	childId: string;
-	status: "stopping" | "stopped";
+	status: "started" | "stopping" | "stopped";
 	ts: number;
 	reason?: string;
 	source?: "rpc" | "async";
