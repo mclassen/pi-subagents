@@ -86,6 +86,7 @@ import { normalizeExtensionBindings } from "../shared/extension-bindings.ts";
 import type { ChildSessionFactory, DefaultChildSessionFactoryOptions } from "../shared/child-session.ts";
 import { runChildSession, type ChildEvent, type RunChildSessionInput, type RunChildSessionResult, type SteerDelivery, type StepSteerHandler } from "./run-child-session.ts";
 import { loadRunnerChildSessionFactory } from "./runner-child-sessions.ts";
+import { persistRunnerStartupFailure } from "./runner-startup-failure.ts";
 import { SUBAGENT_CHILD_ENV } from "../shared/child-runtime-config.ts";
 import { deriveChildSessionName } from "../../shared/child-session-name.ts";
 import { alignForkedSessionCwd } from "../../shared/fork-session-cwd.ts";
@@ -1096,11 +1097,14 @@ export async function runSingleStepInner(
 			const message = error instanceof Error ? error.message : String(error);
 			return omitUndefinedProperties({ agent: step.agent, output: message, error: message, exitCode: 1, context: step.context, thinkingCeiling: step.thinkingCeiling });
 		}
-		ctx.onAttemptStart?.(omitUndefinedProperties({
+		const attemptModel = omitUndefinedProperties({
 			model: candidate,
 			thinking: resolveEffectiveThinking(candidate, step.thinking),
+		});
+		ctx.onAttemptStart?.({
+			...attemptModel,
 			contextLimit: findModelInfo(candidate, step.modelVerificationRegistry)?.contextWindow,
-		}));
+		});
 		const outputSnapshot = captureSingleOutputSnapshot(step.outputPath);
 		if (effectiveStructuredOutput) {
 			const cleanupError = clearStructuredOutputCaptures(effectiveStructuredOutput);
@@ -1214,6 +1218,7 @@ export async function runSingleStepInner(
 			timeoutMessage: ctx.timeoutMessage,
 			stopMessage: ctx.stopMessage,
 			onChildEvent: ctx.onChildEvent,
+			onContextWindow: (contextLimit) => ctx.onAttemptStart?.({ ...attemptModel, contextLimit }),
 			transcriptWriter,
 			toolTimeoutMs: ctx.toolTimeoutMs,
 			runDeadlineAt: ctx.deadlineAt,
@@ -5119,6 +5124,42 @@ export async function runSubagent(
 			promotePendingResultFile(path.dirname(resultPath), config.sessionId, id, path.basename(resultPath));
 		} catch (error) {
 			console.error(`Failed to promote async result file for '${id}':`, error);
+		}
+	}
+}
+
+/** Heavy execution entry loaded by the bootstrap only after startup commits. */
+export async function runConfiguredSubagentExecution(config: SubagentRunConfig, options?: DefaultChildSessionFactoryOptions): Promise<void> {
+	let childSessions: ChildSessionFactory;
+	try {
+		if (!options?.loadPiCodingAgent) installRunnerHttpDispatcher({ agentDir: getAgentDir(), cwd: process.cwd() });
+		childSessions = await loadRunnerChildSessionFactory(config, options);
+	} catch (error) {
+		try {
+			persistRunnerStartupFailure({
+				asyncDir: config.asyncDir,
+				runId: config.id,
+				runnerProcessInstanceId: config.runnerProcessInstanceId ?? "unknown-runner-instance",
+				message: `Subagent runner startup failed: ${error instanceof Error ? error.message : String(error)}`,
+				...(config.sessionId ? { sessionId: config.sessionId } : {}),
+				...(config.completionOwnerId ? { completionOwnerId: config.completionOwnerId } : {}),
+				candidate: {
+					...(config.revivalLease?.sessionFile ? { sessionFile: config.revivalLease.sessionFile } : {}),
+					...(config.revivalLeaseToken ? { revivalLeaseToken: config.revivalLeaseToken } : {}),
+				},
+			});
+		} catch (persistenceError) {
+			console.error("Failed to persist runner setup failure:", persistenceError);
+		}
+		throw error;
+	}
+	try {
+		await runSubagent(config, childSessions);
+	} finally {
+		try {
+			await childSessions.dispose();
+		} catch (error) {
+			console.error("Failed to dispose runner child sessions:", error);
 		}
 	}
 }

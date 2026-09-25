@@ -253,7 +253,16 @@ export function finalizeProcessTerminal(
 	const existing = readProcessTerminal(asyncDir, { runId, runnerProcessInstanceId: runnerClose.processInstanceId });
 	if (existing && fs.existsSync(processTerminalPath(asyncDir))) {
 		if (existing.state === "observed" && existing.runId === runId && existing.runnerProcessInstanceId === runnerClose.processInstanceId) return existing;
-		if (existing.state === "unknown") return existing;
+		if (existing.state === "unknown") {
+			if (existing.instances?.length || existing.reason === "proof-write-failed") return existing;
+			const withExit: ProcessTerminal = { ...existing, instances: [{ kind: "runner", ...runnerClose }] };
+			try {
+				writeAtomicJson(processTerminalPath(asyncDir), withExit);
+				return withExit;
+			} catch {
+				return existing;
+			}
+		}
 	}
 	let proof: ProcessTerminal;
 	let candidateForOverlay: ProcessTerminalCandidate | undefined;
@@ -301,6 +310,7 @@ export function finalizeProcessTerminal(
 	} catch (error) {
 		proof = unknownProof(runId, runnerClose.processInstanceId, "proof-write-failed", errorMessage(error));
 	}
+	if (proof.state === "unknown") proof = { ...proof, instances: [{ kind: "runner", ...runnerClose }] };
 	let durable = false;
 	try {
 		writeAtomicJson(processTerminalPath(asyncDir), proof);

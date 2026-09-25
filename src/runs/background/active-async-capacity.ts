@@ -220,6 +220,8 @@ function runnerReleaseVerdict(owner: ActiveAsyncCapacityOwner, status: AsyncStat
 	if (status.runId !== owner.runId) return { state: "retained", reason: `status run ${status.runId} does not match owner run ${owner.runId}` };
 	if (!terminalState(status.state)) return { state: "retained", reason: `run is still ${status.state}` };
 	if (status.processTerminal?.state === "not-started"
+		&& status.pid === undefined
+		&& !fs.existsSync(path.join(owner.asyncDir, "process-terminal.json"))
 		&& status.processTerminal.runId === owner.runId
 		&& status.processTerminal.runnerProcessInstanceId === owner.runnerProcessInstanceId
 		&& typeof status.error === "string"
@@ -281,6 +283,8 @@ function workflowReleaseVerdict(owner: ActiveAsyncCapacityOwner, status: AsyncSt
 		if (!terminalState(childStatus.state)) return { state: "retained", reason: `async workflow child ${label} is still ${childStatus.state}` };
 		const childProcessTerminal = childStatus.processTerminal;
 		if (childProcessTerminal?.state === "not-started"
+			&& childStatus.pid === undefined
+			&& !fs.existsSync(path.join(childDir, "process-terminal.json"))
 			&& childProcessTerminal.runId === step.runId
 			&& typeof childProcessTerminal.runnerProcessInstanceId === "string"
 			&& childStatus.state === "failed"

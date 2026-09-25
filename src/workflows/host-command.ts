@@ -202,9 +202,12 @@ export async function executeWorkflowHostCommand(input: {
 			clearTimeout(timeout);
 			input.signal.removeEventListener("abort", onAbort);
 			const terminal = termination ? await termination : await processTree?.finishAfterWriterClose();
-			const cleanupError = terminal?.state === "unknown" ? terminal.reason : undefined;
+			const cleanupError = terminal?.state === "unknown"
+				? `${terminal.reason}${"diagnostic" in terminal && terminal.diagnostic ? `: ${terminal.diagnostic}` : ""}`
+				: undefined;
 			const state = timedOut ? "timed-out" : stopped ? "stopped" : exitCode === 0 && !spawnError && !cleanupError ? "passed" : "failed";
-			const error = spawnError instanceof Error ? spawnError.message : spawnError ? String(spawnError) : cleanupError ? `Process-tree cleanup failed: ${cleanupError}.` : state === "timed-out" ? `Command timed out after ${input.params.timeoutMs}ms.` : state === "stopped" ? "Command stopped because the workflow was aborted." : state === "failed" ? `Command exited with code ${exitCode ?? "unknown"}.` : undefined;
+			const commandError = spawnError instanceof Error ? spawnError.message : spawnError ? String(spawnError) : state === "timed-out" ? `Command timed out after ${input.params.timeoutMs}ms.` : state === "stopped" ? "Command stopped because the workflow was aborted." : exitCode !== 0 ? `Command exited with code ${exitCode ?? "unknown"}.` : undefined;
+			const error = [commandError, cleanupError ? `Process-tree cleanup failed: ${cleanupError}.` : undefined].filter(Boolean).join(" ") || undefined;
 			try {
 				if (input.claimedOutputPath && resolveWorkflowHostOutputClaimPath(outputPath) !== input.claimedOutputPath) throw new Error(`output path changed after it was claimed.`);
 				if (explicitOutputParent) {

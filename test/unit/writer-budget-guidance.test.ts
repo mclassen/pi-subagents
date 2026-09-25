@@ -26,7 +26,8 @@ describe("writer budget guidance", () => {
 		const reviewLoop = readProjectFile("prompts/review-loop.md");
 
 		assert.match(reviewLoop, /Implementation requested.*does not automatically require a child writer/i);
-		assert.match(reviewLoop, /parent is the default implementation and review owner and starts on Luna high/);
+		assert.match(reviewLoop, /parent is the default implementation and review owner/);
+		assert.match(reviewLoop, /Luna high for ordinary implementation and review/);
 		assert.match(reviewLoop, /Iteration quotas never force worker delegation/);
 		assert.match(reviewLoop, /Implementation owner: `parent` or `worker`/);
 		assert.match(reviewLoop, /Packet economics:/);

@@ -4,6 +4,30 @@ import { syncBuiltinESMExports } from "node:module";
 import test from "node:test";
 import { createOwnedProcessTreeController } from "../../src/runs/background/owned-process-tree.ts";
 
+test("disposed observation cannot later certify cleanup or signal a reused process", async (t) => {
+	const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
+	let snapshots = 0;
+	t.mock.method(childProcess, "spawnSync", () => {
+		snapshots++;
+		return { status: 0, stdout: "[]", stderr: "" };
+	});
+	try {
+		Object.defineProperty(process, "platform", { ...platform, value: "win32" });
+		syncBuiltinESMExports();
+		const controller = createOwnedProcessTreeController(100);
+		controller.dispose();
+		controller.dispose();
+		const proof = await controller.terminate();
+		assert.equal(proof.state, "unknown");
+		assert.deepEqual(await controller.finishAfterWriterClose(), proof);
+		assert.equal(snapshots, 1, "disposal must not perform cleanup or allow later signaling");
+	} finally {
+		Object.defineProperty(process, "platform", platform);
+		t.mock.restoreAll();
+		syncBuiltinESMExports();
+	}
+});
+
 // Scripted OS snapshots exercise the real controller without signaling OS processes.
 for (const scenario of [
 	"initial-orphan",

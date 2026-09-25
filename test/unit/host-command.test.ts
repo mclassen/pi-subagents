@@ -1,4 +1,8 @@
 import assert from "node:assert/strict";
+import childProcess from "node:child_process";
+import { EventEmitter } from "node:events";
+import { syncBuiltinESMExports } from "node:module";
+import { PassThrough } from "node:stream";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -49,7 +53,7 @@ describe("workflow host commands", () => {
 			defaultOutputPath: path.join(root, "fallback.log"),
 			signal: new AbortController().signal,
 		});
-		assert.equal(result.ok, true);
+		assert.equal(result.ok, true, JSON.stringify(result));
 		assert.equal(result.state, "passed");
 		assert.equal(result.exitCode, 0);
 		assert.match(result.stdout, /passed/);
@@ -59,6 +63,36 @@ describe("workflow host commands", () => {
 		if (process.platform !== "win32") assert.equal(fs.statSync(outputPath).mode & 0o777, 0o600);
 		assert.deepEqual(fs.readdirSync(path.dirname(outputPath)), ["command.log"]);
 	});
+
+	for (const timedOut of [false, true]) {
+		it(`preserves unverified cleanup diagnostics${timedOut ? " alongside timeout" : " after exit zero"}`, { skip: process.platform !== "win32" }, async (t) => {
+			const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-host-command-proof-"));
+			roots.push(root);
+			// Scripted process and OS snapshot: no OS processes are spawned or signaled.
+			const child = Object.assign(new EventEmitter(), { pid: 100, stdout: new PassThrough(), stderr: new PassThrough() });
+			t.mock.method(childProcess, "spawn", () => child);
+			t.mock.method(childProcess, "spawnSync", () => ({ status: 1, stdout: "", stderr: "snapshot unavailable" }));
+			syncBuiltinESMExports();
+			t.mock.timers.enable({ apis: ["setTimeout"] });
+			try {
+				const pending = executeWorkflowHostCommand({
+					key: "unverified", params: { kind: "command", command: "scripted", timeoutMs: timedOut ? 1 : 5000 },
+					cwd: root, defaultOutputPath: path.join(root, "output.log"), signal: new AbortController().signal,
+				});
+				if (timedOut) t.mock.timers.tick(1);
+				child.emit("close", 0);
+				const result = await pending;
+				assert.equal(result.ok, false, "an exit-zero command cannot pass with unknown cleanup");
+				assert.equal(result.state, timedOut ? "timed-out" : "failed");
+				assert.match(result.error ?? "", /Process-tree cleanup failed: verification-failed: snapshot unavailable/);
+				if (timedOut) assert.match(result.error ?? "", /Command timed out after 1ms/);
+			} finally {
+				t.mock.timers.reset();
+				t.mock.restoreAll();
+				syncBuiltinESMExports();
+			}
+		});
+	}
 
 	it("returns failed and timed-out command evidence", async () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-host-command-failure-"));

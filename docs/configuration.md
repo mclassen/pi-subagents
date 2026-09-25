@@ -76,6 +76,12 @@ For a native Pi `model_verification_failed` where your proxy accepts `claude-hai
 
 Replace `YOUR_PROVIDER` with the resolved Pi provider ID. Keep the outgoing model alias unchanged. This native remedy already exists in v0.65.1; it does not infer equivalence from provider prefixes or dates. The built-in external `claude-code` adapter does not invoke this verifier or use this setting. If an external run shows this diagnostic, identify the installed version, resolved runner kind/adapter, and error location before applying a native remedy. Thanks to [sixtus](https://github.com/sixtus) for the concrete request-ID/response-ID example in [#1922](https://github.com/nicobailon/pi-subagents/issues/1922).
 
+## Tool activation lifecycle
+
+On Pi 0.86.1 or newer, a fresh unrestricted parent starts with `subagents_enable`, `bg_wait`, and `subagent_supervisor` active while `subagent` stays registered but inactive. Calling `subagents_enable({})` preserves unrelated active tools and exposes `subagent` on the next model request. It does not launch a child or infer authority from prompt keywords.
+
+The recorded native `subagent` selection is restored on resume, reload, and tree navigation, so an activated session stays activated and a cold session stays cold. Older history without tool-selection records keeps eager `subagent` availability. If Pi's allowlist or exclusions remove the loader, the extension does not hide `subagent`; if they remove `subagent`, the loader reports it unavailable. Hosts older than the verified dynamic-tool baseline keep eager behavior and log one compatibility warning.
+
 ## `toolDescriptionMode`
 
 ```json
@@ -400,7 +406,7 @@ Routes relative `output` paths for single-agent `/run` calls under this director
 { "maxSubagentDepth": 1 }
 ```
 
-Controls nested delegation when no stricter limit is inherited from the launching child's runtime config. Per-agent `maxSubagentDepth` can tighten the limit for that agent's child runs, but cannot relax an inherited stricter limit. This applies even to children that explicitly declare `tools: subagent` or `allowNestedSubagents: true`; at the cap, execution fanout is blocked instead of silently hiding nested work.
+Controls nested delegation when no stricter limit is inherited from the launching child's runtime config. The default is 2 when neither the runtime limit, `PI_SUBAGENT_MAX_DEPTH`, nor this setting supplies a limit. Per-agent `maxSubagentDepth` can tighten the limit for that agent's child runs, but cannot relax an inherited stricter limit. This applies even to children that explicitly declare `tools: subagent` or `allowNestedSubagents: true`; at the cap, execution fanout is blocked instead of silently hiding nested work.
 
 ## `PI_SUBAGENT_PI_BINARY`
 
@@ -412,13 +418,21 @@ Overrides the `pi` command pi-subagents spawns for project panes and the profile
 
 Foreground children remain sessions inside the parent. Npm background children retain their Node runner and host-package peer aliases; this variable does not turn npm Pi into a binary-backed runner. See [Standalone background execution](standalone-background.md) for the official tested target.
 
+## `PI_PACKAGE_DIR`
+
+```bash
+export PI_PACKAGE_DIR=/path/to/pi-coding-agent-package
+```
+
+Pi's own package/assets root is also authoritative when pi-subagents verifies the running host for dynamic tool activation. Host discovery prefers a package root owned by the real `process.argv[1]`, then a nonblank `PI_PACKAGE_DIR`, then `PI_SUBAGENTS_PI_CODING_AGENT_PACKAGE_ROOT`. For a proven Bun-compiled Pi process with a virtual argv entry, it can finally validate package assets adjacent to the canonical executable or in the installed `<prefix>/share/pi-coding-agent` layout. Every selected root must contain a `package.json` whose name is exactly `@earendil-works/pi-coding-agent`; an invalid explicit root fails closed rather than selecting another installation. Empty or whitespace-only values are ignored.
+
 ## `PI_SUBAGENTS_PI_CODING_AGENT_PACKAGE_ROOT`
 
 ```bash
 export PI_SUBAGENTS_PI_CODING_AGENT_PACKAGE_ROOT=/path/to/pi-coding-agent-package
 ```
 
-Overrides host-package discovery for spawned children. Foreground CLI resolution uses this root to locate the `pi` CLI script, and the detached background runner uses it for jiti host resolution and peer-package aliases, so both child kinds agree on one host. It is consulted when argv-based automatic discovery cannot identify the host, such as a wrapper install or a non-standard layout. The value must be the root of a canonical `@earendil-works/pi-coding-agent` installation (the directory containing its `package.json`, with that package name); both child kinds still validate the package name and its peer packages from that install tree, so a package whose manifest carries a different name is rejected even with the override set. Empty or whitespace-only values are ignored.
+Overrides host-package discovery for spawned children. Foreground CLI resolution uses this root to locate the `pi` CLI script, and the detached background runner uses it for jiti host resolution and peer-package aliases, so both child kinds agree on one host. For running-host activation verification it follows argv ownership and Pi's own `PI_PACKAGE_DIR`, and precedes inferred Bun image layouts. The value must be the root of a canonical `@earendil-works/pi-coding-agent` installation (the directory containing its `package.json`, with that package name); both child kinds still validate the package name and its peer packages from that install tree, so a package whose manifest carries a different name is rejected even with the override set. Empty or whitespace-only values are ignored.
 
 The default in-process child session loader consults the same discovery. Before falling back to a bare `@earendil-works/pi-coding-agent` import, it resolves the host package root (the running pi process's location, then this override, then pi-subagents' own install tree as a last fallback) and imports the host's entry file directly, so children share the host's single SDK instance instead of a second copy. Roots whose `package.json` name is not `@earendil-works/pi-coding-agent` are rejected. When this override is selected, an unimportable root is reported instead of falling back to a bare import from a different tree.
 

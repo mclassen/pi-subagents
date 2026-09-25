@@ -13,12 +13,14 @@ describe("pi-subagents delegation policy guidance", () => {
 		const lanes = readProjectFile("skills/pi-subagents/references/multi-lane-orchestration.md");
 		const guidance = [skill, prompting, recipes, lanes].join("\n");
 
-		assert.match(skill, /parent works directly by default/i);
-		assert.match(skill, /only when the operator\s+requested delegation in the current request.*applicable user\/project\s+instructions/is);
-		assert.match(skill, /task size, complexity, risk, tool-call count, recipe fit.*does not independently authorize delegation/is);
+		assert.match(skill, /parent handles focused, serial, context-heavy, or causally coupled work directly/i);
+		assert.match(skill, /delegation is subordinate to user\/global eligibility policy/i);
+		assert.match(skill, /keep work local unless a child is obviously independent, context-light.*independently verifiable.*less packet\/review cost/is);
+		assert.match(skill, /avoid.*delegation merely because work is non-trivial or needs multiple tool calls/is);
 		assert.match(skill, /smallest bounded mode.*earns its token and\s+elapsed-time overhead/is);
 		assert.match(prompting, /all launch guidance.*assumes delegation was requested by the operator/is);
-		assert.match(recipes, /recipes select a shape; they do not authorize delegation/i);
+		assert.match(recipes, /parent performs the serial path by default/i);
+		assert.match(recipes, /frozen mechanical slice passes the user\/global eligibility gate/i);
 		assert.match(lanes, /only after delegation is operator-authorized.*materially improves/is);
 
 		assert.doesNotMatch(guidance, /not the routine primary doer/i);

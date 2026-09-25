@@ -250,6 +250,8 @@ function observedUnlessLiveDetached(processGroupId: number, detached: readonly n
 export interface OwnedProcessTreeController {
 	terminate(): Promise<ProcessTreeTerminal>;
 	finishAfterWriterClose(): Promise<ProcessTreeTerminal>;
+	/** Stop observation without signaling or certifying cleanup; no later termination is allowed. */
+	dispose(): void;
 }
 
 export function createOwnedProcessTreeController(
@@ -350,5 +352,12 @@ export function createOwnedProcessTreeController(
 	return {
 		terminate: () => finish(false),
 		finishAfterWriterClose: () => finish(true),
+		dispose: () => {
+			if (ownershipMonitor) clearInterval(ownershipMonitor);
+			termination ??= Promise.resolve({
+				state: "unknown", reason: "verification-failed",
+				diagnostic: "Process-tree observation was released without cleanup proof.",
+			});
+		},
 	};
 }

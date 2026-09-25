@@ -4,7 +4,7 @@ import { syncBuiltinESMExports } from "node:module";
 import * as os from "node:os";
 import * as path from "node:path";
 import { randomUUID } from "node:crypto";
-import { afterEach, describe, it } from "node:test";
+import { afterEach, before, describe, it } from "node:test";
 import {
 	NATIVE_SUPERVISOR_TOOL_NAME,
 	createNativeSupervisorChannel,
@@ -16,6 +16,14 @@ import { SUPERVISOR_REPLY_ENTRY_TYPE, SUPERVISOR_REQUEST_MESSAGE_TYPE } from "..
 import { INTERCOM_DETACH_REQUEST_EVENT, type SubagentState } from "../../src/shared/types.ts";
 
 const createdChannels: string[] = [];
+
+before(() => {
+	// Node lazily loads recursive removal and captures fs methods. Initialize it
+	// before the readdir spy, or cleanup permanently retains that spy on Windows.
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "supervisor-rimraf-init-"));
+	fs.writeFileSync(path.join(root, "fixture"), "");
+	fs.rmSync(root, { recursive: true, force: true });
+});
 
 function makeState(sessionId: string | null, ctx: unknown): SubagentState {
 	return {
@@ -1048,6 +1056,34 @@ describe("native supervisor channel", () => {
 		assert.equal(fs.existsSync(requestFile(inactiveRunId, inactiveId)), false);
 		assert.equal(fs.existsSync(requestFile(progressRunId, progressId)), false);
 		assert.equal(fs.existsSync(requestFile(foreignRunId, foreignId)), true);
+	});
+
+	it("lists each pending request with its question text", async () => {
+		const currentSessionId = `session-${randomUUID()}`;
+		const runId = `run-${randomUUID()}`;
+		const requestId = writeRequest({ sessionId: currentSessionId, runId, message: "Rerun each failed job separately?\nOr rerun the whole run?" });
+		const registeredTools = new Map<string, { execute: (_id: string, params: { action: string }) => Promise<{ content: Array<{ text: string }> }> }>();
+		const ctx = {
+			cwd: process.cwd(),
+			hasUI: false,
+			sessionManager: { getSessionId: () => currentSessionId, getSessionFile: () => null, getEntries: () => [] },
+		};
+		const pi = {
+			getAllTools: () => [...registeredTools.keys()].map((name) => ({ name })),
+			registerTool: (tool: { name: string; execute: (_id: string, params: { action: string }) => Promise<{ content: Array<{ text: string }> }> }) => { registeredTools.set(tool.name, tool); },
+			sendMessage: () => {},
+			getSessionName: () => "shared-name",
+		};
+		const channel = createNativeSupervisorChannel(pi as never, makeState(currentSessionId, ctx));
+		try {
+			channel.start();
+			const result = await registeredTools.get(NATIVE_SUPERVISOR_TOOL_NAME)!.execute("pending", { action: "pending" });
+			const text = result.content[0]!.text;
+			assert.match(text, new RegExp(`^- ${requestId}: `));
+			assert.match(text, /\n {2}Rerun each failed job separately\?\n {2}Or rerun the whole run\?/);
+		} finally {
+			channel.dispose();
+		}
 	});
 
 	it("refreshes pending requests before listing or replying", async () => {

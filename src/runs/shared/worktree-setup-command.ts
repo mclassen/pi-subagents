@@ -187,6 +187,7 @@ export async function runSetupCommand(
 		result.stderr = Buffer.concat(stderr).toString("utf8");
 		return result;
 	} finally {
+		tree?.dispose();
 		if (timer) clearTimeout(timer);
 		options.signal?.removeEventListener("abort", onAbort);
 		child.stdout.removeListener("data", onStdout);

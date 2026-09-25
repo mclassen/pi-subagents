@@ -25,7 +25,7 @@ assert.equal(createHash("sha256").update(fs.readFileSync(binary)).digest("hex"),
 const root = process.argv[3] ? path.resolve(process.argv[3]) : fs.mkdtempSync(path.join(os.tmpdir(), "pi-standalone-smoke-"));
 fs.mkdirSync(root, { recursive: true });
 assert.deepEqual(fs.readdirSync(root), [], "requires an empty artifact directory");
-const coreSdk = /(?:^|\/)@earendil-works\/(?:pi-coding-agent|pi-agent-core|pi-ai|pi-tui)(?:\/|$)/;
+const coreSdk = /(?:^|\/)(?:@earendil-works\/(?:pi-coding-agent|pi-agent-core|pi-ai|pi-tui)|typebox)(?:\/|$)/;
 function run(name, command, args) {
 	const result = spawnSync(command, args, { cwd: source, encoding: "utf8", timeout: 90_000, maxBuffer: 10 * 1024 * 1024 });
 	fs.writeFileSync(path.join(root, `${name}.log`), `${result.stdout ?? ""}${result.stderr ?? ""}`);
@@ -85,7 +85,7 @@ if (mode === "bootstrap-errors") {
 		{ name: "relative-input", configPath: "relative.json", expected: /Missing absolute PI_SUBAGENT_RUNNER_CONFIG/ },
 		{ name: "missing-file", configPath: "/stage/not-present.json", expected: /ENOENT/ },
 		{ name: "malformed-json", payload: "{", expected: /Subagent binary runner error/ },
-		{ name: "invalid-shape", payload: "{}", expected: /Invalid binary runner configuration/ },
+		{ name: "invalid-shape", payload: "{}", expected: /Invalid runner configuration: 'id' must be a non-empty string/ },
 		{ name: "wrong-authorization", barrier: true, expected: /startup control token does not match/ },
 		{ name: "missing-authorization", barrier: true, expected: /waiting for runner startup control 'proceed'/ },
 	];

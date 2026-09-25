@@ -274,7 +274,7 @@ describe("active async capacity", () => {
 			writeJson(path.join(sourceDir, "process-terminal.json"), observedProof("source", "source-runner"));
 			const transferred = transferActiveAsyncCapacity({ sessionId: "session-a", limit: 1, sourceRunId: "source", runId: "revived", asyncDir: revivedDir }, { rootDir });
 			assert.ok(transferred);
-			writeJson(path.join(revivedDir, "status.json"), { runId: "revived", sessionId: "session-a", mode: "single", state: "failed", startedAt: 200, processTerminal: { version: 1, state: "not-started", runId: "revived", runnerProcessInstanceId: "revived-runner" } });
+			writeJson(path.join(revivedDir, "status.json"), { runId: "revived", sessionId: "session-a", mode: "single", state: "failed", startedAt: 200, pid: process.pid, error: "startup failed", processTerminal: { version: 1, state: "not-started", runId: "revived", runnerProcessInstanceId: "revived-runner" } });
 			transferred.markStarted("revived-runner");
 			assert.equal(transferred.rollback(), false);
 
@@ -381,7 +381,7 @@ describe("active async capacity", () => {
 			assert.ok(workflow);
 			workflow.markWorkflowStarted();
 			writeJson(path.join(workflowDir, "status.json"), { runId: "workflow", sessionId: "session-a", mode: "workflow", state: "failed", startedAt: 100, steps: [{ agent: "worker", workflowKey: "resume", runId: "revived-child", async: true, status: "failed" }] });
-			writeJson(path.join(childDir, "status.json"), { runId: "revived-child", sessionId: "session-a", mode: "single", state: "failed", startedAt: 100, processTerminal: { version: 1, state: "not-started", runId: "revived-child", runnerProcessInstanceId: "runner-child" } });
+			writeJson(path.join(childDir, "status.json"), { runId: "revived-child", sessionId: "session-a", mode: "single", state: "failed", startedAt: 100, pid: process.pid, error: "startup failed", processTerminal: { version: 1, state: "not-started", runId: "revived-child", runnerProcessInstanceId: "runner-child" } });
 
 			assert.deepEqual(getActiveAsyncCapacitySnapshot("session-a", 1, { rootDir }), { used: 1, limit: 1 });
 			writeJson(path.join(childDir, "process-terminal.json"), observedProof("revived-child", "runner-child"));

@@ -2,7 +2,14 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-const configuredTempRoot = process.env.PI_SUBAGENTS_TEMP_ROOT?.trim();
+const loaderState = process.env.PI_SUBAGENTS_TEST_LOADER;
+const nestedTestProcess = loaderState !== undefined;
+const testFileProcess = process.env.NODE_TEST_CONTEXT !== undefined && loaderState !== "test-file";
+// Only subprocesses of an individual test may reuse its root. A suite must
+// never scan or clean the operator's runtime directory or a sibling's state.
+const configuredTempRoot = nestedTestProcess && !testFileProcess
+	? process.env.PI_SUBAGENTS_TEMP_ROOT?.trim()
+	: undefined;
 const tempRoot = configuredTempRoot
 	? path.resolve(configuredTempRoot)
 	: fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-test-root-"));
@@ -13,9 +20,6 @@ process.env.TMPDIR = tempRoot;
 process.env.TMP = tempRoot;
 process.env.TEMP = tempRoot;
 
-const loaderState = process.env.PI_SUBAGENTS_TEST_LOADER;
-const nestedTestProcess = loaderState !== undefined;
-const testFileProcess = process.env.NODE_TEST_CONTEXT !== undefined && loaderState !== "test-file";
 if (!nestedTestProcess || testFileProcess) process.env.PI_SUBAGENTS_TEST_PARENT_PID = String(process.pid);
 const isolatedHome = path.join(tempRoot, "home");
 process.env.HOME = isolatedHome;

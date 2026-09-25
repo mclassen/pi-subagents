@@ -7,6 +7,7 @@ import type { ExternalProcessStatus, ProcessTreeTerminal } from "../../shared/ty
 import { WINDOWS_APPLICATION_LAUNCH_SAFETY, WINDOWS_HIDDEN_PROCESS_OPTIONS } from "../../shared/windows-launch-safety.ts";
 import { createOwnedProcessTreeController, type OwnedProcessTreeController } from "../background/owned-process-tree.ts";
 import { omitExtensionBindingsEnv } from "./extension-bindings.ts";
+import { omitGitRoutingEnv } from "./git-environment.ts";
 import {
 	invalidateExternalCliPreflight,
 	preflightExternalCli,
@@ -87,7 +88,8 @@ function narrowLimit(value: number | undefined, ceiling: number, label: string):
 }
 
 function externalEnvironment(allowlist: readonly string[] | undefined, values: Readonly<Record<string, string>> | undefined): NodeJS.ProcessEnv {
-	if (!allowlist) return omitExtensionBindingsEnv(process.env);
+	// An adapter allowlist is a deliberate choice, so only the inherited default is filtered.
+	if (!allowlist) return omitGitRoutingEnv(omitExtensionBindingsEnv(process.env));
 	const allowed = new Set(allowlist);
 	const env: NodeJS.ProcessEnv = {};
 	for (const key of allowed) {

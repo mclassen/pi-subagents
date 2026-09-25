@@ -121,15 +121,14 @@ console.log(JSON.stringify({ agentDir: getAgentDir(), profilePath: path.join(pro
 			});
 			assert.equal(result.status, 0, result.stderr);
 			const output = JSON.parse(result.stdout.trim()) as { agentDir: string; profilePath: string; settingsPath: string; tempDir: string; testParentPid: string };
-			const isolatedAgentDir = path.join(tempRoot, "home", ".pi", "agent");
+			assert.notEqual(output.tempDir, tempRoot, "the top-level preload must ignore the inherited runtime root");
+			const isolatedAgentDir = path.join(output.tempDir, "home", ".pi", "agent");
 			assert.equal(output.agentDir, isolatedAgentDir);
 			assert.equal(output.profilePath, path.join(isolatedAgentDir, "profiles", "pi-subagents", "isolated.json"));
 			assert.equal(output.settingsPath, path.join(isolatedAgentDir, "settings.json"));
-			assert.equal(output.tempDir, tempRoot);
 			assert.equal(output.testParentPid, String(result.pid));
-			if (process.platform === "darwin") assert.equal(fs.existsSync(path.join(tempRoot, ".metadata_never_index")), true);
-			assert.equal(fs.existsSync(output.profilePath), true);
-			assert.equal(fs.existsSync(output.settingsPath), true);
+			assert.equal(fs.existsSync(output.tempDir), false, "the owned root must be cleaned at exit");
+			assert.equal(fs.existsSync(tempRoot), false, "the inherited runtime root must remain untouched");
 			assert.equal(fs.existsSync(callerAgentDir), false);
 		} finally {
 			fs.rmSync(fixture, { recursive: true, force: true });
@@ -144,10 +143,42 @@ console.log(JSON.stringify({ agentDir: getAgentDir(), profilePath: path.join(pro
 			"--eval", "console.log(process.env.PI_SUBAGENTS_TEST_PARENT_PID)",
 		], {
 			encoding: "utf-8",
+			...WINDOWS_HIDDEN_PROCESS_OPTIONS,
 			env: { ...process.env, PI_SUBAGENTS_TEST_LOADER: "loaded", PI_SUBAGENTS_TEST_PARENT_PID: String(process.pid) },
 		});
 		assert.equal(result.status, 0, result.stderr);
 		assert.equal(result.stdout.trim(), String(result.pid));
+	});
+
+	it("gives sibling test files separate roots while their subprocesses reuse them", () => {
+		const fixture = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-sibling-isolation-"));
+		const sentinel = path.join(fixture, "keep.txt");
+		fs.writeFileSync(sentinel, "operator state");
+		const loaderUrl = new URL("../support/isolated-temp-root.mjs", import.meta.url).href;
+		try {
+			const roots: string[] = [];
+			for (let index = 0; index < 2; index++) {
+				const result = spawnSync(process.execPath, ["--import", loaderUrl, "--eval", "console.log(process.env.PI_SUBAGENTS_TEMP_ROOT)"], {
+					encoding: "utf-8", timeout: 10_000, ...WINDOWS_HIDDEN_PROCESS_OPTIONS,
+					env: { ...process.env, NODE_TEST_CONTEXT: "child-v8", PI_SUBAGENTS_TEST_LOADER: "loaded", PI_SUBAGENTS_TEMP_ROOT: fixture },
+				});
+				assert.equal(result.status, 0, result.stderr);
+				const root = result.stdout.trim();
+				assert.notEqual(root, fixture);
+				assert.equal(fs.existsSync(root), false);
+				roots.push(root);
+			}
+			assert.notEqual(roots[0], roots[1]);
+			const nested = spawnSync(process.execPath, ["--import", loaderUrl, "--eval", "console.log(process.env.PI_SUBAGENTS_TEMP_ROOT)"], {
+				encoding: "utf-8", timeout: 10_000, ...WINDOWS_HIDDEN_PROCESS_OPTIONS,
+				env: { ...process.env, NODE_TEST_CONTEXT: "child-v8", PI_SUBAGENTS_TEST_LOADER: "test-file", PI_SUBAGENTS_TEMP_ROOT: fixture },
+			});
+			assert.equal(nested.status, 0, nested.stderr);
+			assert.equal(nested.stdout.trim(), fixture);
+			assert.equal(fs.readFileSync(sentinel, "utf-8"), "operator state");
+		} finally {
+			fs.rmSync(fixture, { recursive: true, force: true });
+		}
 	});
 
 	it("anchors shared temp directories under one scoped root", () => {
@@ -171,11 +202,12 @@ console.log(JSON.stringify({ agentDir: getAgentDir(), profilePath: path.join(pro
 			const result = spawnSync(process.execPath, [
 				"--experimental-strip-types",
 				"--import", new URL("../support/register-loader.mjs", import.meta.url).href,
-				fileURLToPath(new URL("../../src/runs/background/subagent-runner.ts", import.meta.url)),
+				fileURLToPath(new URL("../../src/runs/background/subagent-runner-bootstrap.ts", import.meta.url)),
 				configPath,
 			], {
 				env: { ...process.env, PI_SUBAGENTS_TEST_PARENT_PID: "2147483647" },
 				encoding: "utf-8",
+				...WINDOWS_HIDDEN_PROCESS_OPTIONS,
 				timeout: 10_000,
 			});
 			assert.equal(result.status, 1, result.stderr);

@@ -2953,7 +2953,8 @@ describe("scripted workflow runtime", () => {
 		assert.equal(launchCount, 0);
 	});
 
-	it("classifies admission subprocess cancellation on workflow timeout as stopped", { timeout: 5_000 }, async (t) => {
+	// Windows cancellation also waits for bounded CIM snapshots and taskkill verification.
+	it("classifies admission subprocess cancellation on workflow timeout as stopped", { timeout: process.platform === "win32" ? 30_000 : 5_000 }, async (t) => {
 		const budget = createRunFanoutBudget("admission-timeout", 1);
 		t.after(() => fs.rmSync(budget.directory, { recursive: true, force: true }));
 		let spawned = false;

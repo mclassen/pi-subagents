@@ -22,7 +22,7 @@ import { normalizeParallelGroups } from "./parallel-groups.ts";
 import { reconcileAsyncRun, reconcileNestedAsyncDescendants } from "./stale-run-reconciler.ts";
 import { findNestedRouteForRootId, hasLiveNestedDescendants, retainNestedLookupRoute, updateAsyncJobNestedProjection } from "../shared/nested-events.ts";
 import { listAsyncRuns, type AsyncRunSummary } from "./async-status.ts";
-import { EXTERNAL_JOB_BRIDGE_REQUEST_DIR, serviceExternalJobBridgeRequests } from "../shared/external-job-bridge.ts";
+import { EXTERNAL_JOB_BRIDGE_REQUEST_DIR, externalJobBridgeEligibility, serviceExternalJobBridgeRequests } from "../shared/external-job-bridge.ts";
 import { shouldUseNativeFsWatch } from "../../shared/watch-strategy.ts";
 import { parseWorkflowChildSummary } from "../../workflows/workflow-child-summary.ts";
 import { validHostStepNodes } from "../shared/host-step-status.ts";
@@ -85,19 +85,6 @@ export function createAsyncJobTracker(pi: Pick<ExtensionAPI, "events">, state: S
 	// Early native failure is visible before its publisher finishes. Retain only
 	// that scoped observation, using the existing liveness sweep to renew delivery.
 	const terminalPublications = new Map<string, { instanceId: string; pending: true } | { pending: false }>();
-	const externalJobBridgeEligibility = (steps: AsyncJobState["steps"]): "required" | "not-required" | "unknown" => {
-		if (!Array.isArray(steps)) return "unknown";
-		for (const step of steps) {
-			const runner = (step as { runner?: unknown } | null)?.runner;
-			if (runner === undefined) continue;
-			if (!runner || typeof runner !== "object" || Array.isArray(runner)) return "unknown";
-			const runnerType = (runner as { type?: unknown }).type;
-			if (typeof runnerType !== "string") return "unknown";
-			if (runnerType === "external-job") return "required";
-			if (runnerType !== "pi" && runnerType !== "external-cli") return "unknown";
-		}
-		return "not-required";
-	};
 	let rootWatcher: fs.FSWatcher | undefined;
 	let nextLivenessAt = Date.now() + livenessIntervalMs;
 	let nextWidgetAnimationAt = Date.now() + WIDGET_ANIMATION_INTERVAL_MS;
@@ -264,24 +251,28 @@ export function createAsyncJobTracker(pi: Pick<ExtensionAPI, "events">, state: S
 				if (!parsed || typeof parsed !== "object") return;
 				if ((parsed as { type?: unknown }).type === "subagent.child-status") {
 					const event = parsed as Partial<SubagentChildStatusEvent>;
-					if (event.version !== 1 || typeof event.runId !== "string" || typeof event.childId !== "string" || (event.status !== "stopping" && event.status !== "stopped") || typeof event.ts !== "number") return;
-					pi.events.emit(SUBAGENT_CHILD_STATUS_EVENT, {
-						type: "subagent.child-status",
-						version: 1,
-						runId: event.runId,
-						childId: event.childId,
-						status: event.status,
-						ts: event.ts,
-						...(typeof event.reason === "string" ? { reason: event.reason } : {}),
-						source: event.source === "rpc" ? "rpc" : "async",
-						asyncDir: job.asyncDir,
-						...(typeof event.stepIndex === "number" ? { stepIndex: event.stepIndex } : {}),
-						...(typeof event.agent === "string" ? { agent: event.agent } : {}),
-						...(typeof event.childRunId === "string" ? { childRunId: event.childRunId } : {}),
-						...(typeof event.workflowKey === "string" ? { workflowKey: event.workflowKey } : {}),
-						...(typeof event.phase === "string" ? { phase: event.phase } : {}),
-						...(typeof event.label === "string" ? { label: event.label } : {}),
-					} satisfies SubagentChildStatusEvent);
+					if (event.version !== 1 || typeof event.runId !== "string" || typeof event.childId !== "string" || (event.status !== "started" && event.status !== "stopping" && event.status !== "stopped") || typeof event.ts !== "number") return;
+					try {
+						pi.events.emit(SUBAGENT_CHILD_STATUS_EVENT, {
+							type: "subagent.child-status",
+							version: 1,
+							runId: event.runId,
+							childId: event.childId,
+							status: event.status,
+							ts: event.ts,
+							...(typeof event.reason === "string" ? { reason: event.reason } : {}),
+							source: event.source === "rpc" ? "rpc" : "async",
+							asyncDir: job.asyncDir,
+							...(typeof event.stepIndex === "number" ? { stepIndex: event.stepIndex } : {}),
+							...(typeof event.agent === "string" ? { agent: event.agent } : {}),
+							...(typeof event.childRunId === "string" ? { childRunId: event.childRunId } : {}),
+							...(typeof event.workflowKey === "string" ? { workflowKey: event.workflowKey } : {}),
+							...(typeof event.phase === "string" ? { phase: event.phase } : {}),
+							...(typeof event.label === "string" ? { label: event.label } : {}),
+						} satisfies SubagentChildStatusEvent);
+					} catch (error) {
+						console.error("Failed to emit async child status event:", error);
+					}
 					return;
 				}
 				if ((parsed as { type?: unknown }).type === "subagent.steering.notice") {
@@ -696,7 +687,8 @@ export function createAsyncJobTracker(pi: Pick<ExtensionAPI, "events">, state: S
 		const agents = firstGroupCount && firstGroupCount > 0
 			? rawAgents?.slice(0, firstGroupCount)
 			: rawAgents;
-		const sessionRoot = state.liveAsyncSessionRoots?.get(info.id);
+		const existingJob = state.asyncJobs.get(info.id);
+		const sessionRoot = state.liveAsyncSessionRoots?.get(info.id) ?? existingJob?.sessionRoot;
 		state.liveAsyncSessionRoots?.delete(info.id);
 		externalJobBridgeRuns.delete(info.id);
 		terminalPublications.delete(info.id);
