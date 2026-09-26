@@ -77,6 +77,12 @@ For compact chat results with FleetView as the only live editor surface, merge t
 
 Thanks to [DraconDev](https://github.com/DraconDev) for reporting the display noise and suggesting summary mode in [#1931](https://github.com/nicobailon/pi-subagents/issues/1931).
 
+### Supervisor polling and retained mailboxes
+
+Routine supervisor polling reads request files only for owned live runs, pending requests, and runs awaiting their final mailbox drain. Windows polling stops when there is no such work and restarts through the normal launch path. Historical mailboxes from other sessions are not repeatedly opened. Startup and explicit `subagent_supervisor` calls retain full recovery discovery; request ownership is still checked against the exact runtime session ID.
+
+A recovered child whose run state is unavailable remains monitored after a reply: replying is not evidence that the child exited. Its mailbox stops supplying demand once the restored run state establishes that it is inactive, or the owning extension is disposed. This change does not require deleting retained mailboxes. Restart Pi to load extension runtime changes; do not reload while child runs are active.
+
 ## FleetView
 
 In the TUI, a persistent FleetView below the editor keeps active work visible as a compact summary. Set `fleetViewPlacement` to `"aboveEditor"` to move it above the editor.

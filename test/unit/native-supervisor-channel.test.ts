@@ -165,6 +165,98 @@ describe("native supervisor channel", () => {
 		});
 	}
 
+	it("bounds root Windows polls to owned runs and drains their final mailbox before idling", () => {
+		const owner = randomUUID();
+		const runId = randomUUID();
+		const ownDir = makeEmptyChannel(runId);
+		const foreignRun = randomUUID();
+		const foreignId = writeRequest({ sessionId: randomUUID(), runId: foreignRun });
+		for (let i = 0; i < 100; i++) writeRequest({ sessionId: randomUUID(), runId: randomUUID() });
+		const state = makeState(owner, { sessionManager: { getSessionId: () => owner } });
+		let tick: (() => void) | undefined;
+		const channel = createNativeSupervisorChannel({
+			getAllTools: () => [], registerTool() {}, sendMessage() {},
+		} as never, state, {
+			platform: "win32",
+			timers: {
+				setInterval: ((handler: () => void) => { tick = handler; return { unref() {} } as NodeJS.Timeout; }) as typeof setInterval,
+				clearInterval: (() => { tick = undefined; }) as typeof clearInterval,
+				setImmediate, clearImmediate,
+			},
+		});
+		const readdir = fsDefault.readdirSync;
+		const scans: string[] = [];
+		try {
+			channel.start();
+			state.foregroundControls.set(runId, { runId, activeChildren: new Map() } as never);
+			fsDefault.readdirSync = ((dir: fs.PathLike, options: unknown) => {
+				scans.push(String(dir));
+				return (readdir as (dir: fs.PathLike, options: unknown) => unknown)(dir, options);
+			}) as typeof fsDefault.readdirSync;
+			syncBuiltinESMExports();
+			channel.activateTransport();
+			assert.deepEqual(scans, [path.dirname(ownDir), path.join(ownDir, "requests")]);
+			assert.equal(typeof tick, "function");
+			const finalId = writeRequest({ sessionId: owner, runId, reason: "progress_update" });
+			state.foregroundControls.delete(runId);
+			scans.length = 0;
+			tick!();
+			assert.equal(fs.existsSync(requestFile(runId, finalId)), false, "final mailbox is drained after the run leaves live state");
+			assert.equal(tick, undefined, "idle root transport stops on Windows");
+			assert.equal(fs.existsSync(requestFile(foreignRun, foreignId)), true);
+			scans.length = 0;
+			assert.equal(channel.hasPendingRequests(), false);
+			assert.deepEqual(scans, [], "idle demand probes never scan global retained mailboxes");
+		} finally {
+			channel.dispose();
+			fsDefault.readdirSync = readdir;
+			syncBuiltinESMExports();
+		}
+	});
+
+	it("keeps a recovered child discoverable after its first supervisor reply", async () => {
+		const owner = randomUUID();
+		const runId = randomUUID();
+		const first = writeRequest({ sessionId: owner, runId });
+		let tick: (() => void) | undefined;
+		const tools = new Map<string, { execute(id: string, params: unknown): Promise<unknown> }>();
+		const notices: string[] = [];
+		const channel = createNativeSupervisorChannel({
+			getAllTools: () => [],
+			registerTool: (tool: { name: string; execute(id: string, params: unknown): Promise<unknown> }) => tools.set(tool.name, tool),
+			sendMessage: (message: { details: { id: string } }) => notices.push(message.details.id),
+		} as never, makeState(owner, { sessionManager: { getSessionId: () => owner } }), {
+			platform: "win32",
+			timers: {
+				setInterval: ((handler: () => void) => { tick = handler; return { unref() {} } as NodeJS.Timeout; }) as typeof setInterval,
+				clearInterval: (() => { tick = undefined; }) as typeof clearInterval,
+				setImmediate, clearImmediate,
+			},
+		});
+		try {
+			channel.start();
+			await tools.get(NATIVE_SUPERVISOR_TOOL_NAME)!.execute("reply", { action: "reply", replyTo: first, message: "Proceed" });
+			const second = writeRequest({ sessionId: owner, runId });
+			tick!();
+			assert.deepEqual(notices, [first, second], "a reply is not proof that the recovered child exited");
+		} finally { channel.dispose(); }
+	});
+
+	it("starts an idle Windows root without a recurring mailbox scan", () => {
+		const owner = randomUUID();
+		let intervals = 0;
+		const channel = createNativeSupervisorChannel({ getAllTools: () => [], registerTool() {}, sendMessage() {} } as never,
+			makeState(owner, { sessionManager: { getSessionId: () => owner } }), {
+				platform: "win32",
+				timers: {
+					setInterval: (() => { intervals++; return { unref() {} } as NodeJS.Timeout; }) as typeof setInterval,
+					clearInterval, setImmediate, clearImmediate,
+				},
+			});
+		try { channel.start(); assert.equal(intervals, 0); }
+		finally { channel.dispose(); }
+	});
+
 	it("retires only polled mailbox snapshots, never demand probes", () => {
 		const owner = randomUUID();
 		const runId = randomUUID();
@@ -336,11 +428,13 @@ describe("native supervisor channel", () => {
 			cwd: process.cwd(), hasUI: false,
 			sessionManager: { getSessionId: () => currentSessionId, getSessionFile: () => null, getEntries: () => [] },
 		};
+		const state = makeState(currentSessionId, ctx);
+		state.foregroundControls.set(runId, { runId, activeChildren: new Map() } as never);
 		const channel = createNativeSupervisorChannel({
 			getAllTools: () => [], registerTool: () => {},
 			sendMessage: (message: { details?: { id?: string } }) => { sent.push(message); },
 			getSessionName: () => "shared-name",
-		} as never, makeState(currentSessionId, ctx), {
+		} as never, state, {
 			platform: "win32",
 			timers: {
 				setInterval: ((callback: () => void) => { tick = callback; return 1; }) as never,

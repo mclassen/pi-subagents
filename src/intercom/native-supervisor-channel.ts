@@ -293,11 +293,14 @@ function isMissingSupervisorDirectory(error: unknown, platform: NodeJS.Platform)
 	return code === "ENOENT" || (platform === "win32" && code === "UNKNOWN");
 }
 
-function listRequestFiles(channelDirs: string[] | undefined, platform: NodeJS.Platform): Array<{ channelDir: string; file: string }> {
+function listRequestFiles(channelDirs: string[] | undefined, platform: NodeJS.Platform, runIds?: Set<string>): Array<{ channelDir: string; file: string }> {
 	if (!channelDirs) {
+		if (runIds?.size === 0) return [];
+		const prefixes = runIds ? [...runIds].map(id => `${safeSegment(id)}-`) : undefined;
 		try {
 			channelDirs = fs.readdirSync(SUPERVISOR_CHANNEL_ROOT, { withFileTypes: true })
-				.filter(entry => entry.isDirectory()).map(entry => path.join(SUPERVISOR_CHANNEL_ROOT, entry.name));
+				.filter(entry => entry.isDirectory() && (!prefixes || prefixes.some(prefix => entry.name.startsWith(prefix))))
+				.map(entry => path.join(SUPERVISOR_CHANNEL_ROOT, entry.name));
 		} catch (error) {
 			if (isMissingSupervisorDirectory(error, platform)) return [];
 			throw error;
@@ -390,12 +393,14 @@ function cleanupStaleEmptySupervisorChannels(nowMs = Date.now(), platform: NodeJ
 	return removed;
 }
 
-function requestMatchesOwner(request: SupervisorRequest, state: Pick<SubagentState, "supervisorOwnerSessionId">): boolean {
+type SupervisorRunIdentity = Pick<SupervisorRequest, "runId" | "agent" | "childIndex" | "orchestratorSessionId">;
+
+function requestMatchesOwner(request: SupervisorRunIdentity, state: Pick<SubagentState, "supervisorOwnerSessionId">): boolean {
 	const currentSessionId = state.supervisorOwnerSessionId;
 	return Boolean(currentSessionId && request.orchestratorSessionId === currentSessionId);
 }
 
-function rememberedForegroundChild(request: SupervisorRequest, state: SubagentState) {
+function rememberedForegroundChild(request: SupervisorRunIdentity, state: SubagentState) {
 	const run = state.foregroundRuns?.get(request.runId);
 	const child = run?.children.find((candidate) => candidate.index === request.childIndex && candidate.agent === request.agent)
 		?? run?.children[request.childIndex];
@@ -449,7 +454,7 @@ function requestExpiresAt(request: SupervisorRequest, now: number): number {
 	return Number.isFinite(request.createdAt) ? request.createdAt + askTimeoutMs() : now;
 }
 
-function requestRunInactive(request: SupervisorRequest, state: SubagentState): boolean {
+function requestRunInactive(request: SupervisorRunIdentity, state: SubagentState): boolean {
 	if (state.foregroundControls.has(request.runId)) return false;
 	const foreground = rememberedForegroundChild(request, state);
 	if (foreground) return foreground.child.status !== "detached";
@@ -626,7 +631,7 @@ export function createNativeSupervisorChannel(pi: ExtensionAPI, state: SubagentS
 } {
 	const watch = deps.watch ?? fs.watch;
 	const timers = deps.timers ?? globalThis;
-	const runState = (request: SupervisorRequest): SubagentState => {
+	const runState = (request: SupervisorRunIdentity): SubagentState => {
 		for (const ownerState of deps.getCurrentOwnerStates?.() ?? []) {
 			if (ownerState.asyncJobs.has(request.runId)) return ownerState;
 		}
@@ -691,19 +696,32 @@ export function createNativeSupervisorChannel(pi: ExtensionAPI, state: SubagentS
 	let deferredWatcherRefresh: ReturnType<typeof setImmediate> | undefined;
 	let started = false;
 	let lastStaleCleanupAt = 0;
+	let lastPolledRunIds = new Set<string>();
+	const recoveredRuns = new Map<string, SupervisorRunIdentity>();
+	const liveRunIds = (): Set<string> => {
+		const ids = new Set<string>();
+		for (const ownerState of [state, ...(deps.getCurrentOwnerStates?.() ?? [])]) {
+			for (const id of ownerState.foregroundControls.keys()) ids.add(id);
+			for (const run of ownerState.foregroundRuns?.values() ?? []) {
+				if (run.children.some(child => child.status === "detached")) ids.add(run.runId);
+			}
+			for (const job of ownerState.asyncJobs.values()) {
+				if (job.status === "queued" || job.status === "running") ids.add(job.asyncId);
+			}
+		}
+		for (const [id, request] of recoveredRuns) {
+			if (!requestMatchesOwner(request, state)) continue;
+			if (ids.has(id) || requestRunInactive(request, runState(request))) recoveredRuns.delete(id);
+			else ids.add(id);
+		}
+		return ids;
+	};
 	const platform = deps.platform ?? process.platform;
 	const useNativeWatcher = () => !deps.getChannelDirs && shouldUseNativeFsWatch("supervisor-channel", platform) && platform !== "win32";
 	const hasTransportDemand = () => {
-		if (pending.size > 0) return true;
-		if (state.foregroundControls.size > 0) return true;
+		if (pending.size > 0 || lastPolledRunIds.size > 0) return true;
 		if (deps.getChannelDirs?.().dirs.length) return true;
-		if ([...state.asyncJobs.values()].some((job) => job.status === "queued" || job.status === "running")) return true;
-		for (const ownerState of deps.getCurrentOwnerStates?.() ?? []) {
-			for (const job of ownerState.asyncJobs.values()) {
-				if (job.status === "queued" || job.status === "running") return true;
-			}
-		}
-		return false;
+		return liveRunIds().size > 0;
 	};
 
 	const registerParentTools = (): void => {
@@ -722,16 +740,16 @@ export function createNativeSupervisorChannel(pi: ExtensionAPI, state: SubagentS
 		}
 	};
 
-	const poll = (): void => {
-		cleanupStaleChannelsIfDue();
+	const poll = (runIds?: Set<string>): void => {
+		if (!runIds || runIds.size > 0) cleanupStaleChannelsIfDue();
 		// Only display notifications require a live UI context, not request registration.
 		refreshPendingRequests(pending, state, observeRequestLifecycle, runState);
 		const now = Date.now();
 		const channels = deps.getChannelDirs?.();
-		for (const { channelDir, file } of listRequestFiles(channels?.dirs, platform)) {
+		for (const { channelDir, file } of listRequestFiles(channels?.dirs, platform, runIds)) {
 			if (seenFiles.has(file)) continue;
 			const request = parseRequestFile(file, channelDir);
-			if (!request || !requestMatchesOwner(request, state)) continue;
+			if (!request || !requestMatchesOwner(request, state) || (runIds && !runIds.has(request.runId))) continue;
 			const lifecycle = requestLifecycle(request, state, now, runState(request));
 			if (lifecycle !== "pending") {
 				seenFiles.add(file);
@@ -740,6 +758,13 @@ export function createNativeSupervisorChannel(pi: ExtensionAPI, state: SubagentS
 				continue;
 			}
 			seenFiles.add(file);
+			const ownerState = runState(request);
+			if (!runIds && !deps.getChannelDirs && !ownerState.foregroundControls.has(request.runId)
+				&& !ownerState.foregroundRuns?.has(request.runId) && !ownerState.asyncJobs.has(request.runId)) {
+				// Recovery can find a live child before its run is restored. A reply is not exit proof.
+				const { runId, agent, childIndex, orchestratorSessionId } = request;
+				recoveredRuns.set(runId, { runId, agent, childIndex, orchestratorSessionId });
+			}
 			if (!request.expectsReply) {
 				// Progress is already visible through child activity; do not inject a
 				// parent message or trigger a parent model turn.
@@ -784,11 +809,20 @@ export function createNativeSupervisorChannel(pi: ExtensionAPI, state: SubagentS
 		channels?.retire?.();
 	};
 
+	const pollOwnedRuns = (): void => {
+		if (deps.getChannelDirs) { poll(); return; }
+		const live = liveRunIds();
+		// One final drain survives removal from live state. Demand checks must not retire it.
+		const ids = new Set([...live, ...lastPolledRunIds, ...[...pending.values()].map(request => request.runId)]);
+		poll(ids);
+		lastPolledRunIds = live;
+	};
+
 	const startPolling = (): void => {
 		if (poller) return;
 		poller = timers.setInterval(() => {
-			poll();
-			if (!useNativeWatcher() && (platform === "darwin" || deps.getChannelDirs) && !hasTransportDemand()) {
+			pollOwnedRuns();
+			if (!useNativeWatcher() && !hasTransportDemand()) {
 				if (poller) timers.clearInterval(poller);
 				poller = undefined;
 			}
@@ -846,7 +880,7 @@ export function createNativeSupervisorChannel(pi: ExtensionAPI, state: SubagentS
 		registerTools: registerParentTools,
 		activateTransport: () => {
 			if (!started) return;
-			poll();
+			pollOwnedRuns();
 			if (!useNativeWatcher() && hasTransportDemand()) startPolling();
 		},
 		findPendingAsks: (target) => {
@@ -868,7 +902,7 @@ export function createNativeSupervisorChannel(pi: ExtensionAPI, state: SubagentS
 		},
 		hasPendingRequests: () => {
 			if (!started) return false;
-			poll();
+			pollOwnedRuns();
 			return pending.size > 0;
 		},
 		start: () => {
@@ -877,10 +911,11 @@ export function createNativeSupervisorChannel(pi: ExtensionAPI, state: SubagentS
 			registerParentTools();
 			poll();
 			if (deps.getChannelDirs) return; // Child polling starts only after a descendant launch.
+			lastPolledRunIds = liveRunIds();
 			try {
 				fs.mkdirSync(SUPERVISOR_CHANNEL_ROOT, { recursive: true });
 				if (!useNativeWatcher()) {
-					if (platform === "win32") startPolling();
+					if (platform === "win32" && hasTransportDemand()) startPolling();
 					return;
 				}
 				watchExistingRequestDirs();
@@ -917,6 +952,8 @@ export function createNativeSupervisorChannel(pi: ExtensionAPI, state: SubagentS
 			pending.clear();
 			requestCorrelations.clear();
 			seenFiles.clear();
+			lastPolledRunIds.clear();
+			recoveredRuns.clear();
 		},
 		pending,
 		getSupervisorRequestState,
