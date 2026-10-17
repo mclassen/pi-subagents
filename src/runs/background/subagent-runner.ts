@@ -13,7 +13,7 @@ import { writeAtomicJson } from "../../shared/atomic-json.ts";
 import { promotePendingResultFile, writePendingAsyncResultFile } from "./result-files.ts";
 import { createFileCoalescer } from "../../shared/file-coalescer.ts";
 import { createCapacityResilientJsonWriter } from "../../shared/capacity-resilient-json.ts";
-import { isStorageCapacityError } from "../../shared/file-system-retry.ts";
+import { isRetryableFileSystemError, isStorageCapacityError } from "../../shared/file-system-retry.ts";
 import { updateActiveRunIndex } from "./active-run-index.ts";
 import { createChildTranscriptWriter, type ChildTranscriptWriter } from "../../shared/child-transcript.ts";
 import { closeSteerInbox, consumeInterruptRequest, consumeSteerRequests, consumeStopRequestPayloads, deliverInterruptRequest, deliverStopRequest, deliverTimeoutRequest, watchAsyncControlInbox, type SteerRequest, type StopRequest } from "./control-channel.ts";
@@ -2233,7 +2233,15 @@ export async function runSubagent(
 		if (finalResultPublication) return;
 		refreshWorkflowGraph();
 		writeRecoverableStatusResult();
-		runPersistence.write(statusPath, { ...statusPayload });
+		try {
+			runPersistence.write(statusPath, { ...statusPayload });
+		} catch (error) {
+			// Progress is not a publication barrier. Preserve the child and last
+			// durable status after bounded rename retries; the next update retries.
+			if (statusPayload.state !== "running" || !isRetryableFileSystemError(error)) throw error;
+			console.error(`Failed to persist async progress '${statusPath}'; retaining the last durable status until the next update:`, error);
+			return;
+		}
 		emitNestedSelfEvent(statusPayload.state === "running" || statusPayload.state === "queued" ? "subagent.nested.updated" : "subagent.nested.completed");
 	};
 	const statusWriteCoalescer = createFileCoalescer(writeStatusPayloadNow, 100);

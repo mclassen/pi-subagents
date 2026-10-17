@@ -13,6 +13,8 @@
     "./external-runs": "./src/api/external-runs.ts",
     "./agents": "./src/api/agents.ts",
     "./delegation": "./src/api/delegation.ts",
+    "./fast-work": "./src/api/fast-work.ts",
+    "./fast-work-extension": "./fast-work.ts",
     "./capability-ceiling": "./src/api/capability-ceiling.ts",
     "./workflow-resources": "./src/api/workflow-resources.ts",
     "./required-child-extensions": "./src/api/required-child-extensions.ts",
@@ -45,6 +47,7 @@
   },
   "files": [
     "index.ts",
+    "fast-work.ts",
     "src/**/*.ts",
     "*.mjs",
     "agents/",

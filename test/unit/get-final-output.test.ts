@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { Message } from "@earendil-works/pi-ai";
 import { getFinalOutput } from "../../src/shared/utils.ts";
+import { parseAcceptanceReport } from "../../src/runs/shared/acceptance.ts";
 
 function assistantContent(content: unknown[]): Message {
 	return { role: "assistant", content } as unknown as Message;
@@ -128,6 +129,32 @@ describe("getFinalOutput", () => {
 			];
 			assert.equal(getFinalOutput(messages), report);
 		}
+	});
+
+	it("surfaces a newer malformed explicit report instead of reviving older evidence", () => {
+		const older = '```acceptance-report\n{"criteriaSatisfied":[],"changedFiles":[]}\n```';
+		for (const latest of ["```acceptance-report\n{", "```acceptance_report\n", "```acceptance-report"]) {
+			const messages = [
+				assistantContent([{ type: "text", text: older }]),
+				assistantContent([{ type: "text", text: latest }]),
+				assistantContent([{ type: "text", text: "Acknowledged." }]),
+			];
+			const selected = getFinalOutput(messages);
+			assert.equal(selected, latest);
+			assert.equal(parseAcceptanceReport(selected).malformed, true);
+		}
+	});
+
+	it("selects a corrected report over the earlier report without merging evidence", () => {
+		const older = '```acceptance-report\n{"criteriaSatisfied":[],"changedFiles":["old.ts"]}\n```';
+		const corrected = '```acceptance-report\n{"criteriaSatisfied":[],"changedFiles":["new.ts"]}\n```';
+		const selected = getFinalOutput([
+			assistantContent([{ type: "text", text: older }]),
+			assistantContent([{ type: "text", text: corrected }]),
+			assistantContent([{ type: "text", text: "Acknowledged." }]),
+		]);
+		assert.equal(selected, corrected);
+		assert.deepEqual(parseAcceptanceReport(selected).report?.changedFiles, ["new.ts"]);
 	});
 
 	it("does not prefer provider-error acceptance reports", () => {

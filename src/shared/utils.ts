@@ -267,7 +267,8 @@ export function getFinalOutput(messages: Message[]): string {
 			const text = stripPiTurnTimingFooter(part.text);
 			if (text.trim().length === 0) continue;
 			validTextParts.push(text);
-			if (/```acceptance[-_]report\s*\n[\s\S]*?```/i.test(text)) return messageText;
+			// A newer malformed report must reach validation, not revive older evidence.
+			if (/```acceptance[-_]report\b/i.test(text)) return messageText;
 			for (const match of text.matchAll(/```(?:json|jsonc|json5)\s*\n([\s\S]*?)```/gi)) {
 				const body = match[1] ?? "";
 				if (/"(?:criteriaSatisfied|criteria_satisfied)"/.test(body) && /"(?:changedFiles|changed_files|testsAddedOrUpdated|tests_added_or_updated|commandsRun|commands_run|validationOutput|validation_output|residualRisks|residual_risks|noStagedFiles|no_staged_files|diffSummary|diff_summary|reviewFindings|review_findings|manualNotes|manual_notes)"/.test(body)) {

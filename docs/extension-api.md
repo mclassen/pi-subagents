@@ -2,6 +2,10 @@
 
 Public seams for other Pi extensions and host integrations: the in-process RPC, the structured delegation API, launch preflight, capability ceilings, the background-work provider contract, and the Herdr integration.
 
+## Optional fast-work policy
+
+[Fast-work](fast-work.md) is a separately loaded, opt-in read-only extension over the structured delegation and runtime-agent registration APIs below. It caps active fresh leaves at three and requires explicit parent acceptance before releasing dependent tasks. `pi-subagents/fast-work` exports its policy API; the normal package entry does not activate it. Child lifecycle and compaction remain package/Pi-owned.
+
 ## Trusted workflow resources
 
 Loaded trusted TypeScript extensions can import `registerWorkflowResource` from `pi-subagents/workflow-resources`. This subpath does not load the main extension and exposes no resolver or permit constructor. Its exported types are `RegisterWorkflowResourceInput`, `WorkflowResourceDefinition`, and `WorkflowResourceRegistration`:

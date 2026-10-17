@@ -12,7 +12,7 @@ This file is a detailed reference loaded from `skills/pi-subagents/SKILL.md`.
   session exists.
 - **Forked runs inherit parent history.** They are branched threads, not fresh
   filtered contexts. Use fresh context for adversarial reviewers unless the user explicitly asks for forked context.
-- **Default subagent nesting depth is 2.** Policy permits one nested level only: a root-designated fanout child may spawn at most three children, within normally six live descendants total. Nested writers require separate managed temporary worktrees/clones, non-overlapping contracts, scoped commits/patches, and Luna high by default; higher effort is explicit-only. They cannot recurse, merge, or integrate. Raising runtime depth does not authorize deeper policy nesting.
+- **Default subagent nesting depth is 2.** Policy permits one nested level only: a root-designated fanout child may spawn at most three children, within normally six live descendants total. Nested writers require separate managed temporary worktrees/clones, non-overlapping contracts, scoped commits/patches, and model selection under the [canonical routing policy](prompting-and-roles.md#model-routing-policy). They cannot recurse, merge, or integrate. Raising runtime depth does not authorize deeper policy nesting.
 - **Attention signals are not lifecycle state.** `needs_attention` means no activity has been observed past the configured threshold. `paused` means the child turn was intentionally interrupted or is awaiting direction; it is not the same as `failed`.
 - **Intercom asks are blocking.** A session can only maintain one pending outbound
   ask wait state at a time.
@@ -53,8 +53,8 @@ This reference keeps cross-cutting policy and failure handling. Load the matchin
 
 Choose the smallest recipe that fits:
 
-- **Recon → plan → implement:** parent performs the serial path by default. When operator-authorized delegation materially helps, use one focused `scout` for an independent context-light question; delegate a worker only after the resulting frozen mechanical slice passes the user/global eligibility gate.
-- **Implementation:** parent owns causality, design, and coding by default—especially when Sol. Clarify scope/acceptance, record user-owned decisions and seam/validation contracts, inspect load-bearing code, and use a bounded scout, writer, or fresh reviewer only where that authorized stage earns its overhead. An eligible child writer gets a distinct isolated workspace and returns a scoped commit/patch; parent integrates, validates, disposes review findings, and inspects direct evidence before acceptance.
+- **Recon → plan → implement:** parent performs the serial path by default for genuinely serial or tightly coupled work. Use a focused `scout` only for a useful independent question. For approved multi-seam coding, freeze the smallest shared interface and release ready isolated writers as each frozen mechanical slice passes the user/global eligibility gate; do not require scouting or complete-plan analysis before every writer.
+- **Implementation:** parent owns causality, design, shared contracts and integration, and codes coupled work directly. Launch independently eligible coding/test-writing lanes up to the authorized limit; keep a ready/running/blocked queue and refill slots after accepted scoped handoffs. Each writer has a distinct isolated workspace, exclusive ownership and focused validation, and returns a durable scoped patch or an authorized commit. Parent inspects evidence, integrates accepted work, validates and disposes review findings; do not use analysis-only fanout as a substitute for ready coding.
 - **Parallel analysis:** fan out only independent read/review/validation work, or isolate each writer in its own worktree. Never run concurrent writers in one checkout.
 
 ## Error Handling

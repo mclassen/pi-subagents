@@ -15,9 +15,9 @@
 - `upstream` is upstream `nicobailon/pi-subagents`; use it for fetch/sync. `origin` is writable `mclassen/pi-subagents`; push feature branches and customized `main` there. Do not push to `upstream` without explicit current-session authorization.
 - Before first publication, fetch `upstream/main` and integrate the current upstream base without discarding work or force-pushing. Open or update an upstream PR only when explicitly requested.
 
-## Boston publication window
+## New York business-hours restriction
 
 - Repository reads, edits, staging, and validation may run anytime.
-- Do not create commits or perform remote mutations—including push, PR creation/update, and publish/release—on weekdays from 09:00 inclusive until 18:00 exclusive in Boston local time. Weekends and weekdays before 09:00 or at/after 18:00 are allowed.
+- On weekdays from 09:00 inclusive until 17:30 exclusive in `America/New_York`, do not commit, push, rebase, merge, create tags or perform other history/publication actions that could later be visible online, including PR/issue mutations and releases. This includes local commits and rebases, parents, subagents and queued/background jobs. Outside this window, all other authorization requirements still apply.
 - Use the canonical DST-aware timezone `America/New_York` (Eastern Time; EST/EDT), not a fixed UTC offset. Check the clock immediately before each restricted action; session start time does not authorize a later action.
-- Explicit current-session user authorization may override the window for the named action only.
+- Explicit current-session user authorization may override the window for named actions only; a general implementation request or prior-session approval is not an override.

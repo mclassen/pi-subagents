@@ -85,6 +85,7 @@ void result.isError;
 		execFileSync(process.execPath, [path.join(projectRoot, "node_modules", "typescript", "bin", "tsc"), "--project", path.join(consumerRoot, "tsconfig.json")], {
 			cwd: consumerRoot,
 			stdio: "pipe",
+			windowsHide: true,
 		});
 	} finally {
 		fs.rmSync(consumerRoot, { recursive: true, force: true });
@@ -110,6 +111,7 @@ test("published extension APIs use supported package entrypoints", async () => {
 	assert.equal(packageJson.private, true, "the source checkout must not be publishable");
 	assert.deepEqual(packageJson.pi?.extensions, ["./index.ts"]);
 	assert.equal(packageJson.files?.includes("index.ts"), true);
+	assert.equal(packageJson.files?.includes("fast-work.ts"), true);
 	assert.equal(packageJson.files?.includes("*.mjs"), true);
 	assert.equal(fs.existsSync(path.join(projectRoot, "async-retention-discovery-worker.mjs")), true);
 	const entrySource = fs.readFileSync(path.join(projectRoot, "index.ts"), "utf-8");
@@ -128,6 +130,8 @@ test("published extension APIs use supported package entrypoints", async () => {
 		"./workflow-resources": "./src/api/workflow-resources.ts",
 		"./required-child-extensions": "./src/api/required-child-extensions.ts",
 		"./delegation": "./src/api/delegation.ts",
+		"./fast-work": "./src/api/fast-work.ts",
+		"./fast-work-extension": "./fast-work.ts",
 		"./preflight": "./src/api/preflight.ts",
 		"./control-channel": "./src/api/control-channel.ts",
 		"./intercom-bridge": "./src/api/intercom-bridge.ts",

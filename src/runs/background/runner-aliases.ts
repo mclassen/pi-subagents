@@ -138,12 +138,22 @@ export function resolveHostPeerAliases(piPackageRoot: string): { aliases: Record
 	const hostManifest = readManifest(piPackageRoot);
 	// Only known stable pre-chord versions may omit it. Unknown/prerelease
 	// hosts retain the required aliases, rather than hiding a broken install.
-	const stableVersion = typeof hostManifest?.version === "string" ? /^0\.(\d+)\.\d+$/.exec(hostManifest.version) : null;
-	const isPreChord = stableVersion !== null && Number(stableVersion[1]) < 85;
+	const stableVersion = typeof hostManifest?.version === "string" ? /^(\d+)\.(\d+)\.\d+$/.exec(hostManifest.version) : null;
+	const isPreChord = stableVersion !== null && Number(stableVersion[1]) === 0 && Number(stableVersion[2]) < 85;
+	const isPiOne = stableVersion !== null && Number(stableVersion[1]) === 1;
 	const required = [...HOST_PEER_ALIASES, ...(isPreChord ? [] : CHORD_PEER_ALIASES)];
 	for (const { specifier, pkg, subpath } of required) {
 		const packageDir = findPeerPackageDir(piPackageRoot, pkg, hostManifest?.name);
 		const target = packageDir ? resolvePackageSubpath(packageDir, subpath) : undefined;
+		// Pi 1.x removed this 0.x export. Do not alias stale dist files or
+		// waive a declared export whose target is missing or blocked.
+		if (isPiOne && specifier === "@earendil-works/pi-agent-core/node" && packageDir && target === undefined) {
+			const coreManifest = readManifest(packageDir);
+			const coreExports = coreManifest?.exports;
+			if (typeof coreManifest?.version === "string" && /^1\.\d+\.\d+$/.test(coreManifest.version)
+				&& coreExports && typeof coreExports === "object" && !Array.isArray(coreExports)
+				&& !Object.hasOwn(coreExports, "./node") && !Object.keys(coreExports).some((key) => key.includes("*"))) continue;
+		}
 		// Native loaders short-circuit resolution, so aliases must retain the real package's dependency scope.
 		if (target && fs.existsSync(target)) aliases[specifier] = fs.realpathSync(target);
 		else missing.push(specifier);

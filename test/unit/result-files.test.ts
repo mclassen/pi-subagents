@@ -191,6 +191,41 @@ describe("result file indexes", () => {
 		}
 	});
 
+	for (const code of ["EPERM", "EACCES"]) {
+		it(`keeps an unreadable mission observer index recoverable after ${code}`, (t) => {
+			const resultsDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-result-files-observer-access-"));
+			const originalReadFileSync = fsDefault.readFileSync;
+			const errors: unknown[][] = [];
+			try {
+				const runId = "mission-run";
+				const resultPath = path.join(resultsDir, `${runId}.json`);
+				writeAsyncResultFile(resultPath, { id: runId, runId, sessionId: "session-a", success: true });
+				const indexPath = path.join(resultsDir, "result-index", "observers", "mission", `${runId}.json`);
+				fs.mkdirSync(path.dirname(indexPath), { recursive: true });
+				fs.writeFileSync(indexPath, JSON.stringify({ version: 1, runId, sessionId: "session-a", file: `${runId}.json`, writtenAt: Date.now() }));
+				let blocked = true;
+				const error = Object.assign(new Error("access denied"), { code });
+				t.mock.method(fsDefault, "readFileSync", ((file: fs.PathOrFileDescriptor, ...args: unknown[]) => {
+					if (blocked && String(file) === indexPath) throw error;
+					return (originalReadFileSync as (...input: unknown[]) => unknown)(file, ...args);
+				}) as typeof fsDefault.readFileSync);
+				t.mock.method(console, "error", (...args: unknown[]) => { errors.push(args); });
+				syncBuiltinESMExports();
+
+				assert.equal(resultPayloadPathForMissionObserverRun(resultsDir, runId), undefined);
+				assert.equal(fs.existsSync(indexPath), true);
+				assert.equal(resultPayloadPathForSessionRun(resultsDir, "session-a", runId), resultPath);
+				blocked = false;
+				assert.equal(resultPayloadPathForMissionObserverRun(resultsDir, runId), resultPath);
+				assert.deepEqual(errors, []);
+			} finally {
+				t.mock.restoreAll();
+				syncBuiltinESMExports();
+				fs.rmSync(resultsDir, { recursive: true, force: true });
+			}
+		});
+	}
+
 	it("does not commit a result payload without a session id", () => {
 		const resultsDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-result-files-no-session-"));
 		try {

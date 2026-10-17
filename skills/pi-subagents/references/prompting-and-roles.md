@@ -8,11 +8,11 @@ Parent extensions may register a session-scoped, out-of-band ceiling through `pi
 
 ## When to Use
 
-All launch guidance below assumes delegation was requested by the operator in the current request or applicable user/project instructions. Complexity, workflow fit, and potential quality gains help choose a shape after that gate; they do not authorize a launch.
+All launch guidance below assumes delegation is authorized by the current request or applicable user/project instructions and the parent has selected an independent bounded slice. Prior parent failure and a separately named delegation request are not required. Complexity or workflow fit alone does not authorize unnecessary fanout or expand the child's authority.
 
-- **Complex work orchestration**: use Luna high for ordinary parent and child work; use Luna medium for bounded mechanics. Escalate directly to Sol 5.6 medium when concrete diagnosis, interacting invariants, substantive model failure, or high-impact review requires stronger capability. Luna xhigh/max are manual-only, not automatic worker or retry steps. Delegate only when another child materially improves evidence, independent review, specialization, useful parallelism, or isolated execution; omission failures are cheaper than unnecessary commissions. For genuinely complex orchestration or root-cause questions, Sol high is manual-only and reserved for the most complex cases. If selected, keep it to direct parent reasoning or a bounded read-only critic/oracle review, never an autonomous root. Lightweight one-off delegation can stay lightweight.
-- **Advisory review**: a Sol-medium or Sol-high parent reviews directly by default. Use at most one Luna-high `reviewer` only for a genuinely simple read-only review with a context-complete packet; use multiple reviewers only for independent high-impact risks with explicit justification. Fork to `oracle` only for rare escalation where inherited decisions, drift, model routing, root cause, or hard tradeoffs matter.
-- **Implementation handoff**: have `oracle` advise when needed; parent implements the approved direction unless a frozen mechanical slice independently passes the user/global child-writer gate
+- **Complex work orchestration**: follow the [model routing policy](#model-routing-policy) for parent reasoning, implementation, verification and helpers. Delegate suitable independent supporting work under applicable user/project instructions; keep shared-state execution and cross-component decisions in the parent. Lightweight one-off delegation can stay lightweight.
+- **Advisory review**: give a read-only reviewer an independent bounded question with a context-complete packet when its analysis adds value. Follow the [model routing policy](#model-routing-policy). Do not duplicate the parent's review or manufacture reviewer waves; multiple reviewers need distinct independent questions and a material benefit. Fork to `oracle` when inherited decisions, drift, model routing, root cause or hard tradeoffs require that history.
+- **Implementation handoff**: parent owns shared contracts and coupled decisions; launch ready isolated writers for frozen mechanical slices that independently pass the user/global child-writer gate, without another delegation request when applicable instructions already authorize them. Use the allowed coding capacity and refill it from ready work after accepted handoffs; the parent's model does not change this eligibility.
 - **Recon and planning**: use `scout`, then write a plan when needed
 - **Parallel exploration**: run multiple non-conflicting tasks concurrently
 - **Regular skill specialists**: when discovery shows proactive skill subagent suggestions and the current work is broad enough, launch a small fresh-context fanout that asks one subagent per relevant regularly used skill to apply that skill's perspective to the task
@@ -65,7 +65,7 @@ Council advisors are read-only. User or project `council-*` profiles choose allo
 
 ### Parallel review technique
 
-Use this when the user wants adversarial review of a diff, plan, issue, file, or implemented work. The parent reviews directly by default when running at Sol Medium or Sol High. For a genuinely simple read-only review, one fresh-context Luna-high `reviewer` is allowed only with a context-complete packet: exact target diff/ref, relevant source and contracts, acceptance criteria, user constraints, and exact validation command. Do not launch one or two Luna reviewers as a default pattern. Multiple reviewers require independent high-impact risks and explicit justification. Reviewers should inspect files and diffs directly, return concise evidence-backed findings with file/line references, and avoid edits unless the user explicitly asks for a writer pass. Filter on evidence, not severity: report only concrete current issues caused or made reachable by the target diff, with source proof, a test or repro, or a contract contradiction. Label findings P0/P1/P2 and end with `Merge verdict: BLOCK`, `Merge verdict: OK`, or `Merge verdict: OK with notes`. Use `blockers only` only for final pre-merge re-checks after P1/P2 findings are already captured, or for explicit emergency hotfix lanes where non-blocking findings are intentionally deferred. For targeted follow-up, ask only whether the named finding was resolved, whether the fix introduced a new defect in the fix blast radius, and whether prior P1/P2 notes still stand. For bot or PR-comment triage, classify each comment as VALID, STALE, INVALID, or OUT-OF-POLICY against current HEAD, then assign P0/P1/P2 only to VALID comments. The parent synthesizes fixes worth doing now, optional improvements, and feedback to ignore/defer before applying anything.
+Use this when the user wants adversarial review of a diff, plan, issue, file or implemented work. The parent retains substantive synthesis and acceptance. Delegate an independent bounded read-only question when it adds useful analysis or resolves uncertainty that deterministic checks cannot settle; follow the [model routing policy](#model-routing-policy). Give each reviewer a context-complete packet: exact target diff/ref, relevant source and contracts, acceptance criteria, user constraints and exact validation command. Do not duplicate the parent review or launch reviewer waves reflexively. Multiple reviewers need distinct independent questions and a material benefit. Reviewers should inspect files and diffs directly, return concise evidence-backed findings with file/line references, and avoid edits unless the user explicitly asks for a writer pass. Filter on evidence, not severity: report only concrete current issues caused or made reachable by the target diff, with source proof, a test or repro, or a contract contradiction. Label findings P0/P1/P2 and end with `Merge verdict: BLOCK`, `Merge verdict: OK`, or `Merge verdict: OK with notes`. Use `blockers only` only for final pre-merge re-checks after P1/P2 findings are already captured, or for explicit emergency hotfix lanes where non-blocking findings are intentionally deferred. For targeted follow-up, ask only whether the named finding was resolved, whether the fix introduced a new defect in the fix blast radius, and whether prior P1/P2 notes still stand. For bot or PR-comment triage, classify each comment as VALID, STALE, INVALID, or OUT-OF-POLICY against current HEAD, then assign P0/P1/P2 only to VALID comments. The parent synthesizes fixes worth doing now, optional improvements, and feedback to ignore/defer before applying anything.
 
 ### Proactive skill-specialist technique
 
@@ -131,17 +131,17 @@ and user/project agents override builtins with the same name.
 
 | Agent | Purpose | Recommended tier | Typical output / role |
 |-------|---------|-------|------------------------|
-| `scout` | Fast codebase recon | fast worker/scout tier | Writes `context.md` handoff material |
-| `worker` | Implementation and approved oracle handoffs | capable worker tier | Single-writer implementation with decision escalation |
-| `reviewer` | Review specialist | strong reviewer tier; high thinking for serious reviews | Default recipes are review-only; tools include edit/write when a fix pass is explicit |
+| `scout` | Fast codebase recon | helper routing policy below | Writes `context.md` handoff material |
+| `worker` | Implementation and approved oracle handoffs | coding routing policy below | Single-writer implementation with decision escalation |
+| `reviewer` | Review specialist | helper routing policy below | Default recipes are review-only; tools include edit/write when a fix pass is explicit |
 | `researcher` | Web research brief generator | inherits configured default | Writes `research.md` |
 | `delegate` | Lightweight generic delegate | inherits configured default | No fixed output; generic delegated work |
-| `oracle` | Decision-consistency and final-review support | Sol medium by default; Sol high only for genuinely complex escalation; bounded read-only | Advisory trajectory review, not routine code review |
-| `advisor` | Compatibility alias for `oracle` | Same Sol medium default and Sol high escalation ceiling as `oracle` | Same advisory escalation role as `oracle` |
+| `oracle` | Decision-consistency and final-review support | helper routing policy below; bounded read-only | Advisory trajectory review, not routine code review |
+| `advisor` | Compatibility alias for `oracle` | Same routing as `oracle` | Same advisory escalation role as `oracle` |
 
 Builtin `worker` and `delegate` use strict tool allowlists and do not inherit ambient parent extension tools. To give a child an extension tool, name it in `tools` and load its provider via `extensions`, a path-like `tools` entry, or `subagentOnlyExtensions`. Custom agents without an `extensions` field follow `subagents.defaultExtensions` when set.
 
-Builtin agents inherit the current Pi default model unless a run, user setting, project setting, or `subagents.defaultModel` overrides `model`. The table records recommended tier routing, not shipped hard defaults; explicit run, user, or project settings still win. Under the local routing policy, start the parent/orchestrator on Luna high and escalate to Sol only on concrete evidence unless parent/user policy says otherwise. Override builtin defaults before copying full agent files when a small tweak is enough.
+Builtin agents inherit the current Pi default model unless a run, user setting, project setting, or `subagents.defaultModel` overrides `model`. The table records recommended tier routing, not shipped hard defaults; explicit run, user, or project settings still win. Apply the [model routing policy](#model-routing-policy); parent/user model and thinking selections remain authoritative. Override builtin defaults before copying full agent files when a small tweak is enough.
 
 Set `subagents.defaultThinking` to apply a shared thinking level to builtin, package, user, and project agents whose frontmatter leaves `thinking` unset. Project settings win over user settings; matching `agentOverrides.<name>.thinking` and per-run overrides replace frontmatter, while an explicit frontmatter value remains in effect when no matching override is set. This setting affects child agents only and does not change the parent session's default thinking level.
 
@@ -195,7 +195,7 @@ A strong subagent prompt usually includes:
 - **Authority boundary**: whether the child may read, edit, commit, push, comment, close, merge, publish, or release. Omit or forbid actions that are not approved.
 - **Context/evidence**: relevant plan paths, files, diffs, decisions, or user constraints already approved.
 - **Success criteria**: what must be true before the child can finish.
-- **Hard constraints**: true invariants only, such as no edits for review-only tasks, one writer per workspace, or escalation for unapproved decisions. Ordinary children cannot delegate. A fanout child explicitly authorized through `tools: subagent` or `allowNestedSubagents: true` may spawn one assigned level only; nested writers need distinct managed temporary worktrees or clones, non-overlapping contracts, scoped commits or patches, Luna high by default (higher effort only when explicitly selected), and no recursion or integration authority.
+- **Hard constraints**: true invariants only, such as no edits for review-only tasks, one writer per workspace, or escalation for unapproved decisions. Ordinary children cannot delegate. A fanout child explicitly authorized through `tools: subagent` or `allowNestedSubagents: true` may spawn one assigned level only; nested writers need distinct managed temporary worktrees or clones, non-overlapping contracts, scoped commits or patches, model selection under the [model routing policy](#model-routing-policy), and no recursion or integration authority.
 - **Validation**: targeted checks to run, or the next-best check when validation is impossible.
 - **Output**: the expected summary shape, artifact path, or finding format. Use managed artifact paths for scratch reports; reserve repo-qualified absolute paths for durable handoffs that the user approved.
 - **Stop rules**: when to ask via `intercom` or `contact_supervisor`, when to stop after enough evidence, and when not to keep searching.
@@ -210,7 +210,7 @@ Settings locations:
 - User scope: `~/.pi/agent/settings.json`
 - Project scope: `.pi/settings.json`
 
-Direct settings example:
+Direct settings example (runtime override mechanics, not a recommendation to enable fallback under the local no-fallback policy):
 
 ```json
 {
@@ -235,13 +235,15 @@ in `list` output, which is useful for deployment-specific routing notes.
 Use `acceptanceRole: false` to clear an override. Create a user or project
 agent with the same name only when you want a substantially different agent.
 
-### Recommended model tiering (optional)
+### Model routing policy
 
-Use Luna medium for bounded mechanics and Luna high for ordinary parent and child work. Use Sol 5.6 medium when difficult diagnosis, interacting invariants, a substantive Luna failure, conflicting evidence, or high-impact final review justifies a capability escalation; do not require an xhigh attempt first. Children doing recon, tests, verification, review, and eligible frozen implementation default to Luna high. Luna xhigh/max and Sol high are manual-only. Astra low is reserved for stuck/looping work or repeated concrete failures after Sol medium. Explicit parent/user model policy wins over these recommendations.
+- Prefer Sol 6.1 high for substantive parent reasoning, diagnosis, design and acceptance. An explicit parent model/thinking selection wins; do not replace it automatically. Astra medium is available only when explicitly selected, never as an automatic escalation.
+- Default ordinary coordination, coding, test-writing, verification, review and helper work to Sol 6.1 medium, including nested writers.
+- Escalate to Sol 6.1 high for material medium failure, conflicting evidence, reviewer disagreement or high-impact review; deep reassessment stays Sol high. Honor explicit parent/user selections. Sol xhigh/max remains manual-only.
+- Luna medium is permitted only when explicitly selected for a cheap bounded read-only lookup. Never route implementation, review or verification to Luna. Luna high is not a default or implementation tier.
+- Do not automatically fall back to another model or provider on quota, availability or provider failure. Preserve the failure and ask for an explicit selection when needed. The existing `fallbackModels` override field is not a recommendation to enable fallback under this policy.
 
-Examples are illustrative, not requirements. Map these tiers to concrete models in user/project settings or a profile. A non-OpenAI setup should choose comparable available models by capability.
-
-Use `fallbackModels` when a tier has provider quota or availability risk. Prefer fresh context for cross-provider children when inherited provider-specific reasoning blocks would force thinking off.
+Map this policy to concrete models through the existing user/project overrides or profiles; these documentation recommendations do not change runtime defaults. Prefer fresh context for explicitly selected cross-provider children when inherited provider-specific reasoning blocks would force thinking off.
 
 If a provider rejects model IDs with thinking suffixes, use
 `subagents.disableThinking: true` in user or project settings to clear bundled

@@ -189,11 +189,14 @@ export function buildInProcessChildLaunch(input: BuildInProcessChildLaunchInput)
 	const capabilityCeilingForPlanning = agentCapabilityCeiling && !input.capabilityCeiling && !inheritedCeiling
 		? { version: 1 as const, denyExtensions: false, sources: [] }
 		: input.capabilityCeiling;
+	const launchExtensions = input.host === "parent" && input.extensions?.length === 0
+		? undefined
+		: input.extensions;
 	const toolPlan = resolvePiLaunchToolPlan({
 		tools: input.tools,
 		excludeTools: input.excludeTools,
 		allowNestedSubagents: input.allowNestedSubagents,
-		extensions: input.extensions,
+		extensions: launchExtensions,
 		subagentOnlyExtensions: input.subagentOnlyExtensions,
 		requiredExtensions,
 		mcpDirectTools: input.mcpDirectTools,

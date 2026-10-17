@@ -9,10 +9,12 @@ Use the smallest loop that proves the change:
 1. Inspect the source, diff, issue, or plan directly.
 2. Keep one writer for each cwd or worktree.
 3. Run focused validation that can fail for the changed behavior.
-4. For a Sol-medium or Sol-high parent, perform the review directly by default. When the operator/project delegation contract calls for independent review, use one fresh-context Luna-high read-only reviewer only for a genuinely simple review when a context-complete packet and isolated snapshot materially improve confidence. Use multiple reviewers only for independent high-impact risks with explicit justification.
+4. Keep substantive synthesis and acceptance in the parent. Delegate a focused read-only question when independent analysis adds value or resolves uncertainty that deterministic checks cannot settle. Follow the [canonical model routing policy](prompting-and-roles.md#model-routing-policy); provide a context-complete packet and an isolated snapshot, except for the operator-enabled fast-work read-only exception. Multiple reviewers need distinct independent questions and a material benefit.
 5. Apply only accepted findings inside the same writer boundary.
 6. Re-run affected validation and review only the changed blast radius.
 7. Inspect the final diff and evidence before parent acceptance.
+
+Startup/discovery success does not establish product acceptance. Carry cumulative changed-file, validation and review evidence through follow-up, with the target/ref and any remaining gaps explicit. Re-run affected checks when behavior, target or effective environment changes; do not repeat unchanged tests solely for metadata or a repeated phase. See [startup and discovery evidence](execution-controls.md#startup-and-discovery-evidence).
 
 Skip review ceremony for trivial wording, renames, or local-only probes when direct parent inspection is enough.
 
@@ -20,12 +22,12 @@ Skip review ceremony for trivial wording, renames, or local-only probes when dir
 
 | Situation | Shape |
 | --- | --- |
-| One coherent diff or one risk | parent review; one Luna-high reviewer only if the review is genuinely simple and context-complete |
+| One coherent diff or one risk | parent review; a bounded independent read-only reviewer when useful, using the canonical model routing policy |
 | Independent high-impact risks, such as correctness, security, or release | parallel reviewers with distinct contracts and explicit justification |
 | Possible over-scope or needless complexity | same-writer challenge before any fresh review |
 | Material design tradeoff | council mode |
 
-Reviewers are fresh-context when used. A reviewer must receive the exact target diff/ref, relevant source and contracts, acceptance criteria, user constraints, and validation command; repository discovery alone is not sufficient context for a Sol-parent review. Use the ordinary `reviewer` role for the one permitted simple review. Forked oracle/advisor runs are escalation-only for parent-history, drift, root-cause, model-routing, or hard tradeoff evidence.
+Reviewers are fresh-context when used. A reviewer must receive the exact target diff/ref, relevant source and contracts, acceptance criteria, user constraints, and validation command; repository discovery alone is not sufficient context for a Sol-parent review. Use the ordinary `reviewer` role for bounded independent review. Use forked oracle/advisor runs when parent-history, drift, root-cause, model-routing or hard tradeoff evidence needs inherited context.
 
 ## Finding disposition
 
@@ -61,7 +63,7 @@ Before reporting delegated work as done, verify the relevant subset:
 
 - final diff contains only intended files
 - focused validation covers changed behavior
-- substantial or risky changes have fresh-review evidence
+- residual architectural, concurrency, security or publication uncertainty has focused independent review when deterministic checks cannot settle it
 - accepted findings are fixed and revalidated
 - publication authority exists before push, comment, close, merge, deploy, or release
 - external checks are exact-head when used as evidence

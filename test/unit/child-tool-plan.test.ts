@@ -127,6 +127,30 @@ describe("child tool plan declared tools", () => {
 });
 
 describe("production launch path keeps declared child tools", () => {
+	it("keeps foreground leaves isolated without warning about a redundant empty extension override", () => {
+		const input = {
+			cwd: process.cwd(), childAgentName: "fast-work-leaf", childIndex: 0,
+			sessionEnabled: false, inheritProjectContext: false, inheritGlobalContext: false, inheritSkills: false,
+			tools: ["read", "grep", "find", "ls"], allowNestedSubagents: false,
+			extensions: [], subagentOnlyExtensions: [], mcpDirectTools: [], requiredExtensions: [],
+		};
+		const foreground = buildInProcessChildLaunch({ ...input, host: "parent" });
+		assert.deepEqual(foreground.warnings, []);
+		assert.equal(foreground.session.ambientExtensions, false);
+		assert.equal(foreground.launchResolvedExtensions.disableAmbientExtensions, true);
+		assert.deepEqual(foreground.session.extensionPaths, []);
+		assert.deepEqual(foreground.session.tools, input.tools);
+		assert.deepEqual(foreground.config.requiredTools, input.tools);
+		assert.equal(foreground.config.fanoutChild, false);
+		assert.equal(foreground.session.noSkills, true);
+		assert.equal(foreground.session.noContextFiles, true);
+
+		const background = buildInProcessChildLaunch({ ...input, host: "runner" });
+		assert.equal(background.session.ambientExtensions, false);
+		assert.equal(background.warnings.length, 1);
+		assert.match(background.warnings[0]!, /disables ALL ambient extensions/);
+	});
+
 	it("buildInProcessChildLaunch requires every declared tool from the child registry", () => {
 		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-launch-builtins-"));
 		const previousAgentDir = process.env.PI_CODING_AGENT_DIR;

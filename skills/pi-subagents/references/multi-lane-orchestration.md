@@ -8,7 +8,7 @@ Create lanes only after delegation is operator-authorized and each lane material
 
 Before launching a writer for substantial mutation work, classify the implementation as **single-seam** or **multi-seam**. Two or more independently testable contracts or source boundaries make it multi-seam. One PR does not imply one writer, and the one-writer-per-worktree rule prevents concurrent ownership conflicts; it does not authorize an issue-wide commission.
 
-Record the classification and evidence on a lane board before writer launch. For multi-seam work, give each isolated component writer exclusive file or contract ownership and focused validation gates. Require every component to produce a committed or otherwise durable handoff, then start a separate integration-only owner after the component handoffs are ready. Mechanically reject and repartition a writer prompt if it owns all major outcomes across multiple independent boundaries.
+Record the classification and evidence on a lane board before writer launch. For multi-seam work, freeze the smallest shared interface needed to release independently eligible component writers, each with exclusive file/contract ownership and a focused gate. The parent integrates accepted component handoffs as their dependencies permit. Do not require a separate integration worker or wait for all unrelated components. Repartition a writer prompt that owns multiple independent boundaries; keep genuinely coupled boundaries with the parent.
 
 A single complete writer remains valid only when the board records evidence that the work is genuinely one seam or that splitting it would create overlapping ownership or artificial handoffs. This preflight must not manufacture parallelism: do not split tightly coupled work merely to increase the lane count.
 
@@ -24,9 +24,9 @@ For every lane, record the delivery target, allowed actions, required validation
 
 ## Expanded writer fanout and nesting
 
-Normal fanout is at most three depth-one lanes. Use four to six independent lanes—including mutation/test-writing lanes—only when each has a distinct seam/output, isolated writer workspace, non-overlapping contract, recorded integration order, and material benefit; more than six requires explicit user approval. Testing that changes files, generated state, or shared lifecycle resources is a mutation lane.
+Normal fanout is up to five concurrent depth-one lanes, subject to tighter user/project limits. With five ready eligible coding slices, launch five; with fewer, launch only those ready. Every writer needs a distinct seam/output, isolated workspace, non-overlapping contract, focused gate and integration order; more than five requires explicit user approval. Testing that changes files, generated state, or shared lifecycle resources is a mutation lane.
 
-Nested delegation is exceptional. A root-designated fanout child with `subagent` may spawn one additional level, at most three children, within a normal total of six live descendants. A nested writer must use `worktree: true` or a recorded temporary clone, own a non-overlapping contract, and return a scoped commit or captured patch plus validation. Every nested launch explicitly uses Luna high/xhigh, never Sol/inherited Sol or Terra. Nested children do not recurse, merge, integrate, or decide scope; the intermediate synthesizes and the root reviews, integrates, accepts, and confirms cleanup.
+Nested delegation is exceptional. A root-designated fanout child with `subagent` may spawn one additional level, at most three children, within a normal total of six live descendants. A nested writer must use `worktree: true` or a recorded temporary clone, own a non-overlapping contract, and return a scoped commit or captured patch plus validation. Every nested launch follows the [canonical model routing policy](prompting-and-roles.md#model-routing-policy). Nested children do not recurse, merge, integrate, or decide scope; the intermediate synthesizes and the root reviews, integrates, accepts, and confirms cleanup.
 
 ## Partitioned runs
 
@@ -44,7 +44,7 @@ Use one async `workflowScript` for a coordinated wave. Use `runs.all` for indepe
 
 ## Keep independent work moving
 
-While one lane waits, run safe independent preparation, validation, or fresh read-only review lanes. Do not block the parent just because a run is active. If no safe lane remains, record the blocker and the event that will reopen work.
+Track ready/running/blocked coding lanes and their actual dependencies. Launch ready eligible writers promptly and refill freed slots after acceptance of a scoped handoff, without waiting for an unrelated lane or a whole wave. While a lane waits, take the next safe independent coding action; use preparation or read-only review only when it resolves a named acceptance gap. If ready work stays idle, record the concrete contract, resource or runtime blocker. If no safe lane remains, record the event that will reopen work. Never invent lanes to fill capacity.
 
 In an ordinary interactive session, completion wakes the parent; after useful
 async lanes are launched or triaged, yield rather than use
@@ -58,7 +58,7 @@ After an eligible child writer produces a candidate, the parent checks its diff/
 
 ## Handoff, cleanup, and recovery
 
-Use stable lane-qualified artifact paths for reports and review output. A writer handoff states lane status, repository/worktree, base/ref, changed files, commit or patch, validation, open decisions, next action, artifact paths, and cleanup state. Copy only final evidence to memory, a mission record, or a PR/comment, then remove scratch files from the active worktree before closing the lane.
+Use stable lane-qualified artifact paths for reports and review output. A writer handoff states lane status, repository/worktree, base/ref, changed files, commit or patch, validation, open decisions, next action, artifact paths, and cleanup state. Carry that evidence cumulatively through follow-up, retaining prior results and naming only changed scope, affected checks and remaining gaps; do not repeat unchanged tests for metadata-only updates. Startup evidence is separate from product acceptance; see [startup and discovery evidence](execution-controls.md#startup-and-discovery-evidence). Copy only final evidence to memory, a mission record, or a PR/comment, then remove scratch files from the active worktree before closing the lane.
 
 For backlog lanes and other subagent-governed workflows, a setup/runtime/tooling failure remains an infrastructure blocker. Preserve the exact failure, run/status, and repository/cwd/worktree/branch/ref state; verify a clean worktree or capture any partial diff before a same-protocol retry or asking the owner. Do not start another writer or switch to an external, foreground, or CLI execution mode without explicit owner approval.
 

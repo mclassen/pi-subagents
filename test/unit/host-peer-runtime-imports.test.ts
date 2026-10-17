@@ -124,6 +124,59 @@ test("resolves pi-agent-core/node to its exact package export instead of appendi
 	}
 });
 
+test("Pi 1.x hosts omit the removed agent-core/node export without hiding broken declared exports", () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-pi-one-alias-"));
+	const core = "@earendil-works/pi-agent-core";
+	const specifier = `${core}/node`;
+	const coreDir = path.join(root, "node_modules", core);
+	try {
+		const packages = new Map<string, Record<string, string>>();
+		for (const { pkg, subpath } of HOST_PEER_ALIASES) {
+			const exports = packages.get(pkg) ?? {};
+			exports[subpath] = `./${subpath === "." ? "index" : subpath.slice(2).replaceAll("/", "-")}.mjs`;
+			packages.set(pkg, exports);
+		}
+		packages.set("@earendil-works/chord", { ".": "./index.mjs", "./context": "./context.mjs" });
+		for (const [pkg, exports] of packages) {
+			const dir = pkg === "@earendil-works/pi-coding-agent" ? root : path.join(root, "node_modules", pkg);
+			fs.mkdirSync(dir, { recursive: true });
+			fs.writeFileSync(path.join(dir, "package.json"), JSON.stringify({ name: pkg, version: "1.0.4", exports }));
+			for (const target of Object.values(exports)) fs.writeFileSync(path.join(dir, target), "export {};\n");
+		}
+		const hostExports = packages.get("@earendil-works/pi-coding-agent")!;
+		const coreExports = packages.get(core)!;
+		const writeCore = (version: string, exports: Record<string, string | null>) => {
+			fs.writeFileSync(path.join(coreDir, "package.json"), JSON.stringify({ name: core, version, exports }));
+		};
+		writeCore("1.0.4", { ".": coreExports["."]! });
+		let result = resolveHostPeerAliases(root);
+		assert.deepEqual(result.missing, []);
+		assert.equal(result.aliases[specifier], undefined, "unexported stale dist files are not aliases");
+		assert.ok(result.aliases[core]);
+
+		for (const version of ["0.87.0", "1.0.4-test", "unknown"]) {
+			writeCore(version, { ".": coreExports["."]! });
+			assert.deepEqual(resolveHostPeerAliases(root).missing, [specifier], version);
+		}
+		writeCore("1.0.4", { ".": coreExports["."]! });
+		for (const version of ["0.87.0", "1.0.4-test", "unknown"]) {
+			fs.writeFileSync(path.join(root, "package.json"), JSON.stringify({ name: "@earendil-works/pi-coding-agent", version, exports: hostExports }));
+			assert.deepEqual(resolveHostPeerAliases(root).missing, [specifier], version);
+		}
+		fs.writeFileSync(path.join(root, "package.json"), JSON.stringify({ name: "@earendil-works/pi-coding-agent", version: "1.0.4", exports: hostExports }));
+		for (const nodeTarget of ["./missing.mjs", null]) {
+			writeCore("1.0.4", { ".": coreExports["."]!, "./node": nodeTarget });
+			assert.deepEqual(resolveHostPeerAliases(root).missing, [specifier]);
+		}
+		writeCore("1.0.4", coreExports);
+		result = resolveHostPeerAliases(root);
+		assert.deepEqual(result.missing, []);
+		assert.equal(result.aliases[specifier], fs.realpathSync(path.join(coreDir, coreExports["./node"]!)));
+	} finally {
+		fs.rmSync(root, { recursive: true, force: true });
+	}
+});
+
 function writeFakeTypeboxPackage(typeboxDir: string): void {
 	fs.mkdirSync(typeboxDir, { recursive: true });
 	fs.writeFileSync(

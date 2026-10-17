@@ -18,6 +18,12 @@ Precedence is by parsed runtime name:
 
 Project settings resolve from the nearest parent directory containing `.pi` or `.agents` by default. In monorepos or git worktrees where an incidental nested `.pi` directory should not shadow the repository config, set `subagents.projectRootResolution: "git-root"` in the repository root `.pi/settings.json`; a nested project can opt back with `"nearest"` in its own settings.
 
+## Startup and discovery evidence
+
+Reuse discovery and startup evidence while the runtime, provider/model and tool configuration are unchanged. A repeated prompt, phase or follow-up alone does not invalidate it. Refresh only evidence affected by a configuration change, a concrete startup failure or a missing capability fact. The first useful writer establishes startup; use a standalone minimal tools-only probe only when actually needed to resolve an otherwise unproven startup requirement, not as routine ceremony.
+
+Startup proves only that the required execution path works, not product acceptance. Preserve cumulative handoff evidence through follow-up: target/ref, changed files, validation results, review state and remaining gaps. Do not rerun unchanged tests for metadata-only updates. This is parent-owned orchestration guidance, not a new receipt API or a claim that runtime startup caching or cumulative acceptance has been implemented.
+
 ## Running Subagents
 
 ### External CLI profiles
@@ -503,7 +509,7 @@ history as a baseline contract.
 
 Use `oracle` as a smart-friend escalation when the parent needs help with trajectory rather than diff inspection: architectural boundaries, model capability routing, merge conflicts, reviewer disagreement, context drift after long work, a worker about to invent a pattern, or fixes that require product/scope tradeoffs. Ask broad questions when the right concern is unclear, and let `oracle` point out missing context or files the parent should inspect before asking again. Keep `oracle` advisory unless it has been explicitly assigned the single writer role.
 
-Do not use `oracle` or Sol-high models to satisfy routine fresh-review gates, ordinary follow-up reviews, or ordinary performance crit passes. Use the `reviewer` role for those reviews, then escalate only when normal review/bot/CI evidence exposes an unresolved invariant, root-cause, model-routing, or product-tradeoff question.
+Do not use `oracle` to satisfy routine fresh-review gates, ordinary follow-up reviews, or ordinary performance crit passes. Select reviewer models under the [canonical routing policy](prompting-and-roles.md#model-routing-policy). Use the `reviewer` role for those reviews, then escalate only when normal review/bot/CI evidence exposes an unresolved invariant, root-cause, model-routing, or product-tradeoff question.
 
 ## Subagent + Intercom Coordination
 
