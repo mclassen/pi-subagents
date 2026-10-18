@@ -23,7 +23,7 @@ Behavior:
 - Set `missions.enabled: false` to disable automatic mission creation; explicit mission fields and actions still work.
 - A workflow with a mission can use `await state.get(key)` and `await state.set(key, value)` for durable JSON state. Missing keys return `undefined`. Keys use the same format as `runs.run` keys. Each set takes the state-file lock, reads the latest file, merges the key, and atomically writes `<mission-directory>/<mission-id>/state.json`. The complete file cannot exceed 256 KiB. Each workflow caches the file on its first `get`. A `mission:false` workflow has no `state` global.
 
-An explicit `mission` object must have exactly one non-empty `title` or `summary`. `objective` and `labels` are optional. When supplied, `goal` must be `true` and requires `budget: { tokens: <positive integer> }`.
+An explicit `mission` object must have exactly one non-empty `title` or `summary`. `objective` and `labels` are optional. When supplied, `goal` must be `true`. A token limit is optional: `budget: { tokens: <positive integer> }`.
 
 ```ts
 const created = subagent({
@@ -44,7 +44,7 @@ subagent({
 
 ### Goal missions
 
-Set `goal: true` with a token budget to make an open mission an active continuation driver:
+Set `goal: true` to make an open mission an active continuation driver; no token or monetary budget is required:
 
 ```ts
 subagent({
@@ -52,17 +52,34 @@ subagent({
   mission: {
     title: "Ship auth refresh",
     objective: "Implement and validate token refresh",
-    goal: true,
-    budget: { tokens: 400000 }
+    goal: true
   }
 })
 ```
 
-After each parent turn, an idle goal mission sends one needs-attention notice with its title, remaining token budget, and next ready action. The action comes from `state.nextReadyAction`, `state.nextAction`, a state item with `status: "ready"`, an open decision, or linked-run state. A workflow can write `state.nextReadyAction` to tell the next notice exactly what work is ready. When the latest linked workflow has a resumable retained child, the notice names that child as the `resume` target. Non-resumable retained children stay visible in `children.list` with their reason, but goal notices do not present them as resume targets. The extension never launches or replans goal work by itself.
+After each parent turn, an idle goal mission sends one needs-attention notice with its title and next ready action, plus the remaining token budget only when one was explicitly supplied. The action comes from `state.nextReadyAction`, `state.nextAction`, a state item with `status: "ready"`, an open decision, or linked-run state. A workflow can write `state.nextReadyAction` to tell the next notice exactly what work is ready. When the latest linked workflow has a resumable retained child, the notice names that child as the `resume` target. Non-resumable retained children stay visible in `children.list` with their reason, but goal notices do not present them as resume targets. The extension never launches or replans goal work by itself.
 
-Linked-run token totals are stored on each run and folded into mission `usage`. An active linked run suppresses notices. Reaching the token budget changes the goal status to `budget-exhausted` and stops notices without closing the mission or reporting success.
+Linked-run token totals are stored on each run and folded into mission `usage`. An active linked run suppresses notices. If an explicit token budget was supplied, reaching it changes the goal status to `budget-exhausted` and stops notices without closing the mission or reporting success.
 
 Pause and resume notices with `mission.update` and `{ goal: { paused: true } }` or `{ goal: { paused: false } }`. Set `{ goal: false }` to disable goal mode. `mission.close` also ends the loop.
+
+### `/goal`: assess, plan, implement, verify
+
+The packaged `/goal` prompt directs the parent through the goal workflow using the mission actions above:
+
+```text
+/goal Fix session recovery and verify it; maximum 12 iterations
+```
+
+Supply a concrete goal; the iteration override is an ordinary prompt instruction, not a parsed command flag. The default is **8 iterations**, with no monetary or token budget. One iteration is an assess → plan → implement → verify cycle, not a worker, check or status update. An explicit override selects the limit without a separate confirmation step. With no goal, the parent is instructed to ask before creating a mission or changing files.
+
+The parent establishes measurable acceptance, creates or explicitly identifies one enclosing goal mission, assesses the current repository, and updates canonical repository-root `PLAN.md` without replacing unrelated work. It then implements with isolated plan writers, integrates and verifies their actual changes, and reassesses remaining acceptance. A missing `PLAN.md` may be created after assessment. Fewer than two useful independent plan writers requires an explicit decision, not silent local implementation.
+
+The prompt requires mission-linked workflows, persisted next actions and iteration counts, evidence-backed completion, and a paused checkpoint on blockers, no progress or the iteration limit. Routine assessment, checkpoint recording and verified cleanup do not introduce confirmation gates beyond applicable instructions. Resume through `mission.show` and `PLAN.md`; do not duplicate the mission or reset its count. Existing mission restrictions remain in force. Pausing goal notices does not terminate running children.
+
+This is a parent instruction template, not a new runner or an enforcement mechanism. Continuation notices do not launch work, replan or prove completion, and the iteration limit is a parent instruction rather than a runtime counter. Tests check the packaged instructions and existing mission behavior, not future model compliance.
+
+Run `/reload` after adding/changing this prompt, with no child runs active. Extension/runtime changes still require a Pi restart.
 
 ### Managing missions
 

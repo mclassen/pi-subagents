@@ -223,7 +223,6 @@ export function parseMissionRecord(value: unknown, source = "mission record"): M
 	const usage = input.usage !== undefined ? parseUsage(input.usage, `${source}.usage`) : undefined;
 	const objective = optionalString(input.objective, `${source}.objective`)?.trim();
 	if (!objective) throw new Error(`${source}.objective must be a non-empty string`);
-	if (goal && !budget) throw new Error(`${source}.budget is required for a goal mission`);
 	return {
 		schemaVersion: 1,
 		id: validateMissionId(input.id, `${source}.id`),
@@ -371,7 +370,7 @@ export function createMission(location: MissionStoreLocation, input: MissionCrea
 		title: requiredString(input.title, "mission.title").trim(),
 		objective: requiredString(input.objective, "mission.objective").trim(),
 		...(input.goal === true ? { goal: { status: "active" as const } } : {}),
-		...(input.budget ? { budget: parseBudget(input.budget, "mission.budget") } : {}),
+		...(input.budget !== undefined ? { budget: parseBudget(input.budget, "mission.budget") } : {}),
 		...(input.goal === true ? { usage: { tokens: 0 } } : {}),
 		status: input.status ?? "planned",
 		createdAt,
@@ -385,7 +384,6 @@ export function createMission(location: MissionStoreLocation, input: MissionCrea
 		...(input.ownerSessionId ? { ownerSessionId: requiredString(input.ownerSessionId, "mission.ownerSessionId") } : {}),
 		...(input.labels ? { labels: stringArray(input.labels, "mission.labels") } : {}),
 	};
-	if (input.goal === true && !input.budget) throw new Error("mission.budget is required when mission.goal is true");
 	const created = writeMission(location, record);
 	pruneTerminalMissions(location, retainTerminal);
 	return created;
@@ -511,7 +509,6 @@ export function updateMission(location: MissionStoreLocation, missionId: string,
 		? parseUsage(update.usage, "mission.update.usage")
 		: { tokens: runs.reduce((total, run) => total + (run.usage?.tokens ?? 0), 0) };
 	let goal = update.goal === false ? undefined : update.goal !== undefined ? parseGoal(update.goal, "mission.update.goal") : current.goal;
-	if (goal && !budget) throw new Error("mission.update.budget is required when enabling a goal mission");
 	if (goal && budget) {
 		goal = usage.tokens >= budget.tokens
 			? { status: "budget-exhausted" }

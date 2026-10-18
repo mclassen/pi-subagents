@@ -129,21 +129,19 @@ export function collectGoalContinuationNotices(input: {
 	for (const listed of listMissions(input.location).records) {
 		if (listed.ownerSessionId !== input.ownerSessionId || !listed.goal || TERMINAL_MISSION_STATUSES.has(listed.status)) continue;
 		let record = refreshGoalMission(input.location, readMission(input.location, listed.id));
-		if (!record.goal || record.goal.status !== "active" || !record.budget) continue;
-		if ((record.usage?.tokens ?? 0) >= record.budget.tokens) {
+		if (!record.goal || record.goal.status !== "active") continue;
+		if (record.budget && (record.usage?.tokens ?? 0) >= record.budget.tokens) {
 			record = updateMission(input.location, record.id, { usage: record.usage ?? { tokens: 0 } });
 			if (record.goal?.status === "budget-exhausted") continue;
 		}
 		if (record.runs.some((run) => run.status && ACTIVE_RUN_STATUSES.has(run.status))) continue;
-		if (seen.has(record.id) || !record.budget) continue;
+		if (seen.has(record.id)) continue;
 		seen.add(record.id);
-		const budget = record.budget.tokens;
 		const used = record.usage?.tokens ?? 0;
-		const remaining = Math.max(0, budget - used);
 		const message = [
 			`Goal mission needs attention: ${bounded(record.title)}`,
 			`Mission: ${record.id}`,
-			`Remaining budget: ${remaining} tokens (${used}/${budget} used)`,
+			...(record.budget ? [`Remaining budget: ${Math.max(0, record.budget.tokens - used)} tokens (${used}/${record.budget.tokens} used)`] : []),
 			`Next ready action: ${nextReadyAction(input.location, record, input.retainedChildren)}`,
 		].join("\n");
 		notices.push({

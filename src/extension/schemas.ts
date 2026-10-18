@@ -326,7 +326,7 @@ const SubagentParamProperties = {
 	overlap: Type.Optional(Type.String({ enum: ["skip"] })),
 	catchUp: Type.Optional(Type.String({ enum: ["none", "latest"], description: "Missed schedule occurrences; default latest." })),
 	missionId: Type.Optional(Type.String()),
-	mission: Type.Optional(Type.Unsafe({ ...MissionLaunchOverride, description: "false disables; true invalid. Object: exactly one non-empty title or summary; objective/labels optional; goal only true, requires budget.tokens." })),
+	mission: Type.Optional(Type.Unsafe({ ...MissionLaunchOverride, description: "false disables; true invalid. Object: exactly one non-empty title or summary; objective/labels optional; goal only true; budget.tokens optional." })),
 	missionUpdate: Type.Optional(Type.Unsafe({ ...MissionUpdateOverride, description: "Mission patch; read guide missions." })),
 	missionStatus: Type.Optional(Type.String()),
 	missionScope: Type.Optional(Type.String({ description: "project (default) or global pointer index." })),

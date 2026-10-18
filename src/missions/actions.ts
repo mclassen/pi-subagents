@@ -119,7 +119,6 @@ export function validateMissionLaunch(value: unknown): MissionLaunchInput {
 	if (budget !== undefined && (!budget || typeof budget !== "object" || Array.isArray(budget) || !Number.isSafeInteger((budget as { tokens?: unknown }).tokens) || ((budget as { tokens: number }).tokens < 1))) {
 		throw new Error("mission.budget.tokens must be a positive integer");
 	}
-	if (input.goal === true && budget === undefined) throw new Error("mission.budget is required when mission.goal is true");
 	if (input.labels !== undefined && (!Array.isArray(input.labels) || input.labels.some((label) => typeof label !== "string" || !label.trim()))) {
 		throw new Error("mission.labels must contain only non-empty strings");
 	}
@@ -292,7 +291,8 @@ function formatMission(record: MissionRecord): string {
 		`Objective: ${record.objective}`,
 		`Updated: ${record.updatedAt}`,
 	];
-	if (record.goal && record.budget) lines.push(`Goal mode: ${record.goal.status}`, `Budget: ${record.usage?.tokens ?? 0}/${record.budget.tokens} tokens`);
+	if (record.goal) lines.push(`Goal mode: ${record.goal.status}`);
+	if (record.goal && record.budget) lines.push(`Budget: ${record.usage?.tokens ?? 0}/${record.budget.tokens} tokens`);
 	if (record.summary) lines.push(`Summary: ${record.summary}`);
 	if (record.labels?.length) lines.push(`Labels: ${record.labels.join(", ")}`);
 	if (record.runs.length) {

@@ -87,6 +87,76 @@ describe("mission store", () => {
 		}
 	});
 
+	it("persists unbudgeted goals through updates, pause, resume, and close", () => {
+		const test = fixture();
+		const now = new Date("2026-01-01T00:00:00Z");
+		try {
+			const created = createMission(test.location, {
+				title: "Unbudgeted goal", objective: "Continue without a token cap", goal: true, status: "active",
+			}, now);
+			assert.deepEqual(created.goal, { status: "active" });
+			assert.deepEqual(created.usage, { tokens: 0 });
+			assert.equal(Object.hasOwn(created, "budget"), false);
+			assert.deepEqual(readMission(test.location, created.id), created);
+			const updated = updateMission(test.location, created.id, {
+				summary: "Work recorded",
+				addRuns: [{ runId: "run-1", mode: "single", status: "complete", usage: { tokens: 250_000 } }],
+			}, now);
+			assert.deepEqual(updated.goal, { status: "active" });
+			assert.deepEqual(updated.usage, { tokens: 250_000 });
+			assert.equal(Object.hasOwn(updated, "budget"), false);
+			assert.equal(updateMission(test.location, created.id, { goal: { status: "paused" } }, now).goal?.status, "paused");
+			assert.equal(updateMission(test.location, created.id, { goal: { status: "active" } }, now).goal?.status, "active");
+			const closed = updateMission(test.location, created.id, { status: "completed", summary: "Done" }, now);
+			assert.equal(closed.status, "completed");
+			assert.deepEqual(readMission(test.location, created.id), closed);
+			assert.equal(listMissions(test.location).warnings.length, 0);
+			assert.equal(listGlobalMissions(test.location.globalIndexDir).entries[0]?.stale, false);
+		} finally {
+			fs.rmSync(test.root, { recursive: true, force: true });
+		}
+	});
+
+	it("enables an existing mission as an unbudgeted goal and can opt out", () => {
+		const test = fixture();
+		const now = new Date("2026-01-01T00:00:00Z");
+		try {
+			const created = createMission(test.location, { title: "Existing mission", objective: "Enable continuation" }, now);
+			const enabled = updateMission(test.location, created.id, {
+				goal: { status: "active" },
+				addRuns: [{ runId: "run-1", mode: "single", usage: { tokens: 12 } }],
+			}, now);
+			assert.deepEqual(enabled.goal, { status: "active" });
+			assert.deepEqual(enabled.usage, { tokens: 12 });
+			assert.equal(Object.hasOwn(enabled, "budget"), false);
+			assert.deepEqual(readMission(test.location, created.id), enabled);
+			assert.equal(updateMission(test.location, created.id, { goal: false }, now).goal, undefined);
+		} finally {
+			fs.rmSync(test.root, { recursive: true, force: true });
+		}
+	});
+
+	it("still validates explicit goal token budgets on create, update, and read", () => {
+		const test = fixture();
+		try {
+			const input = { title: "Budget validation", objective: "Reject invalid caps", goal: true };
+			const created = createMission(test.location, input);
+			for (const tokens of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+				assert.throws(() => createMission(test.location, { ...input, budget: { tokens } }), /positive integer/);
+				assert.throws(() => updateMission(test.location, created.id, { budget: { tokens } }), /positive integer/);
+				const recordPath = path.join(test.location.missionDir, `${created.id}.json`);
+				fs.writeFileSync(recordPath, JSON.stringify({ ...created, budget: { tokens } }));
+				assert.throws(() => readMission(test.location, created.id), /positive integer/);
+				fs.writeFileSync(recordPath, JSON.stringify(created));
+			}
+			const budgeted = updateMission(test.location, created.id, { budget: { tokens: 10 }, usage: { tokens: 10 } });
+			assert.equal(budgeted.goal?.status, "budget-exhausted");
+			assert.equal(updateMission(test.location, created.id, { budget: { tokens: 20 }, usage: { tokens: 10 } }).goal?.status, "active");
+		} finally {
+			fs.rmSync(test.root, { recursive: true, force: true });
+		}
+	});
+
 	it("persists workflow child attempts and projects their latest heartbeat", () => {
 		const test = fixture();
 		try {

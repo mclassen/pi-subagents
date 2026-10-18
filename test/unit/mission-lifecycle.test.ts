@@ -41,7 +41,10 @@ describe("mission launch lifecycle", () => {
 		assert.throws(() => validateMissionLaunch({ title: "Title", summary: "Summary" }), /cannot both be set/);
 		assert.throws(() => validateMissionLaunch({ title: " " }), /non-empty string/);
 		assert.throws(() => validateMissionLaunch({ title: "Title", goal: false }), /must be true/);
-		assert.throws(() => validateMissionLaunch({ title: "Title", goal: true }), /budget is required/);
+		assert.deepEqual(validateMissionLaunch({ title: "Title", goal: true }), { title: "Title", goal: true });
+		for (const budget of [null, false, [], {}, { tokens: 0 }, { tokens: -1 }, { tokens: 1.5 }, { tokens: "100" }, { tokens: Number.NaN }, { tokens: Number.POSITIVE_INFINITY }, { tokens: Number.MAX_SAFE_INTEGER + 1 }]) {
+			assert.throws(() => validateMissionLaunch({ title: "Title", goal: true, budget }), /budget\.tokens must be a positive integer/);
+		}
 	});
 
 	it("creates missions by default for task launches and honors explicit opt-out", () => {

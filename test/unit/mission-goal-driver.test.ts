@@ -64,6 +64,58 @@ describe("goal mission continuation", () => {
 		}
 	});
 
+	it("notifies unbudgeted goals without budget text while preserving usage and lifecycle controls", () => {
+		const test = fixture();
+		const now = new Date("2026-01-01T00:00:00Z");
+		try {
+			const mission = createMission(test.location, {
+				title: "Unbudgeted continuation", objective: "Finish the next iteration", goal: true,
+				status: "active", ownerSessionId: "session-1",
+			}, now);
+			const collect = (turnId: number, ownerSessionId = "session-1") => collectGoalContinuationNotices({
+				location: test.location, ownerSessionId, retainedChildren: [], turnId, now: now.getTime(),
+			});
+			const first = collect(1);
+			assert.equal(first.length, 1);
+			assert.equal(first[0]!.message, [
+				"Goal mission needs attention: Unbudgeted continuation",
+				`Mission: ${mission.id}`,
+				"Next ready action: Continue objective: Finish the next iteration",
+			].join("\n"));
+			assert.equal(first[0]!.event.message, first[0]!.message);
+			assert.equal(first[0]!.event.ts, now.getTime());
+			assert.deepEqual(collect(1, "other-session"), []);
+
+			const asyncDir = path.join(test.root, "unbudgeted-run");
+			fs.mkdirSync(asyncDir);
+			fs.writeFileSync(path.join(asyncDir, "status.json"), JSON.stringify({ state: "running", totalTokens: { total: 250_000 } }));
+			updateMission(test.location, mission.id, {
+				addRuns: [{ runId: "run-1", mode: "single", asyncDir, status: "running" }],
+			}, now);
+			assert.deepEqual(collect(2), []);
+			assert.equal(readMission(test.location, mission.id).usage?.tokens, 250_000);
+			fs.writeFileSync(path.join(asyncDir, "status.json"), JSON.stringify({ state: "complete", totalTokens: { total: 300_000 } }));
+			const resumed = collect(3);
+			assert.equal(resumed.length, 1);
+			assert.equal(resumed[0]!.message, first[0]!.message);
+			const refreshed = readMission(test.location, mission.id);
+			assert.deepEqual(refreshed.usage, { tokens: 300_000 });
+			assert.equal(refreshed.goal?.status, "active");
+			assert.equal(Object.hasOwn(refreshed, "budget"), false);
+
+			updateMission(test.location, mission.id, { goal: { status: "paused" } }, now);
+			assert.deepEqual(collect(4), []);
+			updateMission(test.location, mission.id, { goal: { status: "active" } }, now);
+			assert.equal(collect(5).length, 1);
+			for (const status of ["completed", "failed", "cancelled"] as const) {
+				updateMission(test.location, mission.id, { status }, now);
+				assert.deepEqual(collect(6), []);
+			}
+		} finally {
+			fs.rmSync(test.root, { recursive: true, force: true });
+		}
+	});
+
 	it("resumes retained children from the latest linked run", () => {
 		const test = fixture();
 		try {

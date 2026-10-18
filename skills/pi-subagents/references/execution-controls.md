@@ -258,7 +258,15 @@ subagent({ action: "doctor" })
 
 ### Failed lane recovery and execution-mode changes
 
-A failure in the subagent workflow, child launch, prompt runtime, extension loading, or child tooling setup is a lane infrastructure blocker, not permission to silently change execution mode. Stop and report the exact failure, run/status, and repo/cwd/worktree/branch/ref state. Retry or fix the `subagent` path only through a clear same-protocol retry; before retrying or asking the owner, verify the worktree is clean or capture the partial diff. For backlog lanes and other subagent-governed workflows, switching to `interactive_shell`, `pi -ne`, Codex/Claude/Cursor CLI, a foreground agent, or another external mode requires explicit owner approval. Pi core may print a generic `pi -ne` extension-load hint; that hint is outside this package and is not protocol-approved. A verified compaction abort may continue the retained child session once on the same resolved model; provider failures never select another model automatically.
+A failed or disappeared runner is not task success. Failures in the subagent workflow, child launch, prompt runtime, extension loading, or child tooling setup are lane infrastructure blockers. Before recovery, report the exact failure and record run/status and repo/cwd/worktree/branch/ref; preserve tracked AND untracked partial edits, commands/evidence and outstanding acceptance checks outside the failed workspace. Partial work remains unaccepted until parent inspection, integration and validation; do not treat a missing final worker response as success.
+
+Confirm the old writer is terminal or demonstrably gone and establish exclusive ownership before recovery. Missing notifications, quiet output or `needs_attention` alone do not prove disappearance. Never replace a still-live writer or guess ownership.
+
+One bounded same-protocol recovery attempt for the failed lane is authorized without fresh user confirmation, within existing task/iteration limits and on the same approved model/provider/tools. Change the recovery input or approach based on failure evidence; never loop unchanged failure. Prefer resume of a proven eligible retained child using its exact ID. If resume is unavailable or rejects eligibility, launch an explicitly labeled same-role replacement in a distinct isolated workspace with current inputs, preserved partial work and remaining checks. Record clear ownership transfer and a parent-captured recovery handoff; these substitute for a missing final worker response, not for acceptance evidence.
+
+If recovery fails again, no safe supported repair is available, ownership is uncertain, required tools/model/provider are unavailable, or the task/mission is paused, cancelled or out of iterations: checkpoint/report and ask for the smallest needed decision. Do not reset the goal iteration count or restrictions. Recovery grants no automatic destructive repair, spending, extra permissions, publication or execution-mode/model/provider fallback. Switching to local implementation, `interactive_shell`, `pi -ne`, Codex/Claude/Cursor CLI, a foreground agent or another external mode still requires explicit owner approval. Pi core's generic `pi -ne` extension-load hint is not protocol-approved fallback. A verified compaction abort may use this one recovery attempt on the same resolved model; provider failures never select another model automatically.
+
+Instruction-contract tests prove these instructions only, not future model compliance or recovery runtime reliability.
 
 ### External terminal work
 
@@ -400,13 +408,13 @@ Missions are the durable orchestration layer. Use this noun map:
 - **Run** — one actual subagent execution.
 - **Receipt** — proof or a link for an external outcome, such as a PR, CI check, deployment, or release.
 
-Ordinary launches with a task create a mission by default, so substantial delegated work has a persisted objective, status, run links, decisions, artifacts, and delivery receipts that survive compaction or a new parent chat. Automatic persistence failures leave the run intact and set `details.missionWarning`; explicit `missionId` or `mission` remains strict before launch. Human receipts end with a mission id/status line, while structured JSON text remains untouched and `details.missionId` is authoritative. Pass `missionId` to attach an existing mission, use `mission: { title, objective?, goal?, budget?, labels? }` to control the auto-created record, pass `mission: false` for intentionally ephemeral work, or set `missions.enabled: false` to opt out globally. `objective` is the intent string; `goal: true` requires `budget.tokens` and turns the open mission into a continuation driver that sends one needs-attention notice after idle parent turns until the budget is exhausted, the goal is paused with `mission.update` `{ goal: { paused: true } }`, or the mission closes.
+Ordinary launches with a task create a mission by default, so substantial delegated work has a persisted objective, status, run links, decisions, artifacts, and delivery receipts that survive compaction or a new parent chat. Automatic persistence failures leave the run intact and set `details.missionWarning`; explicit `missionId` or `mission` remains strict before launch. Human receipts end with a mission id/status line, while structured JSON text remains untouched and `details.missionId` is authoritative. Pass `missionId` to attach an existing mission, use `mission: { title, objective?, goal?, budget?, labels? }` to control the auto-created record, pass `mission: false` for intentionally ephemeral work, or set `missions.enabled: false` to opt out globally. `objective` is the intent string; `goal: true` turns the open mission into a continuation driver that sends one needs-attention notice after idle parent turns until the goal is paused with `mission.update` `{ goal: { paused: true } }`, the mission closes, or an explicitly supplied optional `budget.tokens` is exhausted.
 
 Use `mission.update` while work runs to record decisions, artifacts, labels, summaries, or delivery receipts. A receipt records a pull request, CI, deployment, or release link with a concise status; it does not authorize or automate merge, CI polling, or deployment. Record open product, architecture, or safety decisions there and escalate them upward; do not let a child decide silently. Use `mission.attach-run` only for runs launched outside the normal mission-backed path, and use `mission.close` with a terminal status and concise summary when the mission is done.
 
 ### Mission use policy
 
-- **Keep the default.** Every ordinary `workflowScript` launch with a task creates one enclosing mission automatically. All workflow children share it and never get their own. Do not add `mission: {...}` boilerplate. Pass it only to set the title, objective, labels, or to enable `goal` with `budget`.
+- **Keep the default.** Every ordinary `workflowScript` launch with a task creates one enclosing mission automatically. All workflow children share it and never get their own. Do not add `mission: {...}` boilerplate. Pass it only to set the title, objective, labels, or to enable `goal` with an optional token `budget`.
 - **Use `mission: false` for noise.** Use it for trivial one-shot lookups, scouts, disposable probes, and quick validation where a recovery record is noise. It removes the mission and the `state` global for the whole workflow, so do not use it for monitors or multi-workflow loops that coordinate through `state`. Scheduled runs already launch without automatic missions.
 - **Use `missionId` for follow-up work.** Attach later work to an existing objective with `missionId`; attachment re-marks the mission active. `missionId` and `mission` are mutually exclusive. Explicit attachment fails before launch if the mission is missing, while automatic missions degrade to `details.missionWarning` without blocking the run.
 - **Keep `state` small.** Mission `state` is JSON coordination across workflows on the same mission. Keys use the same format as run keys, values must be JSON, and the whole state file is capped at 256 KiB. Each `set` merges one key under a file lock. Put large content in artifact files and store paths in state. In goal missions, write `state.set("nextReadyAction", "...")` so the next idle-turn notice names the exact ready step.
@@ -438,7 +446,7 @@ subagent({ action: "mission.close", missionId: "<mission-id>", missionStatus: "c
 
 ## Worktree Isolation
 
-User/global isolation policy requires a distinct execution workspace/resource for every child, including read-only children. For repository work, use a managed worktree or provision a temporary clone/snapshot containing the exact target; never let children share the parent checkout or each other's filesystem view.
+User/global isolation policy requires a distinct temporary execution workspace/resource and explicit `cwd` for every child, including read-only children except the documented operator-enabled `fast_work` exception. For repository work, use a managed worktree or provision a temporary clone/snapshot containing exact current inputs, including needed uncommitted source/config and provisioned dependencies; never let writers share the parent checkout or each other's filesystem view. Keep one writer per workspace, not one overall. Keep temporary workspaces outside extension auto-discovery.
 
 ```typescript
 subagent({
@@ -458,8 +466,7 @@ default for every child, and a child can opt out with `worktree: false`. This
 requires a clean git state. Use it for any child when HEAD exactly represents the target; otherwise provision a separate clone/snapshot and apply the captured target patch before launch. On completion, use each child's handoff path from its
 `artifactPaths` instead of scraping combined text. Each manifest records child status and output references, full
 patch paths and stats, and whether each temporary worktree and branch was
-removed. The manifest is journaled immediately after managed worktree setup, before children run, so abrupt exits retain owned paths and branches for recovery. Dirty or divergent work without a successfully captured patch is preserved with a partial-cleanup warning. Permanently discard recorded preserved work with `subagent({ action: "worktree.discard", handoffPath: "<child handoff path>" })`; authority defaults to interactive confirmation and refuses headlessly, and partial results print manual Git recovery commands. For nested writers, the root parent consumes the durable handoff or patch, performs integration and validation, and confirms the cleanup manifest; nested children do not merge or integrate. If you want one writer thread and several advisory agents, prefer a
-single-writer pattern instead.
+removed. The manifest is journaled immediately after managed worktree setup, before children run, so abrupt exits retain owned paths and branches for recovery. Dirty or divergent work without a successfully captured patch is preserved with a partial-cleanup warning. Permanently discard recorded preserved work with `subagent({ action: "worktree.discard", handoffPath: "<child handoff path>" })`; authority defaults to interactive confirmation and refuses headlessly, and partial results print manual Git recovery commands. For nested writers, the root parent consumes the durable handoff or patch, performs integration and validation, and confirms the cleanup manifest; nested children do not merge or integrate. For plan implementation, use the [2–5 independent writer policy](multi-lane-orchestration.md), not a single writer plus advisory agents.
 
 Git worktrees start from tracked files, so ignored or untracked build state
 such as `node_modules` may be absent. The clean-check ignores pi-subagents'
@@ -470,6 +477,8 @@ agents should still treat dependency setup as an explicit bootstrap step before
 running tests, typecheck, or builds. If module resolution fails in a fresh
 worktree, first confirm dependencies were linked, installed, or provisioned by
 `worktreeSetupHook` before treating it as a code failure.
+
+Parent owns cleanup for every settled lane, including failed/cancelled/startup-failed lanes. Follow the [cleanup checklist](multi-lane-orchestration.md#handoff-cleanup-and-recovery): preserve useful evidence outside the workspace, protect user work and uncertain ownership, then remove only redundant agent-owned copies after integration or durable disposition. Uncommitted agent changes alone do not require retaining redundant copies. Verify deletion and report retained paths/reasons. This guidance does not change runtime cleanup or discard authority.
 
 ## The Oracle Workflow
 
@@ -489,7 +498,7 @@ The intended oracle loop is:
 2. `oracle` reviews direction, drift, assumptions, and risks
 3. `oracle` can coordinate back through `contact_supervisor` when the bridge injects it
 4. the main agent decides what direction to approve
-5. the main agent implements by default; only an independently eligible frozen mechanical slice goes to `worker`
+5. the parent releases bounded approved independent components to isolated `worker` lanes, retaining genuinely coupled work, integration and acceptance; apply the 2–5 writer requirement for plan implementation
 
 ```typescript
 // Advisory review in a branched thread. Oracle defaults to forked context.
@@ -497,9 +506,9 @@ subagent({
   workflowScript: `return runs.run("oracle-check", { agent: "oracle", task: "Review my current direction, challenge assumptions, and propose the best next move." })`
 })
 
-// Only after approval AND the user/global writer gate passes; isolate the child.
+// After shared decisions are approved, release a bounded component in isolation.
 subagent({
-  workflowScript: `return runs.run("implementation", { agent: "worker", task: "Implement only this frozen mechanical slice: ...", worktree: true })`
+  workflowScript: `return runs.run("implementation", { agent: "worker", task: "Implement this bounded approved component; escalate new shared decisions: ...", model: "openai-codex/gpt-6.1-sol:medium", worktree: true })`
 })
 ```
 

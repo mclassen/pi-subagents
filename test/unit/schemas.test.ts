@@ -505,7 +505,8 @@ describe("SubagentParams schema", { skip: !schemasAvailable ? "typebox not avail
 		const missionDescription = String((schema.properties as Record<string, JsonSchemaNode> | undefined)?.mission?.description ?? "");
 		assert.match(missionDescription, /exactly one non-empty title or summary/);
 		assert.match(missionDescription, /goal only true/);
-		assert.match(missionDescription, /requires budget\.tokens/);
+		assert.match(missionDescription, /budget\.tokens optional/);
+		assert.doesNotMatch(missionDescription, /requires budget/);
 
 		const nestedDescriptionPaths: string[] = [];
 		const stack: Array<{ path: string; value: unknown }> = [{ path: "SubagentParams", value: schema }];
@@ -639,6 +640,8 @@ describe("SubagentParams schema", { skip: !schemasAvailable ? "typebox not avail
 			assert.equal(validator.Check({ agent: "worker", task: "Fix", acceptance }), false, `${JSON.stringify(acceptance)} acceptance should not validate`);
 		}
 		const validValues = [
+			{ mission: { title: "Continue goal", goal: true } },
+			{ mission: { title: "Bounded goal", goal: true, budget: { tokens: 100 } } },
 			{ skill: "review" },
 			{ workflowScript: "return await runs.run(\"one\", {agent: \"reviewer\", task: \"check\"})" },
 			{ workflowScriptPath: "workflows/review.js" },

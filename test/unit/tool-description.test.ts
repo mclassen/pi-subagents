@@ -47,6 +47,24 @@ describe("registered subagent tool description", () => {
 		]) {
 			assert.ok(description.includes(authorityGate));
 			assert.match(description, /do not launch GUI applications or file associations/i);
+			// Instruction contracts only: no claim about model compliance or runtime recovery reliability.
+			for (const contract of [
+				/not task success/,
+				/preserve tracked AND untracked partial edits, commands\/evidence and outstanding acceptance before recovery/,
+				/Partial work remains unaccepted until parent inspection\/integration\/validation/,
+				/prior writer is terminal or demonstrably gone.*exclusive ownership/,
+				/missing notifications, quiet or needs_attention alone are not proof/,
+				/Never replace a still-live writer or guess ownership/,
+				/One bounded same-protocol recovery attempt.*without fresh user confirmation.*existing task\/iteration limits.*same approved model\/provider\/tools/,
+				/Change recovery input\/approach based on failure evidence; never loop unchanged failure/,
+				/Prefer resume of a proven eligible retained child by exact ID; if unavailable or rejected/,
+				/explicitly labeled same-role replacement in a distinct isolated workspace with current inputs, preserved partial work and remaining checks/,
+				/Clear ownership transfer and a parent-captured recovery handoff.*missing final worker response/,
+				/If recovery fails again.*no safe supported repair.*ownership is uncertain.*tools\/model\/provider are unavailable.*paused\/cancelled\/out of iterations.*checkpoint\/report and ask/,
+				/Never reset goal iteration count or restrictions/,
+				/no automatic destructive repair, spending, extra permissions, publication or execution-mode\/model\/provider fallback/,
+				/Switching to local implementation, interactive_shell, pi -ne, Codex\/Claude\/Cursor CLI or foreground\/external mode requires explicit owner approval/,
+			]) assert.match(description, contract);
 		}
 
 		const fallbackCwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-tool-desc-authority-fallback-"));
@@ -102,9 +120,9 @@ describe("registered subagent tool description", () => {
 				/worktree:true requires clean source.*baseRef defaults to HEAD at allocation.*named ref, never full 40\/64-character commit IDs or revision expressions/,
 				/External CLI agents support native options only when their runner declares them.*tool budget, fast, fork context/,
 				/child launch, prompt runtime, extension load or child tooling failure is a lane infrastructure blocker/,
-				/exact failure.*run\/status.*repo\/cwd\/worktree\/branch\/ref.*clean worktree.*partial diff.*same-protocol retry/,
+				/exact failure.*run\/status.*repo\/cwd\/worktree\/branch\/ref.*preserve tracked AND untracked partial edits/,
 				/interactive_shell, pi -ne, Codex\/Claude\/Cursor CLI.*explicit owner approval/,
-				/fallback requires explicit owner approval, not Pi core's generic pi -ne hint/,
+				/mode requires explicit owner approval, not Pi core's generic pi -ne hint/,
 				/Ordinary child subagents are not orchestrators.*depth\/session limits/,
 				/Before advanced orchestration.*action:"guide",topic:"workflows".*pi-subagents skill/,
 				/action:"guide",topic:"tool-reference".*controls\/evidence gates/,

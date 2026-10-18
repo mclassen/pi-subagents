@@ -27,6 +27,7 @@ function harness(telemetrySetting: boolean | string = true, options: FastWorkOpt
 	let active = ["read", "subagent"];
 	let tool: ToolFixture | undefined;
 	const commands = new Map<string, (args: string, ctx: ExtensionContext) => Promise<void>>();
+	const commandDescriptions = new Map<string, string>();
 	const events = {
 		on(name: string, handler: Parameters<ExtensionAPI["events"]["on"]>[1]) {
 			const set = eventHandlers.get(name) ?? new Set(); set.add(handler); eventHandlers.set(name, set);
@@ -41,7 +42,7 @@ function harness(telemetrySetting: boolean | string = true, options: FastWorkOpt
 	const pi = {
 		events, on: (name: string, handler: (event: Parameters<ExtensionAPI["events"]["emit"]>[1], ctx: ExtensionContext) => void) => { handlers.set(name, handler); },
 		registerTool: (definition: ToolFixture) => { tool = definition; },
-		registerCommand: (name: string, options: { handler: (args: string, ctx: ExtensionContext) => Promise<void> }) => { commands.set(name, options.handler); },
+		registerCommand: (name: string, options: { description: string; handler: (args: string, ctx: ExtensionContext) => Promise<void> }) => { commands.set(name, options.handler); commandDescriptions.set(name, options.description); },
 		sendUserMessage: (content: Parameters<ExtensionAPI["sendUserMessage"]>[0], options: Parameters<ExtensionAPI["sendUserMessage"]>[1]) => { userMessages.push({ content, options }); },
 		registerFlag: () => {}, getFlag: () => telemetrySetting,
 		getActiveTools: () => active, setActiveTools: (tools: string[]) => { active = tools; },
@@ -66,7 +67,7 @@ function harness(telemetrySetting: boolean | string = true, options: FastWorkOpt
 	fastWork(pi, options);
 	const fire = (name: string, event: Parameters<ExtensionAPI["events"]["emit"]>[1] = {}) => handlers.get(name)?.(event, ctx);
 	const invoke = (params: Parameters<ToolFixture["execute"]>[1]) => tool!.execute("tool-id", params, new AbortController().signal, undefined, ctx);
-	return { pi, ctx, fire, invoke, entries, requests, userMessages, setAvailableModels: (models: typeof availableModels) => { availableModels = models; }, active: () => active, toolName: () => tool?.name, toolDescription: () => tool?.description, parameters: () => tool!.parameters, command: (args: string, name = "fast-work") => commands.get(name)!(args, ctx), cleanup: () => { fire("session_shutdown"); bridge.dispose(); unregister(); } };
+	return { pi, ctx, fire, invoke, entries, requests, userMessages, setAvailableModels: (models: typeof availableModels) => { availableModels = models; }, active: () => active, toolName: () => tool?.name, toolDescription: () => tool?.description, commandDescription: (name: string) => commandDescriptions.get(name), parameters: () => tool!.parameters, command: (args: string, name = "fast-work") => commands.get(name)!(args, ctx), cleanup: () => { fire("session_shutdown"); bridge.dispose(); unregister(); } };
 }
 
 describe("optional fast-work extension (synthetic SDK, no providers)", () => {
@@ -86,20 +87,42 @@ describe("optional fast-work extension (synthetic SDK, no providers)", () => {
 				assert.match(content, /missing, ambiguous.*ask before implementation/);
 				assert.match(content, /Do not choose another plan or overwrite it/);
 				assert.match(content, /next unmet milestone.*reuse.*evidence/is);
-				assert.match(content, /up to five openai-codex\/gpt-6\.1-sol writers with medium thinking/);
+				assert.match(h.commandDescription("implement-plan")!, /2–5.*independent.*writers/);
+				assert.match(content, /2–5 concurrent independent coding\/test-writing workers/);
+				assert.match(content, /model openai-codex\/gpt-6\.1-sol:medium.*no substitutions/);
+				assert.match(content, /fewer than two.*concrete blocker.*ask.*rescope or proceed with fewer/is);
+				assert.match(content, /minimum.*naturally drains/is);
+				assert.match(content, /ready\/running\/blocked queue.*files\/contract.*dependencies.*workspace\/base.*gate/is);
+				assert.match(content, /freeze only shared interfaces.*bounded components.*not.*mechanical or context-light/is);
+				assert.match(content, /local implementation details.*escalate.*product\/architecture\/shared-contract/is);
+				assert.match(content, /parent.*faster.*not.*blanket reason/is);
 				assert.match(content, /ordinary subagent tool.*read\/write\/edit.*distinct isolated workspace/is);
 				assert.match(content, /coupled.*integration and acceptance in the parent/);
 				assert.match(content, /Do not use fast_work/);
 				assert.match(content, /first useful isolated writer.*startup/);
-				assert.match(content, /startup fails.*ask.*runtime repair or local implementation/is);
-				assert.match(content, /brief.*workspace\/base.*allowed files.*acceptance.*validation/is);
-				assert.match(content, /current source and dependencies.*not just.*HEAD/is);
+				// Emitted instructions only; synthetic fixtures never launch recovery workers or contact providers.
+				for (const contract of [
+					/Follow established recovery safeguards: preserve tracked\/untracked partials\/evidence, unaccepted unverified/,
+					/confirm exclusive ownership\/no live writer/,
+					/One same-protocol recovery without confirmation: eligible resume or isolated same-role replacement/,
+					/same approved model\/provider\/tools, existing limits/,
+					/Change failed approach.*Repeated\/unsafe failure: checkpoint-and-ask/,
+					/Honor pause\/cancel.*No unapproved local\/foreground\/external fallback/,
+				]) assert.match(content, contract);
+				assert.doesNotMatch(content, /ask: runtime repair or local implementation/);
+				assert.match(content, /brief.*workspace\/base\/current-source identity.*owned\/prohibited files.*acceptance.*commands/is);
+				assert.match(content, /temporary worktree\/clone\/snapshot.*explicit cwd.*outside extension auto-discovery/is);
+				assert.match(content, /Never.*writers in the parent checkout or same workspace/);
+				assert.match(content, /Read-only reviews, scouts and fast_work never count/);
+				assert.match(content, /incompleteness explicit/);
+				assert.match(content, /current source and dependencies.*uncommitted source\/config.*provisioned dependencies.*not just.*HEAD/is);
+				assert.match(content, /patch\/handoff location, stop\/escalation rules/);
 				assert.match(content, /parent conversation history.*stop on missing inputs/is);
-				assert.match(content, /patch.*changed files.*command results.*unresolved issues/is);
-				assert.match(content, /Inspect, integrate and verify/);
+				assert.match(content, /patch.*changed\/new\/generated files.*command results.*unresolved issues/is);
+				assert.match(content, /Inspect diff\/stat\/unexpected artifacts, integrate and verify in the original target/);
 				assert.match(content, /cleanup.*failed, cancelled and startup-failed/is);
 				assert.match(content, /AGENTS\.md cleanup authorization.*without redundant confirmation/is);
-				assert.match(content, /ownership.*tracked, untracked and submodule contents/is);
+				assert.match(content, /exact ownership\/path.*tracked, untracked and submodule contents/is);
 				assert.match(content, /uncommitted.*not.*retain/is);
 				assert.match(content, /normal git worktree remove.*never --force/is);
 				assert.match(content, /Never delete active\/user-owned workspaces or unintegrated\/unpreserved work/);
@@ -113,6 +136,9 @@ describe("optional fast-work extension (synthetic SDK, no providers)", () => {
 					const promptGuidelines: string[] = [];
 					h.fire("before_agent_start", { systemPromptOptions: { promptGuidelines } });
 					assert.match(promptGuidelines.join("\n"), /implementation writers use ordinary isolated subagents/);
+					assert.match(promptGuidelines.join("\n"), /plan implementation requires 2–5 concurrent independent coding\/test-writing workers/);
+					assert.match(promptGuidelines.join("\n"), /Bounded components need not be mechanical or context-light/);
+					assert.match(promptGuidelines.join("\n"), /local implementation details.*escalate.*shared-contract/is);
 				}
 				await h.command("status");
 				assert.equal(h.userMessages.length, 1);
@@ -218,7 +244,7 @@ describe("optional fast-work extension (synthetic SDK, no providers)", () => {
 			const promptGuidelines: string[] = [];
 			h.fire("before_agent_start", { systemPromptOptions: { promptGuidelines } });
 			assert.match(promptGuidelines.join("\n"), /Use fast_work only when the user explicitly requests it/);
-			assert.match(promptGuidelines.join("\n"), /ordinary isolated subagents.*read\/write\/edit.*openai-codex\/gpt-6\.1-sol.*medium/);
+			assert.match(promptGuidelines.join("\n"), /ordinary isolated subagents.*read\/write\/edit.*openai-codex\/gpt-6\.1-sol:medium/);
 			assert.doesNotMatch(promptGuidelines.join("\n"), /Prefer fast_work|writes.*in this parent/);
 			assert.match(h.toolDescription()!, /only when the user explicitly requests/);
 			assert.doesNotMatch(h.toolDescription()!, /Prefer this tool/);

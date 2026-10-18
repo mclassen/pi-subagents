@@ -10,13 +10,15 @@ Before launching a writer for substantial mutation work, classify the implementa
 
 Record the classification and evidence on a lane board before writer launch. For multi-seam work, freeze the smallest shared interface needed to release independently eligible component writers, each with exclusive file/contract ownership and a focused gate. The parent integrates accepted component handoffs as their dependencies permit. Do not require a separate integration worker or wait for all unrelated components. Repartition a writer prompt that owns multiple independent boundaries; keep genuinely coupled boundaries with the parent.
 
-A single complete writer remains valid only when the board records evidence that the work is genuinely one seam or that splitting it would create overlapping ownership or artificial handoffs. This preflight must not manufacture parallelism: do not split tightly coupled work merely to increase the lane count.
+Bounded approved components with explicit ownership and independently testable outcomes qualify; they need not be mechanical or context-light. Workers may solve local implementation details inside scope; escalate new product, architecture or shared-contract decisions. Parent being Sol, or faster on one slice, is not a blanket reason to take all independent coding. Keep genuinely coupled/shared-state work and integration/acceptance in the parent.
+
+For plan implementation, read canonical repository-root `PLAN.md`; if missing or unclear, ask, never select another plan or overwrite it. Keep requested scope; incremental milestones must leave incompleteness explicit. Launch 2–5 concurrent independent coding/test-writing workers through ordinary `subagent`, explicitly `openai-codex/gpt-6.1-sol:medium` (suffix controls thinking), with actual read/write/edit tools. Read-only review, scouts and `fast_work` never count as writers. If fewer than two safe useful lanes can be ready, report the concrete blocker and ask whether to rescope or proceed with fewer; do not silently implement alone. Do not manufacture parallelism by splitting tightly coupled work or inventing filler. The minimum does not require keeping two alive after the remaining queue naturally drains.
 
 ## Lane board and authority
 
 Before multiple mutation-capable lanes start, record this board in the parent context:
 
-`Lane | repo/cwd | exact decision | claimed files or contract | isolation path | authority | next gate | handoff | why independent`
+`Lane | state (ready/running/blocked) | files/contract | dependencies | workspace/base | gate | authority | handoff | why independent`
 
 Record the isolation path before the first mutation. Do not split one source seam or decision into duplicate lanes. Make overlapping work one lane with one source of truth.
 
@@ -30,15 +32,15 @@ Nested delegation is exceptional. A root-designated fanout child with `subagent`
 
 ## Partitioned runs
 
-Give every run a distinct isolated workspace/resource and explicit `cwd`; never share a checkout/directory between children, including read-only runs. Set `worktree: true` for a managed repository worktree, or provision a temporary clone/snapshot containing the exact target when worktree creation cannot represent an uncommitted diff. Keep one writer per repo/cwd/worktree.
+Give every run a distinct temporary isolated workspace/resource and explicit `cwd`; never share the parent checkout or a checkout/directory between children, including read-only runs except the documented operator-enabled `fast_work` exception. Set `worktree: true` for a managed repository worktree when HEAD exactly matches current inputs, or provision a temporary clone/snapshot containing the exact target, including needed uncommitted source/config and provisioned dependencies. Keep one writer per workspace, not one overall.
 
-For Pi extension repositories, keep lane worktrees outside auto-discovered extension directories such as `~/.pi/agent/extensions`. A stale extension worktree there can auto-load duplicate tools and shortcuts. Remove or move it only after its handoff is durable, the worktree is clean, and no run owns it.
+For Pi extension repositories, keep lane worktrees outside auto-discovered extension directories such as `~/.pi/agent/extensions`. A stale extension worktree there can auto-load duplicate tools and shortcuts. Remove or move it only after its useful work is integrated or durably dispositioned and no active run or later gate needs it, following the parent-owned cleanup checklist below.
 
 Partition fanout by repository, source seam, decision, or review angle. Each run needs a stable key, lane-specific task, and a managed output path when a file is needed. Do not launch prompts that differ only by item name or broad file glob.
 
 ### Cold-start packets and bounded orchestration audits
 
-Every child packet must stand alone: include the goal, exact repository/cwd/ref, authority and edit boundary, relevant context/evidence, success criteria, validation, expected output, and stop/escalation rules. Do not rely on parent history, an issue number, or a broad glob alone. An orchestration audit by a top-reasoning critic model is read-only and returns at most three cited omissions; use high thinking only as an explicit parent/user escalation, never as an autonomous root or a parallel placeholder.
+Every child packet must stand alone: objective and plan requirements; exact workspace/cwd/base/current-source identity; applicable instructions and prior decisions/evidence; relevant source symbols/contracts/callers and adjacent consumers; owned files and prohibited edits; dependencies; acceptance and focused commands; patch/handoff location; and stop/escalation rules. Fresh children do not inherit parent history. Provide context-rich current inputs, including needed uncommitted source/config and provisioned dependencies. Missing inputs: stop, never invent. Do not rely on an issue number or broad glob alone. An orchestration audit by a top-reasoning critic model is read-only and returns at most three cited omissions; use high thinking only as an explicit parent/user escalation, never as an autonomous root or a parallel placeholder.
 
 Use one async `workflowScript` for a coordinated wave. Use `runs.all` for independent lanes and `runs.run` for dependent lane stages. Give cross-repository runs explicit `cwd` values and lane-qualified outputs. Use `outputMode: "file-only"` when a report must survive the run or feed a later stage. Keep scratch outputs relative so they live under subagent artifacts; use absolute paths only for durable memory, approved docs paths, or final handoff files.
 
@@ -54,14 +56,22 @@ async lanes are running, record the revisit trigger and yield.
 
 An ordinary coordinated workflow has one mission. Use its durable state, artifacts, run records, and receipts for recovery. Treat a receipt as evidence, not as authority or acceptance.
 
-After an eligible child writer produces a candidate, the parent checks its diff/artifacts, integrates only the accepted scoped commit or patch, and validates in the parent target. Then run required fresh-context read-only reviewers, each in a distinct snapshot of that exact integrated target. The parent decides finding disposition. Parent implements accepted fixes by default; reuse the lane writer only when the next frozen mechanical slice independently passes the delegation gate, then rerun only the affected gate.
+After a child writer produces a candidate, require actual scoped edits/patch, changed/new/generated files, command results and unresolved issues. The parent checks diff/stat and unexpected artifacts, integrates only accepted scope, and validates in the original target before acceptance. Then run required fresh-context read-only reviewers, each in a distinct snapshot of that exact integrated target. The parent decides finding disposition and assigns bounded independent fixes to ready writers while keeping coupled fixes local; rerun only affected gates.
 
 ## Handoff, cleanup, and recovery
 
 Use stable lane-qualified artifact paths for reports and review output. A writer handoff states lane status, repository/worktree, base/ref, changed files, commit or patch, validation, open decisions, next action, artifact paths, and cleanup state. Carry that evidence cumulatively through follow-up, retaining prior results and naming only changed scope, affected checks and remaining gaps; do not repeat unchanged tests for metadata-only updates. Startup evidence is separate from product acceptance; see [startup and discovery evidence](execution-controls.md#startup-and-discovery-evidence). Copy only final evidence to memory, a mission record, or a PR/comment, then remove scratch files from the active worktree before closing the lane.
 
-For backlog lanes and other subagent-governed workflows, a setup/runtime/tooling failure remains an infrastructure blocker. Preserve the exact failure, run/status, and repository/cwd/worktree/branch/ref state; verify a clean worktree or capture any partial diff before a same-protocol retry or asking the owner. Do not start another writer or switch to an external, foreground, or CLI execution mode without explicit owner approval.
+A failed/disappeared runner is not task success. Preserve the exact failure, run/status, repository/cwd/worktree/branch/ref, tracked AND untracked partial edits, commands/evidence and remaining acceptance checks; partial work stays unaccepted until parent inspection/integration/validation. Confirm the old writer is terminal or demonstrably gone and establish exclusive ownership; quiet output, missing notifications or `needs_attention` alone are not proof.
 
-Keep an unmanaged worktree until its handoff is durable, no run owns it, and no later gate needs it. Managed worktrees may be removed after durable patch/handoff capture; the root confirms each manifest's cleanup state. Clean up only inside recorded authority, never with `--force`. If work is dirty/divergent, a run stops, or ownership is uncertain, preserve the worktree/artifacts, record state and recovery owner, and resume it or create one replacement from the handoff. Never discard uncommitted work or start another writer while ownership is uncertain.
+One bounded same-protocol recovery attempt is authorized without fresh user confirmation on the same approved model/provider/tools within existing task/iteration limits. Prefer eligible retained-child resume by exact ID; if unavailable or rejected, use an explicitly labeled same-role replacement in a distinct isolated workspace with current inputs, preserved partial work and remaining checks. Record ownership transfer and a parent-captured recovery handoff, and change the approach based on failure evidence. If recovery fails again or no safe authorized action remains, checkpoint/report and ask for the smallest needed decision. No automatic execution-mode/model/provider fallback; local implementation or external/foreground/CLI switching still requires explicit owner approval. See [failed lane recovery](execution-controls.md#failed-lane-recovery-and-execution-mode-changes) for full stop conditions and authority boundaries.
+
+The parent owns cleanup for all settled lanes, including failed, cancelled and startup-failed lanes:
+
+1. Preserve needed patch/handoff/log/recovery evidence outside temporary workspaces.
+2. Confirm no active run or later gate needs the workspace and useful work is integrated or otherwise durably dispositioned.
+3. Verify exact ownership/path and account for tracked/untracked/submodule contents. Standing cleanup approval does not authorize deletion of user work, uncertain ownership or unpreserved useful changes; retain those paths with a named recovery owner.
+4. Delete only redundant agent-owned files/copied inputs/disposable outputs, then use ordinary `git worktree remove` / `prune`, never `--force`. Uncommitted agent changes alone do not require retaining unused copies once safely preserved/integrated. Do not change runtime discard authority or use it to bypass confirmation.
+5. Verify deletion and report retained paths and reasons; do not wait for push. Do not start a replacement writer while ownership is uncertain.
 
 Before completion, inspect the board. Every lane must be terminal or blocked with a named next action. Confirm one writer per repo/cwd/worktree, required validation, fresh read-only review, durable handoff, integration disposition, and cleanup state. The root reports outcomes, evidence, residual risks, and the next decision.
