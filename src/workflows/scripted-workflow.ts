@@ -2603,7 +2603,8 @@ export async function runWorkflowScript(options: RunWorkflowScriptOptions): Prom
 				const reason = childController.signal.reason;
 				return stoppedChildResult(key, reason instanceof Error ? reason.message : typeof reason === "string" ? reason : "Workflow script aborted.");
 			}).then((result) => {
-				let normalized = !result.ok && result.state !== "running" && !result.error ? { ...result, error: result.output } : result;
+				const jsonSafeResult = omitUndefinedWorkflowValues(result) as WorkflowScriptChildResult;
+				let normalized = !jsonSafeResult.ok && jsonSafeResult.state !== "running" && !jsonSafeResult.error ? { ...jsonSafeResult, error: jsonSafeResult.output } : jsonSafeResult;
 				if (resolvedResumeLineage?.length && normalized.runId) {
 					normalized = { ...normalized, continuation: { runIds: [...new Set([...resolvedResumeLineage, normalized.runId])] } };
 				}

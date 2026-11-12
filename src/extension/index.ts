@@ -77,9 +77,10 @@ import { loadConfig, resolveAsyncByDefault, resolveScheduledStoreRoot } from "./
 import { buildSubagentToolDescription, buildSubagentToolPromptMetadata } from "./tool-description.ts";
 import { formatWorkflowPreflightSummary, normalizeWorkflowPreflight } from "../workflows/workflow-preflight.ts";
 import { finalizeToolResult } from "./tool-result.ts";
-import { collectGoalContinuationNotices } from "../missions/goal-driver.ts";
+import { collectGoalContinuationNotices, readGoalDeliveryHistory } from "../missions/goal-driver.ts";
+import { cancelCurrentGoal } from "../missions/goal-cancel.ts";
 import { restoreForegroundRunHistory } from "../runs/foreground/foreground-history.ts";
-import { resolveMissionStoreLocation } from "../missions/store.ts";
+import { cancelGoalMission, resolveMissionStoreLocation } from "../missions/store.ts";
 import { listRetainedChildren } from "../runs/background/retained-children.ts";
 import {
 	type Details,
@@ -513,6 +514,8 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 		: undefined;
 	let executorScheduled: ((id: string, params: SubagentParamsLike, signal: AbortSignal, ctx: ExtensionContext) => Promise<AgentToolResult<Details>>) | undefined;
 	let goalTurnId = 0;
+	let goalRuntimeId = randomUUID();
+	let goalTurnRecoveryPending = false;
 	let releaseHostSessionLiveness = () => {};
 	const scheduledStoreRoot = config.scheduledRuns?.storeRoot === undefined ? undefined : resolveScheduledStoreRoot(config.scheduledRuns.storeRoot);
 	const scheduledRunManager = createScheduledRunManager({
@@ -857,6 +860,35 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 
 	pi.registerTool(tool);
 
+	pi.on("input", (event, ctx) => {
+		if (!/^\s*\/goal\s+cancel\b/i.test(event.text)) return;
+		let message: string;
+		let cancelled = false;
+		try {
+			const tokens = event.text.trim().split(/\s+/);
+			const args = tokens.slice(2);
+			if (tokens[1]?.toLowerCase() !== "cancel" || args.length > 1) throw new Error("Usage: /goal cancel [exact-mission-id]. No goal was changed.");
+			const ownerSessionId = state.currentSessionId ?? resolveCurrentSessionId(ctx.sessionManager);
+			const location = resolveMissionStoreLocation({ projectRoot: ctx.cwd, ...(config.missions ? { config: config.missions } : {}) });
+			const result = args.length
+				? { cancelled: true as const, mission: cancelGoalMission(location, args[0]!, ownerSessionId) }
+				: cancelCurrentGoal(location, ownerSessionId);
+			cancelled = result.cancelled;
+			message = result.cancelled
+				? `Goal mission ${result.mission.id} is cancelled. Files, history and runs were preserved. Running jobs are NOT stopped.`
+				: result.reason === "ambiguous"
+					? "More than one open goal belongs to this session; no goal was changed. Use /goal cancel <exact-mission-id>."
+					: result.reason === "no-session"
+						? "Cannot cancel a goal without a saved-session identity."
+						: "No open goal belongs to this session.";
+		} catch (error) {
+			message = `Goal cancellation failed: ${error instanceof Error ? error.message : String(error)}`;
+		}
+		if (ctx.hasUI) ctx.ui.notify(message, cancelled ? "info" : "warning");
+		else pi.sendMessage({ customType: SLASH_TEXT_RESULT_TYPE, content: message, display: true });
+		return { action: "handled" };
+	});
+
 	pi.on("before_agent_start", async (event, ctx) => {
 		await waitForAdvertisement();
 		const selectedTools = event.systemPromptOptions?.selectedTools ?? (typeof pi.getActiveTools === "function" ? pi.getActiveTools() : []);
@@ -870,25 +902,50 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 
 	registerWaitTool(pi, state, waitToolConfig.enabled, waitSubscriptionManager, waitToolConfig.defaultTimeoutMs, undefined, supervisorChannel.hasPendingRequests);
 
-	pi.on("agent_end", async (_event, ctx) => {
-		if (!ctx.hasUI) await drainOutstandingWork({ state, events: pi.events, hasPendingSupervisorRequest: supervisorChannel.hasPendingRequests });
-		const ownerSessionId = state.currentSessionId;
-		if (!ownerSessionId) return;
-		goalTurnId += 1;
+	const recoverGoalDelivery = (ctx: ExtensionContext, recoveryOnly = false, aborted = false) => {
+		if (!state.currentSessionId) return;
 		try {
+			// Inside try: a stale or partial ctx must not fail session_start; recovery is best-effort.
+			if (recoveryOnly && !ctx.isIdle()) return;
 			const location = resolveMissionStoreLocation({ projectRoot: state.baseCwd, ...(config.missions ? { config: config.missions } : {}) });
-			const retainedChildren = listRetainedChildren(DIRS.async, ownerSessionId);
-			for (const notice of collectGoalContinuationNotices({ location, ownerSessionId, retainedChildren, turnId: goalTurnId })) {
-				handleSubagentControlNotice({
-					pi,
-					state,
-					visibleControlNotices: new Set(),
-					details: { source: "goal", event: notice.event, noticeText: notice.message },
-				});
+			for (const notice of collectGoalContinuationNotices({
+				location, ownerSessionId: state.currentSessionId, retainedChildren: listRetainedChildren(DIRS.async, state.currentSessionId),
+				turnId: `${goalRuntimeId}:${goalTurnId}`, aborted, recoveryOnly,
+				readDeliveryHistory: () => readGoalDeliveryHistory(ctx.sessionManager.getSessionFile(), ctx.sessionManager.getSessionId()),
+				queuedNoticeIds: visibleControlNotices,
+				pendingMessages: ctx.hasPendingMessages() || supervisorChannel.hasPendingRequests(),
+			})) {
+				handleSubagentControlNotice({ pi, state, visibleControlNotices, details: { source: "goal", event: notice.event, noticeText: notice.message, goalContinuation: notice.triggerTurn } });
 			}
 		} catch (error) {
 			console.error("Failed to evaluate goal missions:", error);
 		}
+	};
+
+	pi.on("agent_end", async (_event, ctx) => {
+		const ownerSessionId = state.currentSessionId;
+		const runtimeId = goalRuntimeId;
+		const lastAssistant = _event.messages.findLast((message) => message.role === "assistant");
+		goalTurnRecoveryPending = lastAssistant?.role === "assistant" && (lastAssistant.stopReason === "error" || lastAssistant.stopReason === "length");
+		if (!ctx.hasUI) await drainOutstandingWork({ state, events: pi.events, hasPendingSupervisorRequest: supervisorChannel.hasPendingRequests });
+		if (!ownerSessionId || ownerSessionId !== state.currentSessionId || runtimeId !== goalRuntimeId) return;
+		// SDK retries can follow error and recoverable length responses. Defer goal
+		// continuation until recovery succeeds or agent_settled confirms it failed.
+		if (goalTurnRecoveryPending) return;
+		goalTurnId += 1;
+		const aborted = ctx.signal?.aborted === true || (lastAssistant?.role === "assistant" && lastAssistant.stopReason === "aborted");
+		recoverGoalDelivery(ctx, false, aborted);
+	});
+	pi.on("agent_settled", () => {
+		if (!goalTurnRecoveryPending || !state.currentSessionId) return;
+		try {
+			const location = resolveMissionStoreLocation({ projectRoot: state.baseCwd, ...(config.missions ? { config: config.missions } : {}) });
+			// Notification-only boundary: persist the final unrecovered response's pause, never wake.
+			collectGoalContinuationNotices({ location, ownerSessionId: state.currentSessionId, retainedChildren: [], turnId: `${goalRuntimeId}:${goalTurnId}`, aborted: true });
+		} catch (error) {
+			console.error("Failed to pause goal missions after an unrecovered response:", error);
+		}
+		goalTurnRecoveryPending = false;
 	});
 
 	const disposeSlashCommands = registerSlashCommands(pi, state, {
@@ -999,6 +1056,8 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 		state.widgetsSuspended = false;
 		state.baseCwd = ctx.cwd;
 		goalTurnId = 0;
+		goalRuntimeId = randomUUID();
+		goalTurnRecoveryPending = false;
 		const previousRuntimeSessionId = state.currentSessionId;
 		resultDeliveryOwnership.claimPredecessor(previousSessionFile, previousRuntimeSessionId);
 		state.currentSessionId = resolveCurrentSessionId(ctx.sessionManager);
@@ -1214,6 +1273,7 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 		rpcBridge.emitReady(ctx);
 		supervisorChannel.start();
 		supervisorChannel.activateTransport();
+		recoverGoalDelivery(ctx, true);
 	});
 
 	pi.on("session_shutdown", async () => {

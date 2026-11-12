@@ -415,12 +415,16 @@ export function createResultWatcher(
 				? data.runId
 				: typeof data.id === "string" && data.id ? data.id : file.replace(/\.json$/i, "");
 			const toolCallId = typeof data.toolCallId === "string" ? data.toolCallId : undefined;
+			const epoch = deliveryEpoch;
+			const ownsCompletionAtRead = ownsCompletion(sessionId, completionOwnerId, epoch);
 			let observerSucceeded = true;
-			try {
-				syncMissionFromAsyncCompletion({ ...data, runId });
-			} catch (error) {
-				observerSucceeded = false;
-				console.error(`Mission completion sync failed for '${resultPath}':`, error);
+			if (ownsCompletionAtRead) {
+				try {
+					syncMissionFromAsyncCompletion({ ...data, runId });
+				} catch (error) {
+					observerSucceeded = false;
+					console.error(`Mission completion sync failed for '${resultPath}':`, error);
+				}
 			}
 			try {
 				deps.observeCompletion?.({ ...data, runId });
@@ -428,8 +432,7 @@ export function createResultWatcher(
 				observerSucceeded = false;
 				console.error(`Completion observer failed for '${resultPath}':`, error);
 			}
-			if (observerSucceeded) removeMissionObserverIndex(resultsDir, runId);
-			const epoch = deliveryEpoch;
+			if (ownsCompletionAtRead && observerSucceeded) removeMissionObserverIndex(resultsDir, runId);
 			if (!ownsCompletion(sessionId, completionOwnerId, epoch)) return;
 			// Recorded before dedupe and before the unlink below so bg_wait can
 			// use the in-memory record or its bounded durable replay after cleanup.

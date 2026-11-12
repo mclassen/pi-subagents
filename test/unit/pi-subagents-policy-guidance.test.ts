@@ -31,6 +31,47 @@ describe("pi-subagents delegation policy guidance", () => {
 		assert.doesNotMatch(guidance, /use this at the start of non-trivial work/i);
 	});
 
+	it("loads only needed reference branches and reuses unchanged applicable guidance", () => {
+		const skill = readProjectFile("skills/pi-subagents/SKILL.md");
+		assert.match(skill, /select only the reference branches and sections needed for the current decision/i);
+		assert.match(skill, /complexity alone does not require loading all references/i);
+		assert.match(skill, /reuse already-read guidance only after confirming its applicability and content are unchanged/i);
+		assert.match(skill, /changed, missing or uncertain guidance.*relevant reread/is);
+		assert.match(skill, /required full reads.*still apply/i);
+		assert.doesNotMatch(skill, /For complex work, read.*prompting-and-roles.*execution-controls.*review-and-validation.*constraints-and-recipes/is);
+		assert.match(skill, /every child a cold-start-complete brief/i);
+		assert.match(skill, /exact workspace\/base\/current-source identity/i);
+		assert.match(skill, /missing inputs mean stop, never invent/i);
+	});
+
+	it("reuses exact-identity startup evidence without probe ceremony or fallback", () => {
+		const execution = readProjectFile("skills/pi-subagents/references/execution-controls.md");
+		const startup = execution.split("## Startup and discovery evidence\n")[1]?.split("\n## ")[0];
+		assert.ok(startup, "the canonical startup section must exist");
+		assert.match(startup, /exact runtime, provider, model\/thinking, tools and configuration identity/i);
+		assert.match(startup, /cheap identity check.*rather than repeating full discovery/is);
+		assert.match(startup, /changed, missing, stale or uncertain identity.*relevant discovery/is);
+		assert.match(startup, /repeated prompt, phase or follow-up alone does not invalidate/i);
+		assert.match(startup, /first useful writer establishes startup/i);
+		assert.match(startup, /minimal tools-only probe only when actually needed/i);
+		assert.match(startup, /fresh child.*cold-start-complete brief.*applicable instructions/is);
+		assert.match(startup, /no model\/provider fallback or additional authorization/i);
+		assert.match(startup, /not product acceptance/i);
+	});
+
+	it("keeps the workflow entrypoint concise and aligned with canonical delegation policy", () => {
+		const workflows = readProjectFile("docs/workflows.md");
+		const opening = workflows.split("## Recommended orchestration pattern\n")[1]?.split("Packaged `worker`")[0];
+		assert.ok(opening, "the recommended pattern must exist");
+		assert.match(opening, /prompting-and-roles\.md#model-routing-policy/);
+		assert.match(opening, /Sol 6\.1 high.*parent.*Sol 6\.1 medium.*coordination, verification and review/is);
+		assert.match(opening, /Explicit user model\/thinking selections win/i);
+		assert.match(opening, /bounded approved components.*exclusive ownership.*independently testable/is);
+		assert.match(opening, /need not be mechanical or context-light/i);
+		assert.match(opening, /SKILL\.md#plan-implementation/);
+		assert.doesNotMatch(opening, /Luna-high|frozen mechanical slice|parent implementation\/review/);
+	});
+
 	it("uses the authorized five-lane coding queue without forcing unnecessary workers", () => {
 		const skill = readProjectFile("skills/pi-subagents/SKILL.md");
 		const prompting = readProjectFile("skills/pi-subagents/references/prompting-and-roles.md");
@@ -53,18 +94,24 @@ describe("pi-subagents delegation policy guidance", () => {
 	});
 
 	it("requires actual plan writers, canonical scope and an explicit fewer-lane decision", () => {
-		for (const file of ["skills/pi-subagents/SKILL.md", "skills/pi-subagents/references/multi-lane-orchestration.md", "docs/fast-work.md"]) {
-			const text = readProjectFile(file);
-			assert.match(text, /2–5 concurrent independent coding\/test-writing workers/);
-			assert.match(text, /openai-codex\/gpt-6\.1-sol:medium/);
-			assert.match(text, /repository-root `PLAN\.md`/);
-			assert.match(text, /missing or unclear.*ask/is);
-			assert.match(text, /fewer than two.*concrete blocker.*ask.*rescope or proceed with fewer/is);
+		const skill = readProjectFile("skills/pi-subagents/SKILL.md");
+		const lanes = readProjectFile("skills/pi-subagents/references/multi-lane-orchestration.md");
+		const fastWork = readProjectFile("docs/fast-work.md");
+		const worker = readProjectFile("agents/worker.md");
+		for (const text of [skill, lanes, fastWork]) {
+			assert.match(text, /up to five concurrent independent coding\/test-writing workers/i);
+			assert.match(text, /normally use 2–5 when independent work is ready.*use five when five useful safe lanes exist/is);
+			assert.match(text, /openai-codex\/gpt-6.1-terra:high/);
 			assert.match(text, /read-only.*fast_work.*(?:never|do not) count as writers/is);
+			assert.match(text, /(?:invent|manufacture)(?:ing)? filler|without filler/i);
 		}
-		const docs = readProjectFile("docs/fast-work.md");
-		assert.match(docs, /prompt-queuing command.*not an automatic launcher or concurrency guarantee/is);
-		assert.match(docs, /tests prove.*instructions.*not future model compliance/is);
+		assert.match(worker, /^model: openai-codex\/gpt-6\.1-terra\r?$/m);
+		assert.match(worker, /thinking: high/);
+		assert.match(skill, /repository-root `PLAN\.md`/);
+		assert.match(skill, /missing or unclear.*ask/is);
+		assert.match(skill, /fewer than two.*concrete blocker.*ask.*rescope or proceed with fewer/is);
+		assert.match(fastWork, /prompt-queuing command.*not an automatic launcher or concurrency guarantee/is);
+		assert.match(fastWork, /tests prove.*instructions.*not future model compliance/is);
 	});
 
 	it("allows bounded local implementation with cold-start-complete current inputs", () => {
@@ -158,17 +205,17 @@ describe("pi-subagents delegation policy guidance", () => {
 		const prompting = readProjectFile("skills/pi-subagents/references/prompting-and-roles.md");
 		const review = readProjectFile("skills/pi-subagents/references/review-and-validation.md");
 		assert.match(skill, /Sol 6\.1 high is preferred for substantive parent reasoning/i);
-		assert.match(skill, /Sol 6\.1 medium defaults for coding, tests, verification and helpers/i);
-		assert.match(skill, /Explicit parent selection wins/i);
-		assert.match(skill, /Luna medium is only an explicitly selected cheap bounded read-only lookup/i);
+		assert.match(skill, /Terra high defaults for bounded coding, test-writing and nested writers/i);
+		assert.match(skill, /Explicit user model\/thinking selection wins/i);
 		assert.match(prompting, /Prefer Sol 6\.1 high for substantive parent reasoning/i);
-		assert.match(prompting, /Default ordinary coordination, coding, test-writing, verification, review and helper work to Sol 6\.1 medium/i);
+		assert.match(prompting, /Default bounded coding, test-writing and nested writer work to Terra high.*Sol 6\.1 medium remains the default for ordinary coordination, verification, review and helper work/is);
+		assert.match(prompting, /use up to five actual coding\/test-writing workers, Terra high for bounded work.*normally use 2–5.*use five when five useful safe lanes exist/is);
 		assert.match(prompting, /Astra medium is available only when explicitly selected, never as an automatic escalation/i);
 		assert.match(prompting, /Sol xhigh\/max remains manual-only/i);
-		assert.match(prompting, /Never route implementation, review or verification to Luna/i);
+		assert.match(prompting, /Read-only scouts use Terra medium/i);
 		assert.match(review, /canonical model routing policy/);
 		for (const text of [skill, prompting, review]) {
-			assert.doesNotMatch(text, /Sol 5\.6|genuinely simple.*review|Sol high(?:\/max)? (?:is|are) manual-only|Astra low is reserved for stuck/i);
+			assert.doesNotMatch(text, /Sol 5\.6|genuinely simple.*review|Sol high(?:\/max)? (?:is|are) manual-only|Astra low is reserved for stuck|Never route implementation to Luna/i);
 		}
 		assert.match(skill, /up to three bounded read-only leaves.*all checkout writers are paused until verified settlement/is);
 		assert.match(skill, /exception permits no edits, commands, nested delegation or publication/i);

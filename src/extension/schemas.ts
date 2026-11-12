@@ -128,9 +128,8 @@ const UsageBudgetLimitOverride = Type.Object({
 }, { additionalProperties: false });
 
 const UsageBudgetOverride = Type.Object({
-	tokens: Type.Optional(UsageBudgetLimitOverride),
 	costUsd: Type.Optional(UsageBudgetLimitOverride),
-}, { additionalProperties: false, minProperties: 1, description: "tokens or costUsd; soft <= hard. Root-only reported usage; blocks launches. Running children are not stopped." });
+}, { additionalProperties: false, minProperties: 1, description: "costUsd only; soft <= hard. Root-only reported usage; blocks launches. Running children are not stopped." });
 
 const WorkflowPreflightLane = Type.Object({
 	key: Type.String({ minLength: 1, maxLength: 128 }),
@@ -326,7 +325,7 @@ const SubagentParamProperties = {
 	overlap: Type.Optional(Type.String({ enum: ["skip"] })),
 	catchUp: Type.Optional(Type.String({ enum: ["none", "latest"], description: "Missed schedule occurrences; default latest." })),
 	missionId: Type.Optional(Type.String()),
-	mission: Type.Optional(Type.Unsafe({ ...MissionLaunchOverride, description: "false disables; true invalid. Object: exactly one non-empty title or summary; objective/labels optional; goal only true; budget.tokens optional." })),
+	mission: Type.Optional(Type.Unsafe({ ...MissionLaunchOverride, description: "false disables; true invalid. Object: exactly one non-empty title or summary; objective/labels optional; goal only true; maxIterations optional positive integer (default 8)." })),
 	missionUpdate: Type.Optional(Type.Unsafe({ ...MissionUpdateOverride, description: "Mission patch; read guide missions." })),
 	missionStatus: Type.Optional(Type.String()),
 	missionScope: Type.Optional(Type.String({ description: "project (default) or global pointer index." })),

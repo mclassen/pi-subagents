@@ -131,6 +131,7 @@ test("published extension APIs use supported package entrypoints", async () => {
 		"./required-child-extensions": "./src/api/required-child-extensions.ts",
 		"./delegation": "./src/api/delegation.ts",
 		"./fast-work": "./src/api/fast-work.ts",
+		"./fast-work-profiles": "./src/api/fast-work-profiles.ts",
 		"./fast-work-extension": "./fast-work.ts",
 		"./preflight": "./src/api/preflight.ts",
 		"./control-channel": "./src/api/control-channel.ts",
@@ -164,6 +165,23 @@ test("published extension APIs use supported package entrypoints", async () => {
 	assert.equal(capability.SUBAGENT_CAPABILITY_CEILING_REGISTRY_KEY, "pi-subagents.capability-ceiling.v1");
 	const delegation = await import("pi-subagents/delegation");
 	assert.equal(delegation.SUBAGENT_DELEGATION_REQUEST_EVENT, "prompt-template:subagent:request");
+	const fastWork = await import("pi-subagents/fast-work");
+	assert.equal(typeof fastWork.FastWorkPlan, "function");
+	assert.equal(typeof (await import("pi-subagents/fast-work-extension")).default, "function");
+	const profiles = await import("pi-subagents/fast-work-profiles");
+	assert.equal(profiles.FAST_WORK_PROFILE_EVENT, "pi-subagents:fast-work-profiles:v1");
+	assert.equal(profiles.FAST_WORK_PROFILE_VERSION, 1);
+	assert.equal(typeof profiles.validateFastWorkProfiles, "function");
+	const selection = { WORKER_STANDARD: { model: "openai-codex/example", thinking: "medium" as const } };
+	let emitted = false;
+	profiles.setFastWorkProfiles({ emit(event, request) {
+		assert.equal(event, profiles.FAST_WORK_PROFILE_EVENT);
+		assert.deepEqual(request.profiles, selection);
+		assert.equal(request.version, profiles.FAST_WORK_PROFILE_VERSION);
+		request.result = { ok: true };
+		emitted = true;
+	} } as Parameters<typeof profiles.setFastWorkProfiles>[0], selection);
+	assert.equal(emitted, true);
 	const preflight = await import("pi-subagents/preflight");
 	assert.equal(preflight.SUBAGENT_LAUNCH_CONTRACT_VERSION, 3);
 	assert.equal(typeof preflight.resolveSubagentLaunchContract, "function");

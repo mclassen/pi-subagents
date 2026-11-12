@@ -13,14 +13,24 @@ export type MissionRunMode = "single" | "parallel" | "chain" | "workflow" | "sch
 export type MissionArtifactKind = "status" | "output" | "patch" | "manifest" | "review" | "note" | "other";
 export type MissionReceiptKind = "pull_request" | "ci" | "deployment" | "release";
 export type MissionReceiptStatus = "pending" | "ready" | "succeeded" | "failed";
-export type MissionGoalStatus = "active" | "paused" | "budget-exhausted";
+export type MissionGoalStatus = "active" | "paused" | "iteration-limit";
+
+export const DEFAULT_GOAL_MAX_ITERATIONS = 8;
 
 export interface MissionGoal {
 	status: MissionGoalStatus;
+	maxIterations?: number;
+	iterationsStarted?: number;
+	iterationActive?: boolean;
+	lastContinuation?: { turnId: string; progressKey: string; delivery?: "pending" | "observed" };
 }
 
-export interface MissionTokenBudget {
-	tokens: number;
+export interface MissionGoalUpdate {
+	status?: "active" | "paused";
+	maxIterations?: number;
+	iterationsStarted?: number;
+	iterationActive?: boolean;
+	iteration?: "begin" | "complete";
 }
 
 export interface MissionTokenUsage {
@@ -36,6 +46,7 @@ export interface MissionRunLink {
 	status?: string;
 	startedAt?: string;
 	completedAt?: string;
+	summary?: string;
 	usage?: MissionTokenUsage;
 }
 
@@ -96,13 +107,22 @@ export interface MissionReceipt {
 	description?: string;
 }
 
+export interface MissionAcceptanceAuthority {
+	/** Missing is unknown too; only an actual matching terminal payload can mark observed. */
+	completion?: "pending" | "observed";
+	launchId: string;
+	runId?: string;
+	runtime?: true;
+	producerRunId?: string;
+	identityDigest?: string;
+}
+
 export interface MissionRecord {
 	schemaVersion: 1;
 	id: string;
 	title: string;
 	objective: string;
 	goal?: MissionGoal;
-	budget?: MissionTokenBudget;
 	usage?: MissionTokenUsage;
 	status: MissionStatus;
 	createdAt: string;
@@ -116,6 +136,7 @@ export interface MissionRecord {
 	receipts: MissionReceipt[];
 	summary?: string;
 	acceptance?: unknown;
+	acceptanceAuthority?: MissionAcceptanceAuthority;
 	labels?: string[];
 }
 
@@ -165,22 +186,28 @@ export interface MissionCreateInput {
 	title: string;
 	objective: string;
 	goal?: boolean;
-	budget?: MissionTokenBudget;
+	maxIterations?: number;
 	status?: MissionStatus;
 	labels?: string[];
 	ownerSessionId?: string;
 }
 
 export interface MissionUpdateInput {
+	/** Internal lock-time ownership check for user-facing goal mutations and launches. */
+	expectedGoalOwnerSessionId?: string;
+	requireActiveGoal?: boolean;
 	title?: string;
 	objective?: string;
-	goal?: MissionGoal | false;
-	budget?: MissionTokenBudget;
+	goal?: MissionGoalUpdate | false;
+	goalContinuation?: { ownerSessionId: string; turnId: string; progressKey: string; delivery?: "observed" };
 	usage?: MissionTokenUsage;
 	status?: MissionStatus;
 	summary?: string;
 	labels?: string[];
 	acceptance?: unknown;
+	/** Internal launch/completion binding; validated under the mission lock. */
+	acceptanceLaunch?: { launchId: string; runId?: string };
+	acceptanceCompletion?: { launchId: string; runId: string; hasExplicitProducer: boolean; producerRunId?: string };
 	addRuns?: MissionRunLink[];
 	upsertWorkflowChildren?: MissionWorkflowChildUpdate[];
 	addArtifacts?: MissionArtifact[];

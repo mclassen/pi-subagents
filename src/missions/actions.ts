@@ -14,12 +14,12 @@ import {
 	type MissionStatus,
 	type MissionStoreConfig,
 	type MissionStoreLocation,
-	type MissionTokenBudget,
 	type MissionUpdateInput,
 } from "./types.ts";
 import { missionStatePath } from "./workflow-state.ts";
 import {
 	createMission,
+	createSessionGoal,
 	listGlobalMissions,
 	listMissions,
 	missionRecordPath,
@@ -45,15 +45,14 @@ export interface MissionLaunchInput {
 	title: string;
 	objective?: string;
 	goal?: true;
-	budget?: MissionTokenBudget;
+	maxIterations?: number;
 	labels?: string[];
 }
 
 export interface MissionUpdateToolInput {
 	title?: string;
 	objective?: string;
-	goal?: boolean | { paused: boolean };
-	budget?: MissionTokenBudget;
+	goal?: boolean | { paused?: boolean; maxIterations?: number; iterationsStarted?: number; iterationActive?: boolean; iteration?: "begin" | "complete" };
 	status?: MissionStatus;
 	summary?: string;
 	labels?: string[];
@@ -85,6 +84,7 @@ export interface MissionActionParams {
 interface MissionActionContext {
 	cwd: string;
 	currentSessionId?: string;
+	beforeMissionShowRefresh?: () => void;
 	config?: MissionStoreConfig;
 	agentDir?: string;
 }
@@ -108,16 +108,15 @@ export function validateMissionLaunch(value: unknown): MissionLaunchInput {
 	if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("mission must be an object");
 	const input = value as Record<string, unknown>;
 	for (const key of Object.keys(input)) {
-		if (key !== "title" && key !== "summary" && key !== "objective" && key !== "goal" && key !== "budget" && key !== "labels") throw new Error(`mission.${key} is unknown`);
+		if (key !== "title" && key !== "summary" && key !== "objective" && key !== "goal" && key !== "maxIterations" && key !== "labels") throw new Error(`mission.${key} is unknown`);
 	}
 	if (input.title !== undefined && input.summary !== undefined) throw new Error("mission.title and mission.summary cannot both be set");
 	const title = input.title ?? input.summary;
 	if (typeof title !== "string" || !title.trim()) throw new Error("mission.title or mission.summary must be a non-empty string");
 	if (input.objective !== undefined && (typeof input.objective !== "string" || !input.objective.trim())) throw new Error("mission.objective must be a non-empty string");
 	if (input.goal !== undefined && input.goal !== true) throw new Error("mission.goal must be true when supplied");
-	const budget = input.budget;
-	if (budget !== undefined && (!budget || typeof budget !== "object" || Array.isArray(budget) || !Number.isSafeInteger((budget as { tokens?: unknown }).tokens) || ((budget as { tokens: number }).tokens < 1))) {
-		throw new Error("mission.budget.tokens must be a positive integer");
+	if (input.maxIterations !== undefined && (input.goal !== true || !Number.isSafeInteger(input.maxIterations) || (input.maxIterations as number) < 1)) {
+		throw new Error("mission.maxIterations requires goal: true and a positive integer");
 	}
 	if (input.labels !== undefined && (!Array.isArray(input.labels) || input.labels.some((label) => typeof label !== "string" || !label.trim()))) {
 		throw new Error("mission.labels must contain only non-empty strings");
@@ -126,7 +125,7 @@ export function validateMissionLaunch(value: unknown): MissionLaunchInput {
 		title: title.trim(),
 		...(typeof input.objective === "string" ? { objective: input.objective.trim() } : {}),
 		...(input.goal === true ? { goal: true as const } : {}),
-		...(budget !== undefined ? { budget: { tokens: (budget as { tokens: number }).tokens } } : {}),
+		...(input.maxIterations !== undefined ? { maxIterations: input.maxIterations as number } : {}),
 		...(input.labels !== undefined ? { labels: input.labels.map((label) => label.trim()) } : {}),
 	};
 }
@@ -177,7 +176,7 @@ function validateMissionUpdate(value: unknown): MissionUpdateInput {
 	if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("missionUpdate must be an object");
 	const input = value as Record<string, unknown>;
 	for (const key of Object.keys(input)) {
-		if (!["title", "objective", "goal", "budget", "status", "summary", "labels", "artifacts", "receipts", "decisions"].includes(key)) throw new Error(`missionUpdate.${key} is unknown`);
+		if (!["title", "objective", "goal", "status", "summary", "labels", "artifacts", "receipts", "decisions"].includes(key)) throw new Error(`missionUpdate.${key} is unknown`);
 	}
 	const update: MissionUpdateInput = {};
 	for (const field of ["title", "objective", "summary"] as const) {
@@ -189,17 +188,24 @@ function validateMissionUpdate(value: unknown): MissionUpdateInput {
 	if (input.goal !== undefined) {
 		if (typeof input.goal === "boolean") update.goal = input.goal ? { status: "active" } : false;
 		else {
-			if (!input.goal || typeof input.goal !== "object" || Array.isArray(input.goal) || typeof (input.goal as { paused?: unknown }).paused !== "boolean" || Object.keys(input.goal).some((key) => key !== "paused")) {
-				throw new Error("missionUpdate.goal must be boolean or { paused: boolean }");
+			if (!input.goal || typeof input.goal !== "object" || Array.isArray(input.goal)) throw new Error("missionUpdate.goal must be boolean or an iteration-control object");
+			const goal = input.goal as Record<string, unknown>;
+			if (!Object.keys(goal).length || Object.keys(goal).some((key) => !["paused", "maxIterations", "iterationsStarted", "iterationActive", "iteration"].includes(key))) throw new Error("missionUpdate.goal contains unknown or no controls");
+			if (goal.paused !== undefined && typeof goal.paused !== "boolean") throw new Error("missionUpdate.goal.paused must be boolean");
+			for (const key of ["maxIterations", "iterationsStarted"] as const) {
+				if (goal[key] !== undefined && (!Number.isSafeInteger(goal[key]) || (goal[key] as number) < (key === "maxIterations" ? 1 : 0))) throw new Error(`missionUpdate.goal.${key} is invalid`);
 			}
-			update.goal = { status: (input.goal as { paused: boolean }).paused ? "paused" : "active" };
+			if (goal.iterationActive !== undefined && typeof goal.iterationActive !== "boolean") throw new Error("missionUpdate.goal.iterationActive must be boolean");
+			if (goal.iteration !== undefined && goal.iteration !== "begin" && goal.iteration !== "complete") throw new Error("missionUpdate.goal.iteration must be begin or complete");
+			update.goal = {
+				...(goal.paused !== undefined ? { status: goal.paused ? "paused" as const : "active" as const } : {}),
+				...(goal.maxIterations !== undefined ? { maxIterations: goal.maxIterations as number } : {}),
+				...(goal.iterationsStarted !== undefined ? { iterationsStarted: goal.iterationsStarted as number } : {}),
+				...(goal.iterationActive !== undefined ? { iterationActive: goal.iterationActive as boolean } : {}),
+				...(goal.iteration !== undefined ? { iteration: goal.iteration as "begin" | "complete" } : {}),
+			};
 		}
-	}
-	if (input.budget !== undefined) {
-		if (!input.budget || typeof input.budget !== "object" || Array.isArray(input.budget) || !Number.isSafeInteger((input.budget as { tokens?: unknown }).tokens) || (input.budget as { tokens: number }).tokens < 1) {
-			throw new Error("missionUpdate.budget.tokens must be a positive integer");
-		}
-		update.budget = { tokens: (input.budget as { tokens: number }).tokens };
+		if (update.goal && update.goal.status === "active") update.status = "active";
 	}
 	if (input.status !== undefined) update.status = validateStatus(input.status, "missionUpdate.status");
 	if (input.labels !== undefined) {
@@ -233,7 +239,9 @@ function validateMissionUpdate(value: unknown): MissionUpdateInput {
 	return update;
 }
 
-function refreshLinkedRunStatus(location: MissionStoreLocation, record: MissionRecord): { record: MissionRecord; warnings: string[] } {
+const STOPPED_GOAL_RUN_STATUSES = new Set(["stopped", "cancelled", "rejected"]);
+
+function refreshLinkedRunStatus(location: MissionStoreLocation, record: MissionRecord, ownerSessionId?: string): { record: MissionRecord; warnings: string[] } {
 	const warnings: string[] = [];
 	const updates = record.runs.flatMap((run) => {
 		if (!run.asyncDir) return [];
@@ -262,25 +270,35 @@ function refreshLinkedRunStatus(location: MissionStoreLocation, record: MissionR
 			...(!["queued", "running"].includes(state) && !run.completedAt ? { completedAt: new Date().toISOString() } : {}),
 		}];
 	});
-	if (updates.length === 0) return { record, warnings };
 	const merged = record.runs.map((run) => updates.find((update) => update.runId === run.runId && update.childIndex === run.childIndex) ?? run);
 	const states = merged.map((run) => run.status);
-	const status: MissionStatus = record.status === "completed" || record.status === "failed" || record.status === "cancelled"
-		? record.status
-		: record.goal && !states.some((state) => state === "queued" || state === "running" || state === "active")
-		? "active"
-		: states.some((state) => state === "queued" || state === "running" || state === "active")
-		? "active"
-		: states.some((state) => state === "paused")
-			? "waiting"
-			: states.some((state) => state === "failed")
-				? "failed"
-				: states.some((state) => state === "stopped" || state === "rejected" || state === "cancelled")
-					? "cancelled"
-					: states.length > 0 && states.every((state) => state === "complete" || state === "completed")
-						? "completed"
-						: record.status;
-	return { record: updateMission(location, record.id, { status, addRuns: updates }), warnings };
+	const latestRunStopped = !!record.goal && STOPPED_GOAL_RUN_STATUSES.has(merged.at(-1)?.status ?? "");
+	if (updates.length === 0 && !latestRunStopped) return { record, warnings };
+	const preserveParentStatus = record.goal?.status === "paused"
+		|| record.status === "waiting"
+		|| record.status === "needs_decision"
+		|| record.status === "completed"
+		|| record.status === "failed"
+		|| record.status === "cancelled";
+	const status: MissionStatus = latestRunStopped
+		? preserveParentStatus ? record.status : "waiting"
+		: record.status === "completed" || record.status === "failed" || record.status === "cancelled"
+			? record.status
+			: record.goal && !states.some((state) => state === "queued" || state === "running" || state === "active")
+			? "active"
+			: states.some((state) => state === "queued" || state === "running" || state === "active")
+			? "active"
+			: states.some((state) => state === "paused")
+				? "waiting"
+				: states.some((state) => state === "failed")
+					? "failed"
+					: states.some((state) => state === "stopped" || state === "rejected" || state === "cancelled")
+						? "cancelled"
+						: states.length > 0 && states.every((state) => state === "complete" || state === "completed")
+							? "completed"
+							: record.status;
+	if (updates.length === 0 && status === record.status) return { record, warnings };
+	return { record: updateMission(location, record.id, { status, addRuns: updates, expectedGoalOwnerSessionId: ownerSessionId }), warnings };
 }
 
 function formatMission(record: MissionRecord): string {
@@ -292,7 +310,9 @@ function formatMission(record: MissionRecord): string {
 		`Updated: ${record.updatedAt}`,
 	];
 	if (record.goal) lines.push(`Goal mode: ${record.goal.status}`);
-	if (record.goal && record.budget) lines.push(`Budget: ${record.usage?.tokens ?? 0}/${record.budget.tokens} tokens`);
+	if (record.goal) lines.push(record.goal.maxIterations === undefined
+		? "Goal iterations: reconcile the existing limit and count before continuing"
+		: `Goal iterations: ${record.goal.iterationsStarted}/${record.goal.maxIterations}${record.goal.iterationActive ? " (iteration active)" : ""}`);
 	if (record.summary) lines.push(`Summary: ${record.summary}`);
 	if (record.labels?.length) lines.push(`Labels: ${record.labels.join(", ")}`);
 	if (record.runs.length) {
@@ -337,15 +357,16 @@ export function handleMissionAction(
 	});
 	if (action === "mission.create") {
 		const mission = validateMissionLaunch(params.mission);
-		const record = createMission(location, {
+		if (mission.goal && !ctx.currentSessionId) throw new Error("Creating a goal mission requires a current session");
+		const record = (mission.goal ? createSessionGoal : createMission)(location, {
 			title: mission.title,
 			objective: mission.objective ?? mission.title,
 			...(mission.goal === true ? { goal: true as const } : {}),
-			...(mission.budget ? { budget: mission.budget } : {}),
+			...(mission.maxIterations !== undefined ? { maxIterations: mission.maxIterations } : {}),
 			status: params.missionStatus ? validateStatus(params.missionStatus, "missionStatus") : "planned",
 			...(mission.labels ? { labels: mission.labels } : {}),
 			...(ctx.currentSessionId ? { ownerSessionId: ctx.currentSessionId } : {}),
-		}, new Date(), ctx.config?.retainTerminal);
+		}, new Date());
 		return textResult(`Created mission ${record.id}: ${record.title}`, { mode: "management", results: [], missionId: record.id, missionPath: pathFor(record.id), mission: record });
 	}
 	if (action === "mission.list") {
@@ -361,19 +382,24 @@ export function handleMissionAction(
 			return textResult(lines.join("\n"), { mode: "management", results: [], missions: { globalEntries: listed.entries, warnings: listed.warnings } });
 		}
 		const listed = listMissions(location);
-		const lines = listed.records.length === 0
+		const visibleRecords = listed.records.filter((record) => !record.goal || (!!ctx.currentSessionId && record.ownerSessionId === ctx.currentSessionId));
+		const lines = visibleRecords.length === 0
 			? ["No project missions."]
-			: listed.records.map((record) => {
+			: visibleRecords.map((record) => {
 				const open = record.decisions.filter((decision) => decision.status === "open").length;
 				const resolved = record.decisions.length - open;
 				return `${record.id}  ${record.status}  ${record.title}  ${record.updatedAt}${record.decisions.length ? `  decisions: ${open} open, ${resolved} resolved` : ""}`;
 			});
 		if (listed.warnings.length) lines.push("", ...listed.warnings.map((warning) => `Warning: ${warning}`));
-		return textResult(lines.join("\n"), { mode: "management", results: [], missions: { records: listed.records, warnings: listed.warnings } });
+		return textResult(lines.join("\n"), { mode: "management", results: [], missions: { records: visibleRecords, warnings: listed.warnings } });
 	}
 	if (action === "mission.show") {
-		const refreshed = refreshLinkedRunStatus(location, readMission(location, requireMissionId(params)));
+		const record = readMission(location, requireMissionId(params));
+		ctx.beforeMissionShowRefresh?.();
+		const foreignGoal = !!record.goal && (!ctx.currentSessionId || record.ownerSessionId !== ctx.currentSessionId);
+		const refreshed = foreignGoal ? { record, warnings: [] as string[] } : refreshLinkedRunStatus(location, record, ctx.currentSessionId);
 		const lines = [formatMission(refreshed.record), `State: ${missionStatePath(location, refreshed.record.id)}`];
+		if (foreignGoal) lines.push("Ownership: read-only; goal belongs to a different or unknown session.");
 		if (refreshed.warnings.length) lines.push("", ...refreshed.warnings.map((warning) => `Warning: ${warning}`));
 		return textResult(lines.join("\n"), {
 			mode: "management",
@@ -385,14 +411,15 @@ export function handleMissionAction(
 		});
 	}
 	if (action === "mission.update") {
-		const record = updateMission(location, requireMissionId(params), validateMissionUpdate(params.missionUpdate));
+		const update = validateMissionUpdate(params.missionUpdate);
+		const record = updateMission(location, requireMissionId(params), { ...update, expectedGoalOwnerSessionId: ctx.currentSessionId });
 		return textResult(`Updated mission ${record.id}.\n\n${formatMission(record)}`, { mode: "management", results: [], missionId: record.id, missionPath: pathFor(record.id), mission: record });
 	}
 	if (action === "mission.resolve-decision") {
 		const missionId = requireMissionId(params);
 		const decisionId = validateMissionId(params.id, "id");
 		if (typeof params.summary !== "string" || !params.summary.trim()) throw new Error("mission.resolve-decision requires a non-empty summary");
-		const record = updateMission(location, missionId, { resolveDecision: { id: decisionId, resolution: params.summary.trim() } });
+		const record = updateMission(location, missionId, { resolveDecision: { id: decisionId, resolution: params.summary.trim() }, expectedGoalOwnerSessionId: ctx.currentSessionId });
 		return textResult(`Resolved decision ${decisionId} for mission ${record.id}.\n\n${formatMission(record)}`, { mode: "management", results: [], missionId: record.id, missionPath: pathFor(record.id), mission: record });
 	}
 	if (action === "mission.attach-run") {
@@ -405,6 +432,7 @@ export function handleMissionAction(
 		if (params.dir !== undefined && !params.dir.trim()) throw new Error("dir must be a non-empty string");
 		if (params.runStatus !== undefined && !params.runStatus.trim()) throw new Error("runStatus must be a non-empty string");
 		const record = updateMission(location, missionId, {
+			expectedGoalOwnerSessionId: ctx.currentSessionId,
 			status: "active",
 			addRuns: [{
 				runId: runId.trim(),
@@ -422,6 +450,7 @@ export function handleMissionAction(
 	if (status !== "completed" && status !== "failed" && status !== "cancelled") throw new Error("mission.close missionStatus must be completed, failed, or cancelled");
 	if (params.summary !== undefined && !params.summary.trim()) throw new Error("summary must be a non-empty string");
 	const record = updateMission(location, missionId, {
+		expectedGoalOwnerSessionId: ctx.currentSessionId,
 		status,
 		...(params.summary !== undefined ? { summary: params.summary.trim() } : {}),
 	});

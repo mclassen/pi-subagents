@@ -488,6 +488,28 @@ describe("scripted workflow runtime", () => {
 		}
 	});
 
+	it("normalizes optional child result metadata before state persistence", async () => {
+		const values = new Map<string, unknown>();
+		const result = await runWorkflowScript({
+			script: `const child = await runs.run("writer", { agent: "worker", task: "write" }); await state.set("iteration1Handoffs", [child]); return child;`,
+			state: { get: (key) => values.get(key), set: (key, value) => { values.set(key, value); } },
+			async launch(key) {
+				return {
+					key, ok: true, output: "ok", artifactPaths: [],
+					outputPathMapping: undefined,
+					results: [{ outputPathMapping: undefined, nested: { optional: undefined }, value: "kept" }],
+				};
+			},
+			async status(key) { return { key, ok: true, output: "ok", artifactPaths: [] }; },
+		});
+
+		const stored = values.get("iteration1Handoffs") as Array<Record<string, unknown>>;
+		assert.equal(stored.length, 1);
+		assert.equal(Object.hasOwn(stored[0], "outputPathMapping"), false);
+		assert.deepEqual(stored[0].results, [{ nested: {}, value: "kept" }]);
+		assert.deepEqual(result.value, stored[0]);
+	});
+
 	it("runs keyed children, streams progress, and exposes no host capabilities", async () => {
 		const launches: Array<{ key: string; params: Record<string, unknown> }> = [];
 		const traceSnapshots: number[] = [];

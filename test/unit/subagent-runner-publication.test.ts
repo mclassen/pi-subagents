@@ -168,7 +168,7 @@ for (const outcome of ["complete", "budget", "interrupt", "capacity", "disposal-
 			steps: outcome === "budget"
 				? [{ agent: "worker", task: "first" }, { agent: "worker", task: "second" }]
 				: [{ agent: "worker", task: "finish" }],
-			...(outcome === "budget" ? { usageBudget: { tokens: { hard: 1 } } } : {}),
+			...(outcome === "budget" ? { usageBudget: { costUsd: { hard: 0.0005 } } } : {}),
 			resultPath,
 			cwd: root,
 			placeholder: "{previous}",

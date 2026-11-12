@@ -531,7 +531,9 @@ describe("subagent extension child mode", () => {
 		}
 	});
 
-	it("yields registered root bg_wait for an owned nested supervisor request", () => {
+	for (const owned of [true, false]) it(owned
+		? "yields registered root bg_wait for an owned nested supervisor request"
+		: "rejects registered root bg_wait yield for a foreign nested supervisor request", () => {
 		const script = String.raw`
 			import assert from "node:assert/strict";
 			import * as fs from "node:fs";
@@ -541,11 +543,18 @@ describe("subagent extension child mode", () => {
 			import { ensureSupervisorChannelDir, resolveSupervisorChannelDir } from "./src/intercom/native-supervisor-channel.ts";
 			import { DIRS, INTERCOM_DETACH_REQUEST_EVENT } from "./src/shared/types.ts";
 
+			const owned = OWNED_REQUEST;
 			const handlers = new Map();
 			const eventHandlers = new Map();
+			let injectRequest;
 			const events = {
 				on(channel, handler) {
 					eventHandlers.set(channel, [...(eventHandlers.get(channel) ?? []), handler]);
+					if (channel === INTERCOM_DETACH_REQUEST_EVENT && injectRequest) {
+						const inject = injectRequest;
+						injectRequest = undefined;
+						queueMicrotask(inject);
+					}
 					return () => eventHandlers.set(channel, (eventHandlers.get(channel) ?? []).filter((candidate) => candidate !== handler));
 				},
 				emit(channel, payload) { for (const handler of eventHandlers.get(channel) ?? []) handler(payload); },
@@ -563,7 +572,9 @@ describe("subagent extension child mode", () => {
 			const runtimeSessionId = "owner-runtime-" + crypto.randomUUID();
 			const ownerSessionId = "owner-session-" + crypto.randomUUID();
 			const asyncDir = path.join(DIRS.async, runId);
-			const channelDir = resolveSupervisorChannelDir("nested-reviewer-run", "reviewer", 0);
+			const childRunId = "nested-reviewer-" + crypto.randomUUID();
+			const childAsyncDir = path.join(DIRS.async, childRunId);
+			const channelDir = resolveSupervisorChannelDir(childRunId, "reviewer", 0);
 			const requestFile = path.join(channelDir, "requests", requestId + ".json");
 			const ctx = {
 				cwd: process.cwd(), hasUI: false,
@@ -580,38 +591,51 @@ describe("subagent extension child mode", () => {
 				fs.writeFileSync(path.join(asyncDir, "status.json"), JSON.stringify({
 					runId, sessionId: runtimeSessionId, mode: "workflow", state: "running",
 					startedAt: Date.now(), lastUpdate: Date.now(), cwd: process.cwd(), pid: process.pid,
-					steps: [{ agent: "worker", status: "running", index: 0 }],
+					steps: [{ agent: "reviewer", status: "running", index: 0, runId: childRunId, workflowKey: "review" }],
 				}), "utf-8");
 				updateActiveRunIndex(asyncDir, "running");
+				// Workflow lanes execute as independently tracked runs in the same session.
+				// A matching supervisor owner alone does not register an arbitrary run ID.
+				fs.mkdirSync(childAsyncDir, { recursive: true });
+				fs.writeFileSync(path.join(childAsyncDir, "status.json"), JSON.stringify({
+					runId: childRunId, sessionId: runtimeSessionId, mode: "single", state: "running",
+					parentWorkflowRunId: runId, workflowKey: "review",
+					startedAt: Date.now(), lastUpdate: Date.now(), cwd: process.cwd(), pid: process.pid,
+					steps: [{ agent: "reviewer", status: "running", index: 0 }],
+				}), "utf-8");
+				updateActiveRunIndex(childAsyncDir, "running");
 				registerSubagentExtension(fakePi);
 				for (const handler of handlers.get("session_start") ?? []) await handler({ reason: "startup" }, ctx);
 				if (!bgWaitTool) throw new Error("bg_wait tool not registered");
 
-				const startedAt = Date.now();
-				const waiting = bgWaitTool.execute("nested-supervisor", { id: runId, timeoutMs: 1500 }, new AbortController().signal, undefined, ctx);
-				await new Promise((resolve) => setTimeout(resolve, 25));
-				ensureSupervisorChannelDir(channelDir);
-				fs.writeFileSync(requestFile, JSON.stringify({
-					type: "subagent.supervisor.request", id: requestId, createdAt: Date.now(), expiresAt: Date.now() + 60_000,
-					reason: "need_decision", message: "Choose the safe path", expectsReply: true,
-					orchestratorSessionId: ownerSessionId, runId: "nested-reviewer-run", agent: "reviewer", childIndex: 0,
-				}), "utf-8");
-				events.emit(INTERCOM_DETACH_REQUEST_EVENT, { requestId, runId: "nested-reviewer-run", agent: "reviewer", childIndex: 0 });
-
-				const result = await waiting;
+				// Inject only once bg_wait has subscribed, without sleep-based ordering.
+				injectRequest = () => {
+					ensureSupervisorChannelDir(channelDir);
+					fs.writeFileSync(requestFile, JSON.stringify({
+						type: "subagent.supervisor.request", id: requestId, createdAt: Date.now(), expiresAt: Date.now() + 60_000,
+						reason: "need_decision", message: "Choose the safe path", expectsReply: true,
+						orchestratorSessionId: owned ? ownerSessionId : "foreign-" + ownerSessionId,
+						runId: childRunId, agent: "reviewer", childIndex: 0,
+					}), "utf-8");
+					events.emit(INTERCOM_DETACH_REQUEST_EVENT, { requestId, runId: childRunId, agent: "reviewer", childIndex: 0 });
+				};
+				const result = await bgWaitTool.execute("nested-supervisor", { id: runId, timeoutMs: 1500 }, new AbortController().signal, undefined, ctx);
+				assert.equal(injectRequest, undefined, "wait did not subscribe for request wakeup");
 				assert.equal(result.isError, undefined);
 				assert.deepEqual(result.details.wait, {
-					reason: "supervisor_request", timedOut: false, activeRunIds: [runId], activeProviderItems: [],
+					reason: owned ? "supervisor_request" : "window_elapsed", timedOut: !owned,
+					activeRunIds: [runId], activeProviderItems: [],
 				});
 				assert.equal(JSON.parse(fs.readFileSync(path.join(asyncDir, "status.json"), "utf-8")).state, "running");
-				assert.ok(Date.now() - startedAt < 1200, "bg_wait did not yield promptly");
+				assert.equal(fs.existsSync(requestFile), true, "request probe consumed the request");
 			} finally {
 				for (const handler of handlers.get("session_shutdown") ?? []) await handler();
 				fs.rmSync(asyncDir, { recursive: true, force: true });
+				fs.rmSync(childAsyncDir, { recursive: true, force: true });
 				fs.rmSync(channelDir, { recursive: true, force: true });
 			}
-		`;
-		execFileSync(process.execPath, ["--experimental-strip-types", "--import", "./test/support/register-loader.mjs", "--input-type=module", "--eval", script], { cwd: projectRoot, env: parentToolEnv(), stdio: "pipe" });
+		`.replace("OWNED_REQUEST", JSON.stringify(owned));
+		execFileSync(process.execPath, ["--experimental-strip-types", "--import", "./test/support/register-loader.mjs", "--input-type=module", "--eval", script], { cwd: projectRoot, env: parentToolEnv(), stdio: "pipe", windowsHide: true });
 	});
 
 	it("does not restore the async widget from tool results when asyncWidget is disabled", () => {
@@ -870,7 +894,7 @@ describe("subagent extension child mode", () => {
 			for (const handler of second.handlers.get("session_start")) await handler({ reason: "startup" }, second.ctx);
 			if (process.env.PI_SUBAGENT_PARENT_SESSION !== undefined) throw new Error("second root published a parent identity");
 
-			for (const handler of first.handlers.get("agent_end")) await handler({}, first.ctx);
+			for (const handler of first.handlers.get("agent_end")) await handler({ messages: [{ role: "assistant", stopReason: "stop" }] }, first.ctx);
 			first.events.emit("subagent:async-complete", {
 				id: "independent-completion", agent: "worker", success: true, summary: "Done",
 				exitCode: 0, timestamp: Date.now(), sessionId: "independent-first", completionOwnerId,
@@ -883,7 +907,7 @@ describe("subagent extension child mode", () => {
 			if (process.env.PI_SUBAGENT_PARENT_SESSION !== undefined) {
 				throw new Error("independent shutdown restored a root parent session identity");
 			}
-			for (const handler of second.handlers.get("agent_end")) await handler({}, second.ctx);
+			for (const handler of second.handlers.get("agent_end")) await handler({ messages: [{ role: "assistant", stopReason: "stop" }] }, second.ctx);
 			second.events.emit("subagent:async-complete", {
 				id: "independent-second-completion", agent: "reviewer", success: true, summary: "Done",
 				exitCode: 0, timestamp: Date.now(), sessionId: "independent-second", completionOwnerId,
@@ -904,7 +928,7 @@ describe("subagent extension child mode", () => {
 			for (const handler of reverseSecond.handlers.get("session_start")) await handler({ reason: "startup" }, reverseSecond.ctx);
 			for (const handler of reverseSecond.handlers.get("session_shutdown")) await handler();
 			if (process.env.PI_SUBAGENT_PARENT_SESSION !== undefined) throw new Error("reverse shutdown restored a root identity");
-			for (const handler of reverseFirst.handlers.get("agent_end")) await handler({}, reverseFirst.ctx);
+			for (const handler of reverseFirst.handlers.get("agent_end")) await handler({ messages: [{ role: "assistant", stopReason: "stop" }] }, reverseFirst.ctx);
 			reverseFirst.events.emit("subagent:async-complete", {
 				id: "reverse-completion", agent: "worker", success: true, summary: "Done",
 				exitCode: 0, timestamp: Date.now(), sessionId: "reverse-first", completionOwnerId,

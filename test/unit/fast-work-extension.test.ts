@@ -10,6 +10,7 @@ import { FastWorkTelemetry, type FastWorkObservation } from "../../src/fast-work
 import { registerRuntimeAgentEventListener } from "../../src/agents/runtime-agent-events.ts";
 import { listRuntimeAgentConfigs } from "../../src/agents/runtime-agent-registry.ts";
 import { registerPromptTemplateDelegationBridge } from "../../src/slash/prompt-template-bridge.ts";
+import { setFastWorkProfiles } from "../../src/api/fast-work-profiles.ts";
 
 interface ToolFixture {
 	name: string;
@@ -19,7 +20,7 @@ interface ToolFixture {
 }
 const capsule = (id: string, dependsOn: string[] = []): FastWorkTask => ({ id, dependsOn, goal: "SECRET_GOAL", context: "SECRET_CONTEXT", inputs: ["SECRET_PATH"], acceptance: "Return source evidence", nonGoals: ["No edits"], role: "WORKER_STANDARD" });
 
-function harness(telemetrySetting: boolean | string = true, options: FastWorkOptions = {}) {
+function harness(telemetrySetting: boolean | string = true, options: FastWorkOptions = {}, childProcess = false) {
 	const handlers = new Map<string, (event: Parameters<ExtensionAPI["events"]["emit"]>[1], ctx: ExtensionContext) => void>();
 	const eventHandlers = new Map<string, Set<Parameters<ExtensionAPI["events"]["on"]>[1]>>();
 	const entries: Array<{ type: string; data: FastWorkObservation }> = [];
@@ -51,7 +52,7 @@ function harness(telemetrySetting: boolean | string = true, options: FastWorkOpt
 	} as unknown as ExtensionAPI;
 	// SAFETY: this test context supplies the model registry, cwd and UI used by the extension only.
 	// oxlint-disable-next-line anti-slop/no-chained-type-assertions -- Test-only context stub intentionally omits unrelated SDK services.
-	let availableModels = [{ provider: "openai-codex", id: "gpt-6-luna", reasoning: true }, { provider: "openai-codex", id: "gpt-6.1-sol", reasoning: true }];
+	let availableModels = [{ provider: "openai-codex", id: "gpt-6-luna", reasoning: true }, { provider: "openai-codex", id: "gpt-6.1-terra", reasoning: true }, { provider: "openai-codex", id: "gpt-6.1-sol", reasoning: true }];
 	const ctx = { cwd: process.cwd(), model: { provider: "openai-codex", id: "gpt-6.1-sol" }, modelRegistry: {
 		getAvailable: () => availableModels,
 	}, waitForIdle: async () => {}, ui: { notify: () => {} } } as unknown as ExtensionContext;
@@ -64,7 +65,14 @@ function harness(telemetrySetting: boolean | string = true, options: FastWorkOpt
 			return { details: { mode: "single", runId: id, results: [{ agent: params.agent, model: params.model, thinking: params.delegatedThinkingOverride, exitCode: 0, finalOutput: "SECRET_OUTPUT", usage: { input: 10, output: 3, cacheRead: 2, cacheWrite: 0, turns: 1, cost: 0.01 } }] } };
 		},
 	});
-	fastWork(pi, options);
+	const previousChildFlag = process.env.PI_SUBAGENT_CHILD;
+	if (childProcess) process.env.PI_SUBAGENT_CHILD = "1";
+	else delete process.env.PI_SUBAGENT_CHILD;
+	try { fastWork(pi, options); }
+	finally {
+		if (previousChildFlag === undefined) delete process.env.PI_SUBAGENT_CHILD;
+		else process.env.PI_SUBAGENT_CHILD = previousChildFlag;
+	}
 	const fire = (name: string, event: Parameters<ExtensionAPI["events"]["emit"]>[1] = {}) => handlers.get(name)?.(event, ctx);
 	const invoke = (params: Parameters<ToolFixture["execute"]>[1]) => tool!.execute("tool-id", params, new AbortController().signal, undefined, ctx);
 	return { pi, ctx, fire, invoke, entries, requests, userMessages, setAvailableModels: (models: typeof availableModels) => { availableModels = models; }, active: () => active, toolName: () => tool?.name, toolDescription: () => tool?.description, commandDescription: (name: string) => commandDescriptions.get(name), parameters: () => tool!.parameters, command: (args: string, name = "fast-work") => commands.get(name)!(args, ctx), cleanup: () => { fire("session_shutdown"); bridge.dispose(); unregister(); } };
@@ -82,14 +90,14 @@ describe("optional fast-work extension (synthetic SDK, no providers)", () => {
 				const { content, options } = h.userMessages[0]!;
 				assert.equal(typeof content, "string");
 				if (typeof content !== "string") assert.fail("Expected an implementation prompt");
-				assert.ok(content.trim().split(/\s+/).length <= 450, "Keep the implementation request under 450 words");
+				assert.ok(content.trim().split(/\s+/).length <= 475, "Keep the implementation request under 475 words");
 				assert.match(content, /repository-root PLAN\.md/);
 				assert.match(content, /missing, ambiguous.*ask before implementation/);
 				assert.match(content, /Do not choose another plan or overwrite it/);
 				assert.match(content, /next unmet milestone.*reuse.*evidence/is);
-				assert.match(h.commandDescription("implement-plan")!, /2–5.*independent.*writers/);
-				assert.match(content, /2–5 concurrent independent coding\/test-writing workers/);
-				assert.match(content, /model openai-codex\/gpt-6\.1-sol:medium.*no substitutions/);
+				assert.match(h.commandDescription("implement-plan")!, /up to five.*independent.*writers/);
+				assert.match(content, /up to five concurrent independent coding\/test-writing workers.*normally 2–5, use five if five useful safe lanes exist; no filler/is);
+				assert.match(content, /model openai-codex\/gpt-6.1-terra:high for bounded work/);
 				assert.match(content, /fewer than two.*concrete blocker.*ask.*rescope or proceed with fewer/is);
 				assert.match(content, /minimum.*naturally drains/is);
 				assert.match(content, /ready\/running\/blocked queue.*files\/contract.*dependencies.*workspace\/base.*gate/is);
@@ -136,7 +144,7 @@ describe("optional fast-work extension (synthetic SDK, no providers)", () => {
 					const promptGuidelines: string[] = [];
 					h.fire("before_agent_start", { systemPromptOptions: { promptGuidelines } });
 					assert.match(promptGuidelines.join("\n"), /implementation writers use ordinary isolated subagents/);
-					assert.match(promptGuidelines.join("\n"), /plan implementation requires 2–5 concurrent independent coding\/test-writing workers/);
+					assert.match(promptGuidelines.join("\n"), /plan implementation uses up to five concurrent independent coding\/test-writing workers.*normally 2–5; use five when five useful safe lanes exist, without filler/is);
 					assert.match(promptGuidelines.join("\n"), /Bounded components need not be mechanical or context-light/);
 					assert.match(promptGuidelines.join("\n"), /local implementation details.*escalate.*shared-contract/is);
 				}
@@ -144,6 +152,28 @@ describe("optional fast-work extension (synthetic SDK, no providers)", () => {
 				assert.equal(h.userMessages.length, 1);
 			} finally { h.cleanup(); }
 		}
+	});
+
+	it("versioned profile setter uses the owner's current registry and rejects unavailable selections", async () => {
+		const h = harness();
+		try {
+			h.setAvailableModels([{ provider: "openai-codex", id: "gpt-6.1-terra", reasoning: true, thinkingLevelMap: { medium: "medium", high: "high" } }, { provider: "openai-codex", id: "gpt-6.1-sol", reasoning: true }]);
+			h.fire("session_start");
+			setFastWorkProfiles(h.pi.events, { WORKER_STANDARD: { model: "openai-codex/gpt-6.1-terra", thinking: "high" } });
+			await h.command("fast");
+			await h.invoke({ action: "create", tasks: [capsule("profiled")] });
+			assert.equal(h.requests[0]?.model, "openai-codex/gpt-6.1-terra");
+			assert.equal(h.requests[0]?.thinking, "high");
+		} finally { h.cleanup(); }
+		const unavailable = harness();
+		try {
+			unavailable.fire("session_start");
+			unavailable.setAvailableModels([{ provider: "openai-codex", id: "gpt-6.1-sol", reasoning: true }]);
+			unavailable.fire("before_agent_start", { systemPromptOptions: { promptGuidelines: [] } });
+			assert.throws(() => setFastWorkProfiles(unavailable.pi.events, { WORKER_STANDARD: { model: "openai-codex/gpt-6.1-terra", thinking: "high" } }), /unavailable/);
+			unavailable.fire("session_shutdown");
+			assert.throws(() => setFastWorkProfiles(unavailable.pi.events, { WORKER_STANDARD: { model: "openai-codex/gpt-6.1-sol", thinking: "medium" } }), /no current model registry context/);
+		} finally { unavailable.cleanup(); }
 	});
 
 	it("bare fast-work only shows status, even when the implementation model is unavailable", async () => {
@@ -168,13 +198,13 @@ describe("optional fast-work extension (synthetic SDK, no providers)", () => {
 		} finally { h.cleanup(); }
 	});
 
-	it("does not submit implementation when the exact requested model is unavailable", async () => {
+	it("submits implementation without preselecting a child model", async () => {
 		const h = harness();
 		try {
 			h.fire("session_start");
 			h.setAvailableModels([]);
-			await assert.rejects(h.command("", "implement-plan"), /unavailable/);
-			assert.deepEqual(h.userMessages, []);
+			await h.command("", "implement-plan");
+			assert.equal(h.userMessages.length, 1);
 			assert.deepEqual(h.requests, []);
 		} finally { h.cleanup(); }
 	});
@@ -244,7 +274,7 @@ describe("optional fast-work extension (synthetic SDK, no providers)", () => {
 			const promptGuidelines: string[] = [];
 			h.fire("before_agent_start", { systemPromptOptions: { promptGuidelines } });
 			assert.match(promptGuidelines.join("\n"), /Use fast_work only when the user explicitly requests it/);
-			assert.match(promptGuidelines.join("\n"), /ordinary isolated subagents.*read\/write\/edit.*openai-codex\/gpt-6\.1-sol:medium/);
+			assert.match(promptGuidelines.join("\n"), /ordinary isolated subagents.*read\/write\/edit.*openai-codex\/gpt-6.1-terra:high/);
 			assert.doesNotMatch(promptGuidelines.join("\n"), /Prefer fast_work|writes.*in this parent/);
 			assert.match(h.toolDescription()!, /only when the user explicitly requests/);
 			assert.doesNotMatch(h.toolDescription()!, /Prefer this tool/);
@@ -320,7 +350,7 @@ describe("optional fast-work extension (synthetic SDK, no providers)", () => {
 			h.fire("session_start");
 			await h.command("fast");
 			await h.invoke({ action: "create", tasks: [capsule("reset")] });
-			assert.equal(h.requests[2]!.model, "openai-codex/gpt-6.1-sol");
+			assert.equal(h.requests[2]!.model, "openai-codex/gpt-6.1-terra");
 			assert.equal(h.requests[2]!.thinking, "medium");
 		} finally { h.cleanup(); }
 	});
@@ -328,7 +358,7 @@ describe("optional fast-work extension (synthetic SDK, no providers)", () => {
 	it("does not register tools or hooks in a child", () => {
 		const previous = process.env.PI_SUBAGENT_CHILD;
 		process.env.PI_SUBAGENT_CHILD = "1";
-		const h = harness();
+		const h = harness(true, {}, true);
 		try {
 			assert.equal(h.toolName(), undefined);
 			h.fire("session_start");

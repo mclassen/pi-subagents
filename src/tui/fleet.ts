@@ -768,6 +768,37 @@ function rightAligned(left: string, right: string, width: number): string {
 	return fit(left, leftWidth) + " ".repeat(Math.max(1, width - leftWidth - rightWidth)) + fit(right, rightWidth);
 }
 
+// Keep full paths scrollable, but repeat compact identities next to the tail so
+// auto-follow does not bury artifact names behind many rows of directory text.
+function compactArtifactDetails(raw: string[], width: number): string[] {
+	const tailIndex = raw.findIndex((line) => /^(?:Transcript|Session transcript|External (?:stderr|stdout)) tail|^Recent output from status\.json:$|^Result transcript tail$|^Transcript$|^Preview$/.test(line));
+	const compact: string[] = [];
+	const lines = raw.map((line, index) => {
+		// Artifact-looking transcript text is content, not run metadata.
+		if (tailIndex >= 0 && index >= tailIndex) return line;
+		const artifact = /^(\s*(?:Output|Session|Transcript file|Events|Log|Result|Report path|Transcript path): )(.+)$/.exec(line);
+		if (artifact && visibleWidth(line) > width) {
+			const label = artifact[1]!.trimStart();
+			const filePath = shortenPath(artifact[2]!);
+			const basename = filePath.split(/[\\/]/).at(-1)!;
+			const suffix = `…/${basename}`;
+			const budget = width - visibleWidth(label);
+			compact.push(label + (visibleWidth(suffix) <= budget
+				? truncateToWidth(filePath, budget - visibleWidth(basename) - 1, "…") + "/" + basename
+				: basename));
+		}
+		return line;
+	});
+	if (!compact.length) return lines;
+	if (tailIndex < 0) return [...lines, ...compact];
+	const source = /^(.* tail) from (.+):$/.exec(lines[tailIndex]!);
+	if (source) {
+		// Preserve the full source path above the compact block as well.
+		lines.splice(tailIndex, 1, lines[tailIndex]!, ...compact, `${source[1]}:`);
+	} else lines.splice(tailIndex, 0, ...compact);
+	return lines;
+}
+
 interface FleetDetailSections {
 	header: string[];
 	body: string[];
@@ -1308,7 +1339,7 @@ export class SubagentFleetComponent implements Component {
 		const raw = detailLines(selected, this.snapshot.error, this.state);
 		if (transcriptWarning) raw.unshift(`Transcript preview warning: ${transcriptWarning}`, "");
 		const lines: string[] = [];
-		for (const line of raw) {
+		for (const line of compactArtifactDetails(raw, width)) {
 			const styled = /^(Run|State|Mode|Source|Child|Agent|Model|Task):/.test(line)
 				? this.theme.bold(line)
 				: /^(Transcript|Result transcript tail)/.test(line)

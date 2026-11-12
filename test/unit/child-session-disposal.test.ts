@@ -46,6 +46,7 @@ function fixture(
 						},
 						dispose,
 						extensionRunner: {
+							onError: () => () => {},
 							hasHandlers: () => true,
 							emit: () =>
 								shutdown((error) =>

@@ -22,16 +22,17 @@ describe("writer budget guidance", () => {
 		assert.match(toolReference, /elapsed timeout is not a mutation-safe boundary/i);
 	});
 
-	it("keeps review-loop implementation ownership behind the delegation gate", () => {
+	it("removes hard token caps without weakening cost and control safeguards", () => {
+		const toolReference = readProjectFile("docs/tool-reference.md");
+		const skill = readProjectFile("skills/pi-subagents/SKILL.md");
 		const reviewLoop = readProjectFile("prompts/review-loop.md");
+		const guidance = [toolReference, skill, reviewLoop].join("\n");
 
-		assert.match(reviewLoop, /Implementation requested.*does not automatically require a child writer/i);
-		assert.match(reviewLoop, /parent is the default implementation and review owner/);
-		assert.match(reviewLoop, /Luna high for ordinary implementation and review/);
-		assert.match(reviewLoop, /Iteration quotas never force worker delegation/);
-		assert.match(reviewLoop, /Implementation owner: `parent` or `worker`/);
-		assert.match(reviewLoop, /Packet economics:/);
-		assert.match(reviewLoop, /never let a child writer share the parent checkout/i);
+		assert.match(guidance, /do not (?:pass|set) a hard `toolBudget` or (?:tight )?`?usageBudget`?/i);
+		assert.doesNotMatch(guidance, /hard token (?:cap|budget)|tokenBudget/);
+		assert.match(guidance, /checkpoint after the current tool returns/);
+		assert.match(guidance, /elapsed timeout is not a mutation-safe boundary/i);
+		assert.match(toolReference, /cost|cancel|timeout|tool control/i);
 	});
 
 });

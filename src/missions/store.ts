@@ -4,6 +4,10 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { writePrivateAtomicJson } from "../shared/atomic-json.ts";
 import { getAgentDir } from "../shared/utils.ts";
+import { withFileLock } from "../shared/file-lock.ts";
+import type { AcceptanceLedger } from "../shared/types.ts";
+import { currentAcceptanceIdentity } from "../runs/shared/acceptance-identity.ts";
+import { createMissionGoal, parseMissionGoal, updateMissionGoal } from "./goal-state.ts";
 import {
 	MISSION_STATUSES,
 	type GlobalMissionIndexRecord,
@@ -12,7 +16,6 @@ import {
 	type MissionArtifactKind,
 	type MissionCreateInput,
 	type MissionDecision,
-	type MissionGoal,
 	type MissionIndexEntry,
 	type MissionListResult,
 	type MissionReceipt,
@@ -24,7 +27,6 @@ import {
 	type MissionStatus,
 	type MissionStoreConfig,
 	type MissionStoreLocation,
-	type MissionTokenBudget,
 	type MissionTokenUsage,
 	type MissionUpdateInput,
 	type MissionWorkflowChild,
@@ -67,25 +69,9 @@ function missionStatus(value: unknown, label: string): MissionStatus {
 	return value as MissionStatus;
 }
 
-function positiveTokenCount(value: unknown, label: string): number {
-	if (!Number.isSafeInteger(value) || (value as number) < 1) throw new Error(`${label} must be a positive integer`);
-	return value as number;
-}
-
 function nonNegativeTokenCount(value: unknown, label: string): number {
 	if (!Number.isSafeInteger(value) || (value as number) < 0) throw new Error(`${label} must be a non-negative integer`);
 	return value as number;
-}
-
-function parseGoal(value: unknown, label: string): MissionGoal {
-	const input = asObject(value, label);
-	if (input.status !== "active" && input.status !== "paused" && input.status !== "budget-exhausted") throw new Error(`${label}.status is invalid`);
-	return { status: input.status };
-}
-
-function parseBudget(value: unknown, label: string): MissionTokenBudget {
-	const input = asObject(value, label);
-	return { tokens: positiveTokenCount(input.tokens, `${label}.tokens`) };
 }
 
 function parseUsage(value: unknown, label: string): MissionTokenUsage {
@@ -124,6 +110,7 @@ function parseRunLink(value: unknown, label: string): MissionRunLink {
 		...(optionalString(input.status, `${label}.status`) ? { status: input.status as string } : {}),
 		...(input.startedAt !== undefined ? { startedAt: timestamp(input.startedAt, `${label}.startedAt`) } : {}),
 		...(input.completedAt !== undefined ? { completedAt: timestamp(input.completedAt, `${label}.completedAt`) } : {}),
+		...(optionalString(input.summary, `${label}.summary`) ? { summary: input.summary as string } : {}),
 		...(input.usage !== undefined ? { usage: parseUsage(input.usage, `${label}.usage`) } : {}),
 	};
 }
@@ -218,8 +205,7 @@ export function parseMissionRecord(value: unknown, source = "mission record"): M
 	const decisions = input.decisions as unknown[];
 	const artifacts = input.artifacts as unknown[];
 	const receipts = (input.receipts ?? []) as unknown[];
-	const goal = input.goal !== undefined ? parseGoal(input.goal, `${source}.goal`) : undefined;
-	const budget = input.budget !== undefined ? parseBudget(input.budget, `${source}.budget`) : undefined;
+	const goal = input.goal !== undefined ? parseMissionGoal(input.goal, `${source}.goal`) : undefined;
 	const usage = input.usage !== undefined ? parseUsage(input.usage, `${source}.usage`) : undefined;
 	const objective = optionalString(input.objective, `${source}.objective`)?.trim();
 	if (!objective) throw new Error(`${source}.objective must be a non-empty string`);
@@ -229,7 +215,6 @@ export function parseMissionRecord(value: unknown, source = "mission record"): M
 		title: requiredString(input.title, `${source}.title`),
 		objective,
 		...(goal ? { goal } : {}),
-		...(budget ? { budget } : {}),
 		...(usage ? { usage } : {}),
 		status: missionStatus(input.status, `${source}.status`),
 		createdAt: timestamp(input.createdAt, `${source}.createdAt`),
@@ -243,7 +228,22 @@ export function parseMissionRecord(value: unknown, source = "mission record"): M
 		...(optionalString(input.ownerSessionId, `${source}.ownerSessionId`) ? { ownerSessionId: input.ownerSessionId as string } : {}),
 		...(optionalString(input.summary, `${source}.summary`) ? { summary: input.summary as string } : {}),
 		...(input.acceptance !== undefined ? { acceptance: input.acceptance } : {}),
+		...(input.acceptanceAuthority !== undefined ? { acceptanceAuthority: parseAcceptanceAuthority(input.acceptanceAuthority) } : {}),
 		...(input.labels !== undefined ? { labels: stringArray(input.labels, `${source}.labels`) } : {}),
+	};
+}
+
+function parseAcceptanceAuthority(value: unknown): NonNullable<MissionRecord["acceptanceAuthority"]> {
+	const input = asObject(value, "acceptanceAuthority");
+	if (input.runtime !== undefined && input.runtime !== true) throw new Error("acceptanceAuthority.runtime must be true");
+	if (input.completion !== undefined && input.completion !== "pending" && input.completion !== "observed") throw new Error("acceptanceAuthority.completion must be pending or observed");
+	return {
+		...(input.completion !== undefined ? { completion: input.completion as "pending" | "observed" } : {}),
+		launchId: requiredString(input.launchId, "acceptanceAuthority.launchId"),
+		...(input.runId !== undefined ? { runId: requiredString(input.runId, "acceptanceAuthority.runId") } : {}),
+		...(input.runtime === true ? { runtime: true as const } : {}),
+		...(input.producerRunId !== undefined ? { producerRunId: requiredString(input.producerRunId, "acceptanceAuthority.producerRunId") } : {}),
+		...(input.identityDigest !== undefined ? { identityDigest: requiredString(input.identityDigest, "acceptanceAuthority.identityDigest") } : {}),
 	};
 }
 
@@ -349,28 +349,33 @@ function writeMission(location: MissionStoreLocation, record: MissionRecord): Mi
 
 function pruneTerminalMissions(location: MissionStoreLocation, maxTerminal: number): void {
 	const terminal = listMissions(location).records
-		.filter((record) => TERMINAL_MISSION_STATUSES.has(record.status))
+		// Goal lifecycle belongs to its saved-session owner; unrelated retention must not remove it.
+		.filter((record) => !record.goal && TERMINAL_MISSION_STATUSES.has(record.status))
 		.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
-	for (const record of terminal.slice(maxTerminal)) {
+	for (const candidate of terminal.slice(maxTerminal)) {
 		try {
-			fs.rmSync(missionRecordPath(location, record.id), { force: true });
-			fs.rmSync(path.join(location.missionDir, record.id), { recursive: true, force: true });
-			if (location.writeGlobalIndex) fs.rmSync(indexPath(location, record), { force: true });
+			withFileLock(missionRecordPath(location, candidate.id), () => {
+				const current = readMission(location, candidate.id);
+				// Millisecond timestamps can coincide: compare the entire parsed snapshot before deletion.
+				if (current.goal || !TERMINAL_MISSION_STATUSES.has(current.status) || JSON.stringify(current) !== JSON.stringify(candidate)) return;
+				fs.rmSync(missionRecordPath(location, current.id), { force: true });
+				if (location.writeGlobalIndex) fs.rmSync(indexPath(location, current), { force: true });
+				// Workflow state uses a separate lock and may be written independently; preserve its directory.
+			}, { retryDelaysMs: [] });
 		} catch {
 			// Retention is best-effort and must never block a launch.
 		}
 	}
 }
 
-export function createMission(location: MissionStoreLocation, input: MissionCreateInput, now = new Date(), retainTerminal = location.retainTerminal ?? DEFAULT_TERMINAL_MISSION_RETENTION): MissionRecord {
+function newMissionRecord(location: MissionStoreLocation, input: MissionCreateInput, now: Date): MissionRecord {
 	const createdAt = now.toISOString();
 	const record: MissionRecord = {
 		schemaVersion: 1,
 		id: randomUUID(),
 		title: requiredString(input.title, "mission.title").trim(),
 		objective: requiredString(input.objective, "mission.objective").trim(),
-		...(input.goal === true ? { goal: { status: "active" as const } } : {}),
-		...(input.budget !== undefined ? { budget: parseBudget(input.budget, "mission.budget") } : {}),
+		...(input.goal === true ? { goal: createMissionGoal(input.maxIterations) } : {}),
 		...(input.goal === true ? { usage: { tokens: 0 } } : {}),
 		status: input.status ?? "planned",
 		createdAt,
@@ -384,9 +389,79 @@ export function createMission(location: MissionStoreLocation, input: MissionCrea
 		...(input.ownerSessionId ? { ownerSessionId: requiredString(input.ownerSessionId, "mission.ownerSessionId") } : {}),
 		...(input.labels ? { labels: stringArray(input.labels, "mission.labels") } : {}),
 	};
-	const created = writeMission(location, record);
+	return parseMissionRecord(record);
+}
+
+export function createMission(location: MissionStoreLocation, input: MissionCreateInput, now = new Date(), retainTerminal = location.retainTerminal ?? DEFAULT_TERMINAL_MISSION_RETENTION): MissionRecord {
+	const created = writeMission(location, newMissionRecord(location, input, now));
 	pruneTerminalMissions(location, retainTerminal);
 	return created;
+}
+
+/** Serialize explicit goal replacement by saved session, then lock each mission file. */
+export function createSessionGoal(location: MissionStoreLocation, input: MissionCreateInput, now = new Date()): MissionRecord {
+	const ownerSessionId = requiredString(input.ownerSessionId, "mission.ownerSessionId");
+	if (input.goal !== true) throw new Error("Session goal creation requires goal: true");
+	// Validate every field before creating a record or changing any existing goal.
+	const record = newMissionRecord(location, input, now);
+	const sessionKey = createHash("sha256").update(ownerSessionId).digest("hex");
+	return withFileLock(path.join(location.missionDir, `.session-goal-${sessionKey}`), () => {
+		let candidates: MissionRecord[] | undefined;
+		let discoveryWarnings: string[] = [];
+		try {
+			// Persist first. Later I/O failures propagate without deleting either record's evidence.
+			const created = withFileLock(missionRecordPath(location, record.id), () => writeMission(location, record));
+			const listed = listMissions(location);
+			discoveryWarnings = listed.warnings;
+			candidates = listed.records.filter((candidate) => candidate.id !== created.id && candidate.ownerSessionId === ownerSessionId && !!candidate.goal && !TERMINAL_MISSION_STATUSES.has(candidate.status));
+			for (const candidate of candidates) {
+				withFileLock(missionRecordPath(location, candidate.id), () => {
+					const current = readMission(location, candidate.id);
+					if (current.ownerSessionId !== ownerSessionId || !current.goal || TERMINAL_MISSION_STATUSES.has(current.status)) return;
+					if (current.cwd && path.resolve(current.cwd) !== path.resolve(location.projectRoot)) return;
+					writeMission(location, {
+						...current,
+						status: "cancelled",
+						updatedAt: now.toISOString(),
+						summary: `${current.summary ? `${current.summary}\n` : ""}Goal superseded by new goal ${created.id}. Running jobs are NOT stopped.`,
+					});
+				});
+			}
+			return created;
+		} catch (error) {
+			const reason = (error instanceof Error ? error.message : String(error)).replace(/[\r\n]+/g, " ");
+			const lines = [`Goal replacement incomplete: ${reason}`];
+			try {
+				const actual = readMission(location, record.id);
+				lines.push(`New goal ${record.id}: ${actual.id === record.id ? "persisted" : "unknown (record ID mismatch)"}`);
+			} catch (readError) {
+				lines.push(`New goal ${record.id}: ${readError instanceof MissionNotFoundError ? "not persisted" : "unknown (readback failed)"}`);
+			}
+			if (!candidates) {
+				try {
+					const listed = listMissions(location);
+					candidates = listed.records.filter((candidate) => candidate.id !== record.id && candidate.ownerSessionId === ownerSessionId && !!candidate.goal && !TERMINAL_MISSION_STATUSES.has(candidate.status));
+					discoveryWarnings = listed.warnings;
+				} catch {
+					lines.push("Old goal discovery: unknown (readback failed)");
+				}
+			}
+			if (discoveryWarnings.length) lines.push("Old goal discovery: unknown (some records could not be read)");
+			for (const candidate of candidates ?? []) {
+				try {
+					const actual = readMission(location, candidate.id);
+					const state = actual.id !== candidate.id ? "unknown (record ID mismatch)"
+						: actual.status === "cancelled" ? "cancelled"
+						: TERMINAL_MISSION_STATUSES.has(actual.status) ? `closed (${actual.status})`
+						: `still open (${actual.status})`;
+					lines.push(`Old goal ${candidate.id}: ${state}`);
+				} catch {
+					lines.push(`Old goal ${candidate.id}: unknown (readback failed)`);
+				}
+			}
+			throw new Error(lines.join("\n"), { cause: error });
+		}
+	});
 }
 
 export class MissionNotFoundError extends Error {
@@ -435,7 +510,41 @@ export function listMissions(location: MissionStoreLocation): MissionListResult 
 }
 
 export function updateMission(location: MissionStoreLocation, missionId: string, update: MissionUpdateInput, now = new Date(), retainTerminal = location.retainTerminal ?? DEFAULT_TERMINAL_MISSION_RETENTION): MissionRecord {
+	const updated = withFileLock(missionRecordPath(location, missionId), () => updateMissionUnlocked(location, missionId, update, now));
+	if (TERMINAL_MISSION_STATUSES.has(updated.status)) pruneTerminalMissions(location, retainTerminal);
+	return updated;
+}
+
+export function cancelGoalMission(location: MissionStoreLocation, missionId: string, expectedOwnerSessionId: string | null | undefined, now = new Date()): MissionRecord {
+	if (!expectedOwnerSessionId?.trim()) throw new Error("Goal cancellation requires its owning session and a saved-session identity");
+	return withFileLock(missionRecordPath(location, missionId), () => {
+		const current = readMission(location, missionId);
+		if (current.id !== missionId) throw new Error("Mission record does not match the exact requested ID");
+		if (current.cwd && path.resolve(current.cwd) !== path.resolve(location.projectRoot)) throw new Error("Goal mission belongs to another project");
+		if (!current.goal) throw new Error("Mission is not a goal");
+		if (current.ownerSessionId !== expectedOwnerSessionId) throw new Error("Goal cancellation requires its owning session");
+		if (current.status === "completed" || current.status === "failed") throw new Error(`Goal mission is already ${current.status}; no change made`);
+		if (current.status === "cancelled") return current;
+		return updateMissionUnlocked(location, missionId, {
+			status: "cancelled",
+			summary: `${current.summary ? `${current.summary}\n` : ""}Goal cancelled by operator /goal cancel. Running jobs are NOT stopped.`,
+		}, now);
+	});
+}
+
+function updateMissionUnlocked(location: MissionStoreLocation, missionId: string, update: MissionUpdateInput, now: Date): MissionRecord {
 	const current = readMission(location, missionId);
+	const goalOwnershipRequired = !!current.goal || (update.goal !== undefined && update.goal !== false);
+	const ownershipCheckRequested = Object.prototype.hasOwnProperty.call(update, "expectedGoalOwnerSessionId");
+	if (ownershipCheckRequested && goalOwnershipRequired && !update.expectedGoalOwnerSessionId) {
+		throw new Error("Goal mutation requires the current owning session");
+	}
+	if (ownershipCheckRequested && goalOwnershipRequired && current.goal && update.expectedGoalOwnerSessionId !== current.ownerSessionId) {
+		throw new Error("Goal mission is owned by another session or has no owner; goal mutations require its owning session");
+	}
+	if (update.requireActiveGoal && current.goal && (current.goal.status !== "active" || !current.goal.iterationActive || !["active", "planned"].includes(current.status) || current.decisions.some((decision) => decision.status === "open"))) {
+		throw new Error("Goal mission is paused, blocked, at its iteration limit, or has no active iteration; inspect mission.show before launching work");
+	}
 	const runs = [...current.runs];
 	for (const candidate of update.addRuns ?? []) {
 		const run = parseRunLink(candidate, "mission.update.addRuns[]");
@@ -504,27 +613,72 @@ export function updateMission(location: MissionStoreLocation, missionId: string,
 			resolution: requiredString(update.resolveDecision.resolution, "mission.update.resolveDecision.resolution").trim(),
 		};
 	}
-	const budget = update.budget !== undefined ? parseBudget(update.budget, "mission.update.budget") : current.budget;
 	const usage = update.usage !== undefined
 		? parseUsage(update.usage, "mission.update.usage")
-		: { tokens: runs.reduce((total, run) => total + (run.usage?.tokens ?? 0), 0) };
-	let goal = update.goal === false ? undefined : update.goal !== undefined ? parseGoal(update.goal, "mission.update.goal") : current.goal;
-	if (goal && budget) {
-		goal = usage.tokens >= budget.tokens
-			? { status: "budget-exhausted" }
-			: goal.status === "budget-exhausted"
-				? { status: "active" }
-				: goal;
-	}
+		: !update.addRuns?.length && current.usage
+			? current.usage
+			: { tokens: runs.reduce((total, run) => total + (run.usage?.tokens ?? 0), 0) };
 	const hasOpenDecisions = decisions.some((decision) => decision.status === "open");
 	const requestedStatus = update.status !== undefined ? missionStatus(update.status, "mission.update.status") : undefined;
-	const candidateStatus = requestedStatus
+	const candidateStatus = current.goal && (update.addRuns || update.upsertWorkflowChildren) && !["active", "planned"].includes(current.status)
+		? current.status
+		: requestedStatus
 		?? (update.addDecisions?.length && current.status === "active"
 			? "needs_decision"
 			: update.resolveDecision && current.status === "needs_decision" && !hasOpenDecisions
 				? "active"
 				: current.status);
+	let acceptanceAuthority = current.acceptanceAuthority;
+	const priorLedger = current.acceptance as AcceptanceLedger | undefined;
+	const priorRuntimeAcceptance = acceptanceAuthority?.runtime || (priorLedger?.explicit === true && (priorLedger.effectiveAcceptance?.level === "verified" || (priorLedger.verifyRuns?.length ?? 0) > 0));
+	if (update.acceptanceLaunch) {
+		const launch = update.acceptanceLaunch;
+		// Admission invalidates authority; receipt replay for the same launch/run does not.
+		if (!launch.runId || (acceptanceAuthority?.launchId === launch.launchId && acceptanceAuthority.runId !== launch.runId)) {
+			acceptanceAuthority = {
+				completion: "pending",
+				launchId: requiredString(launch.launchId, "acceptanceLaunch.launchId"),
+				...(launch.runId ? { runId: launch.runId } : {}),
+				...(priorRuntimeAcceptance ? { runtime: true } : {}),
+			};
+		}
+	}
+	let acceptance = current.acceptance;
+	if (update.acceptanceCompletion) {
+		const completion = update.acceptanceCompletion;
+		if (acceptanceAuthority?.launchId === completion.launchId && acceptanceAuthority.runId === completion.runId && acceptanceAuthority.completion !== "observed") {
+			// A terminal launch resolves once. Replayed, implicit or conflicting late
+			// payloads cannot demote authority or replace its historic terminal ledger.
+			const ledger = completion.hasExplicitProducer ? update.acceptance as AcceptanceLedger | undefined : undefined;
+			if (ledger?.explicit === true) acceptance = ledger;
+			acceptanceAuthority = {
+				...acceptanceAuthority,
+				completion: "observed",
+				...(completion.hasExplicitProducer || acceptanceAuthority.runtime ? { runtime: true } : {}),
+				producerRunId: completion.hasExplicitProducer ? completion.producerRunId : undefined,
+				identityDigest: ledger?.explicit === true && completion.producerRunId && currentAcceptanceIdentity(ledger, completion.producerRunId) ? ledger.identity?.digest : undefined,
+			};
+		}
+	} else if (update.acceptance !== undefined) {
+		acceptance = update.acceptance;
+		if (acceptanceAuthority?.runtime) acceptanceAuthority = { ...acceptanceAuthority, identityDigest: undefined };
+	}
+	if (current.goal && candidateStatus === "completed" && acceptance && typeof acceptance === "object"
+		&& "status" in acceptance && acceptance.status === "rejected") {
+		throw new Error("Goal mission cannot be completed while its recorded acceptance is rejected");
+	}
+	if (current.goal && candidateStatus === "completed" && acceptanceAuthority && acceptanceAuthority.completion !== "observed") {
+		throw new Error("Goal mission cannot be completed: acceptance completion is pending or unknown; runtime identity is missing or stale");
+	}
+	const ledger = acceptance as AcceptanceLedger | undefined;
+	const runtimeAcceptance = acceptanceAuthority?.runtime || (ledger?.explicit === true && (ledger.effectiveAcceptance?.level === "verified" || (ledger.verifyRuns?.length ?? 0) > 0));
+	if (current.goal && candidateStatus === "completed" && runtimeAcceptance) {
+		if (!ledger || ledger.explicit !== true || ledger.evidenceStatus !== "verified" || !["verified", "reviewed", "accepted"].includes(ledger.status) || ledger.runtimeChecks?.some((check) => check.status === "failed") || ledger.verifyRuns?.some((run) => run.status === "failed" || run.status === "timed-out") || !acceptanceAuthority?.identityDigest || acceptanceAuthority.identityDigest !== ledger.identity?.digest || !acceptanceAuthority.producerRunId || !currentAcceptanceIdentity(ledger, acceptanceAuthority.producerRunId)) {
+			throw new Error("Goal mission cannot be completed: runtime acceptance identity is missing or stale");
+		}
+	}
 	const decisionStatus = hasOpenDecisions && (candidateStatus === "active" || candidateStatus === "completed") ? "needs_decision" : candidateStatus;
+	const goal = updateMissionGoal({ ...current, runs, decisions, status: decisionStatus }, update.goal, update.goalContinuation);
 	const next: MissionRecord = {
 		...current,
 		updatedAt: createdAt,
@@ -535,17 +689,16 @@ export function updateMission(location: MissionStoreLocation, missionId: string,
 		decisions,
 		...(update.title !== undefined ? { title: requiredString(update.title, "mission.update.title").trim() } : {}),
 		...(update.objective !== undefined ? { objective: requiredString(update.objective, "mission.update.objective").trim() } : {}),
-		...(budget ? { budget } : {}),
 		...(goal ? { goal, usage } : {}),
-		status: decisionStatus,
+		status: goal && goal.status !== "active" && decisionStatus === "active" ? "waiting" : decisionStatus,
 		...(update.summary !== undefined ? { summary: requiredString(update.summary, "mission.update.summary") } : {}),
 		...(update.labels !== undefined ? { labels: stringArray(update.labels, "mission.update.labels") } : {}),
-		...(update.acceptance !== undefined ? { acceptance: update.acceptance } : {}),
+		...(acceptance !== undefined ? { acceptance } : {}),
+		...(acceptanceAuthority ? { acceptanceAuthority } : {}),
+		...(ownershipCheckRequested && !current.goal && goal ? { ownerSessionId: update.expectedGoalOwnerSessionId } : {}),
 	};
 	if (!goal) delete next.goal;
-	const updated = writeMission(location, next);
-	if (TERMINAL_MISSION_STATUSES.has(updated.status)) pruneTerminalMissions(location, retainTerminal);
-	return updated;
+	return writeMission(location, next);
 }
 
 export function listGlobalMissions(globalIndexDir: string): GlobalMissionListResult {

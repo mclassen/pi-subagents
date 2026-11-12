@@ -3,14 +3,15 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { describe, it } from "node:test";
-import { validateMissionLaunch } from "../../src/missions/actions.ts";
+import { handleMissionAction, validateMissionLaunch } from "../../src/missions/actions.ts";
 import {
 	attachMissionToLaunchResult,
 	prepareMissionLaunch,
+	writeMissionAsyncBinding,
 	readMissionBinding,
 	syncMissionFromAsyncCompletion,
 } from "../../src/missions/lifecycle.ts";
-import { readMission } from "../../src/missions/store.ts";
+import { readMission, updateMission } from "../../src/missions/store.ts";
 import { PROMPT_REDACTED } from "../../src/shared/utils.ts";
 
 function projectFixture() {
@@ -26,13 +27,13 @@ describe("mission launch lifecycle", () => {
 			summary: "Review the active backlog",
 			objective: "Find ready work",
 			goal: true,
-			budget: { tokens: 400000 },
+			maxIterations: 4,
 			labels: ["review"],
 		}), {
 			title: "Review the active backlog",
 			objective: "Find ready work",
 			goal: true,
-			budget: { tokens: 400000 },
+			maxIterations: 4,
 			labels: ["review"],
 		});
 		assert.throws(() => validateMissionLaunch({}), /title or mission\.summary/);
@@ -42,9 +43,10 @@ describe("mission launch lifecycle", () => {
 		assert.throws(() => validateMissionLaunch({ title: " " }), /non-empty string/);
 		assert.throws(() => validateMissionLaunch({ title: "Title", goal: false }), /must be true/);
 		assert.deepEqual(validateMissionLaunch({ title: "Title", goal: true }), { title: "Title", goal: true });
-		for (const budget of [null, false, [], {}, { tokens: 0 }, { tokens: -1 }, { tokens: 1.5 }, { tokens: "100" }, { tokens: Number.NaN }, { tokens: Number.POSITIVE_INFINITY }, { tokens: Number.MAX_SAFE_INTEGER + 1 }]) {
-			assert.throws(() => validateMissionLaunch({ title: "Title", goal: true, budget }), /budget\.tokens must be a positive integer/);
+		for (const maxIterations of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+			assert.throws(() => validateMissionLaunch({ title: "Title", goal: true, maxIterations }), /maxIterations requires goal: true and a positive integer/);
 		}
+		assert.throws(() => validateMissionLaunch({ title: "Title", maxIterations: 2 }), /maxIterations requires goal: true/);
 	});
 
 	it("creates missions by default for task launches and honors explicit opt-out", () => {
@@ -132,6 +134,82 @@ describe("mission launch lifecycle", () => {
 			assert.deepEqual(readMission(summaryAlias.location, summaryAlias.missionId).labels, ["review"]);
 			assert.equal(readMission(summaryAlias.location, summaryAlias.missionId).title, "Review active backlog");
 			assert.equal(readMission(summaryAlias.location, summaryAlias.missionId).objective, "Review active backlog");
+		} finally {
+			fs.rmSync(test.root, { recursive: true, force: true });
+		}
+	});
+
+	it("preserves goal checkpoint, authored summary, and blocked lifecycle state across run completion", () => {
+		const test = projectFixture();
+		try {
+			const binding = prepareMissionLaunch({
+				params: { mission: { title: "Checkpointed", goal: true, maxIterations: 3 }, task: "Continue" },
+				projectRoot: test.projectRoot,
+				config: test.missionConfig,
+				ownerSessionId: "owner-1",
+			});
+			assert.ok(binding);
+			let mission = readMission(binding.location, binding.missionId);
+			assert.deepEqual(mission.goal, { status: "active", maxIterations: 3, iterationsStarted: 1, iterationActive: true });
+			updateMission(binding.location, binding.missionId, { summary: "Authored checkpoint" });
+			attachMissionToLaunchResult({
+				binding,
+				result: {
+					content: [{ type: "text", text: "Run completed summary" }],
+					details: { mode: "single", runId: "goal-run", results: [{ index: 0, agent: "worker", task: "Continue", exitCode: 0, usage: { input: 20, output: 10, cacheRead: 0, cacheWrite: 0, cost: 0, turns: 1 } }] },
+				},
+			});
+			mission = readMission(binding.location, binding.missionId);
+			assert.equal(mission.summary, "Authored checkpoint");
+			assert.equal(mission.goal?.iterationsStarted, 1);
+			assert.equal(mission.goal?.iterationActive, true);
+
+			updateMission(binding.location, binding.missionId, { goal: { status: "paused" } });
+			const asyncDir = path.join(test.root, "goal-async");
+			fs.mkdirSync(asyncDir, { recursive: true });
+			fs.writeFileSync(path.join(asyncDir, "status.json"), JSON.stringify({ state: "complete" }));
+			writeMissionAsyncBinding(asyncDir, binding);
+			const completed = syncMissionFromAsyncCompletion({ runId: "paused-goal-run", asyncDir, mode: "single", state: "complete", success: true, summary: "Must not replace checkpoint" });
+			assert.equal(completed?.status, "waiting");
+			assert.equal(completed?.goal?.status, "paused");
+			assert.equal(completed?.summary, "Authored checkpoint");
+		} finally {
+			fs.rmSync(test.root, { recursive: true, force: true });
+		}
+	});
+
+	it("preserves waiting goal state during mission-show linked-run refresh", () => {
+		const test = projectFixture();
+		try {
+			const binding = prepareMissionLaunch({
+				params: { mission: { title: "Waiting goal", goal: true, maxIterations: 3 }, task: "Continue later" },
+				projectRoot: test.projectRoot,
+				config: test.missionConfig,
+				ownerSessionId: "owner-1",
+			});
+			assert.ok(binding);
+			const asyncDir = path.join(test.root, "waiting-goal-run");
+			fs.mkdirSync(asyncDir, { recursive: true });
+			fs.writeFileSync(path.join(asyncDir, "status.json"), JSON.stringify({ state: "running" }));
+			attachMissionToLaunchResult({
+				binding,
+				result: {
+					content: [{ type: "text", text: "Async started" }],
+					details: { mode: "single", runId: "waiting-goal-run", asyncId: "waiting-goal-run", asyncDir, results: [] },
+				},
+			});
+			const checkpoint = updateMission(binding.location, binding.missionId, {
+				status: "waiting",
+				summary: "Authored waiting checkpoint",
+			});
+			assert.deepEqual(checkpoint.goal, { status: "active", maxIterations: 3, iterationsStarted: 1, iterationActive: true });
+			fs.writeFileSync(path.join(asyncDir, "status.json"), JSON.stringify({ state: "complete" }));
+
+			const shown = handleMissionAction("mission.show", { missionId: binding.missionId }, { cwd: test.projectRoot, config: test.missionConfig });
+			const mission = shown.details?.mission;
+			assert.equal(mission?.status, "waiting");
+			assert.equal(mission?.summary, "Authored waiting checkpoint");
+			assert.deepEqual(mission?.goal, checkpoint.goal);
 		} finally {
 			fs.rmSync(test.root, { recursive: true, force: true });
 		}

@@ -1,6 +1,7 @@
 import { spawnSync } from "node:child_process";
 import type { ProcessTreeTerminal } from "../../shared/types.ts";
-import { WINDOWS_HIDDEN_PROCESS_OPTIONS, windowsSystemExecutable } from "../../shared/windows-launch-safety.ts";
+import { observeWindowsProcesses, signalRetainedWindowsProcesses, releaseWindowsProcesses, type RetainedWindowsProcess, type WindowsProcessSnapshot } from "./windows-process-identity.ts";
+export type { WindowsProcessSnapshot } from "./windows-process-identity.ts";
 
 const DEFAULT_TERM_GRACE_MS = 3000;
 const DEFAULT_KILL_VERIFY_MS = 1000;
@@ -8,7 +9,7 @@ const VERIFY_INTERVAL_MS = 25;
 const PROCESS_SNAPSHOT_TIMEOUT_MS = 5000;
 
 type SignalResult = "sent" | "absent" | { diagnostic: string };
-export interface WindowsProcessSnapshot { pid: number; parentPid: number; creationDate: string }
+
 
 function diagnostic(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
@@ -83,45 +84,20 @@ async function waitUntilGroupTerminal(
 	}
 }
 
-function enumerateWindowsProcesses(): WindowsProcessSnapshot[] | { diagnostic: string } {
-	const command = "Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,CreationDate | ConvertTo-Json -Compress";
-	const result = spawnSync(
-		windowsSystemExecutable("WindowsPowerShell", "v1.0", "powershell.exe"),
-		["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command],
-		{
-			encoding: "utf-8",
-			timeout: PROCESS_SNAPSHOT_TIMEOUT_MS,
-			...WINDOWS_HIDDEN_PROCESS_OPTIONS,
-		},
-	);
-	if (result.error || result.status !== 0) {
-		return { diagnostic: result.error ? diagnostic(result.error) : (result.stderr.trim() || `PowerShell exited with ${result.status}`) };
-	}
-	try {
-		const parsed: unknown = JSON.parse(result.stdout.trim() || "[]");
-		const values = Array.isArray(parsed) ? parsed : [parsed];
-		return values.flatMap((value) => {
-			if (!value || typeof value !== "object") return [];
-			const item = value as { ProcessId?: unknown; ParentProcessId?: unknown; CreationDate?: unknown };
-			if (typeof item.ProcessId !== "number" || typeof item.ParentProcessId !== "number") return [];
-			return [{ pid: item.ProcessId, parentPid: item.ParentProcessId, creationDate: String(item.CreationDate ?? "") }];
-		});
-	} catch (error) {
-		return { diagnostic: `Invalid Windows process snapshot: ${diagnostic(error)}` };
-	}
-}
-
-function windowsCreationTime(value: string): number | undefined {
+function windowsCreationTime(value: string): bigint | undefined {
+	// Native FILETIME keeps all 100ns identity precision; do not round it through Number.
+	if (/^\d+$/.test(value)) return BigInt(value);
+	const fileTime = (milliseconds: number) => BigInt(Math.trunc(milliseconds)) * 10_000n + 116_444_736_000_000_000n;
 	const serializedDate = /^\/Date\((-?\d+)(?:[+-]\d{4})?\)\/$/.exec(value);
-	if (serializedDate) return Number(serializedDate[1]);
+	if (serializedDate) return fileTime(Number(serializedDate[1]));
 	const cim = /^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})\.(\d{6})([+-]\d{3})$/.exec(value);
 	if (cim) {
 		const [, year, month, day, hour, minute, second, micros, offset] = cim;
 		const local = Date.UTC(Number(year), Number(month) - 1, Number(day), Number(hour), Number(minute), Number(second), Number(micros) / 1000);
-		return local - Number(offset) * 60_000;
+		return fileTime(local - Number(offset) * 60_000);
 	}
 	const parsed = Date.parse(value);
-	return Number.isFinite(parsed) ? parsed : undefined;
+	return Number.isFinite(parsed) ? fileTime(parsed) : undefined;
 }
 
 export function discoverVerifiedOwnedWindowsProcesses(
@@ -135,10 +111,10 @@ export function discoverVerifiedOwnedWindowsProcesses(
 		const current = currentByPid.get(ownedPid);
 		if (!current) continue;
 		if (windowsCreationTime(creationDate) === undefined || windowsCreationTime(current.creationDate) === undefined) {
-			return { diagnostic: `Windows owned PID ${ownedPid} has no verifiable creation identity.` };
+			return { diagnostic: `Windows owned PID ${ownedPid} has no verifiable creation identity (expected=${JSON.stringify(creationDate)}, observed=${JSON.stringify(current.creationDate)}).` };
 		}
 		if (current.creationDate !== creationDate) {
-			return { diagnostic: `Windows owned PID ${ownedPid} was reused during termination.` };
+			return { diagnostic: `Windows owned PID ${ownedPid} was reused during termination (expected=${JSON.stringify(creationDate)}, observed=${JSON.stringify(current.creationDate)}).` };
 		}
 		if (!excludedParentIds.has(ownedPid)) verifiedParents.add(ownedPid);
 	}
@@ -148,7 +124,7 @@ export function discoverVerifiedOwnedWindowsProcesses(
 			(identities.has(process.parentPid) || excludedParentIds.has(process.parentPid)) &&
 			!verifiedParents.has(process.parentPid)
 		) {
-			return { diagnostic: `Windows descendant PID ${process.pid} has an unverified parent ${process.parentPid}.` };
+			return { diagnostic: `Windows descendant PID ${process.pid} has an unverified parent ${process.parentPid} (child=${JSON.stringify(process.creationDate)}, expectedParent=${JSON.stringify(identities.get(process.parentPid))}, observedParent=${JSON.stringify(currentByPid.get(process.parentPid)?.creationDate)}).` };
 		}
 	}
 	const discovered = new Map<number, WindowsProcessSnapshot>();
@@ -161,10 +137,10 @@ export function discoverVerifiedOwnedWindowsProcesses(
 			const parentCreated = parent ? windowsCreationTime(parent.creationDate) : undefined;
 			const childCreated = windowsCreationTime(process.creationDate);
 			if (parentCreated === undefined || childCreated === undefined) {
-				return { diagnostic: `Windows descendant PID ${process.pid} has no verifiable creation identity.` };
+				return { diagnostic: `Windows descendant PID ${process.pid} has no verifiable creation identity (child=${JSON.stringify(process.creationDate)}, parent=${JSON.stringify(parent?.creationDate)}).` };
 			}
 			if (childCreated < parentCreated) {
-				return { diagnostic: `Windows descendant PID ${process.pid} predates parent PID ${process.parentPid}; ownership is unverified.` };
+				return { diagnostic: `Windows descendant PID ${process.pid} predates parent PID ${process.parentPid}; ownership is unverified (child=${JSON.stringify(process.creationDate)}, parent=${JSON.stringify(parent?.creationDate)}).` };
 			}
 			verifiedParents.add(process.pid);
 			discovered.set(process.pid, process);
@@ -174,17 +150,23 @@ export function discoverVerifiedOwnedWindowsProcesses(
 	return [...discovered.values()];
 }
 
-function terminateWindowsPid(pid: number): void {
-	spawnSync(windowsSystemExecutable("taskkill.exe"), ["/PID", String(pid), "/F"], {
-		encoding: "utf-8",
-		timeout: PROCESS_SNAPSHOT_TIMEOUT_MS,
-		...WINDOWS_HIDDEN_PROCESS_OPTIONS,
-	});
+/** Only a signaled retained kernel handle can retire an identity, never a missing/reused row. */
+export function reconcileWindowsProcessSnapshot(
+	processes: WindowsProcessSnapshot[],
+	retained: ReadonlyMap<number, RetainedWindowsProcess>,
+	identities: ReadonlyMap<number, string>,
+): WindowsProcessSnapshot[] {
+	return processes.filter((row) => !hasWindowsProcessExitProof(identities.get(row.pid), retained.get(row.pid)));
+}
+
+export function hasWindowsProcessExitProof(identity: string | undefined, proof: RetainedWindowsProcess | undefined): boolean {
+	return identity !== undefined && proof?.creationDate === identity && proof.exited;
 }
 
 async function terminateWindowsTree(
 	pid: number,
 	identities: Map<number, string>,
+	retained: Map<number, RetainedWindowsProcess>,
 	rootObserved: boolean,
 	writerClosed: boolean,
 	verifyMs: number,
@@ -196,8 +178,9 @@ async function terminateWindowsTree(
 
 	let deadline: number | undefined;
 	while (true) {
-		const current = enumerateWindowsProcesses();
-		if (!Array.isArray(current)) return { state: "unknown", reason: "verification-failed", diagnostic: current.diagnostic };
+		const snapshot = observeWindowsProcesses(retained);
+		if (!Array.isArray(snapshot)) return { state: "unknown", reason: "verification-failed", diagnostic: snapshot.diagnostic };
+		const current = reconcileWindowsProcessSnapshot(snapshot, retained, identities);
 		const discovered = discoverVerifiedOwnedWindowsProcesses(
 			current,
 			identities,
@@ -211,16 +194,30 @@ async function terminateWindowsTree(
 		}
 		const active = current.filter((process) => identities.get(process.pid) === process.creationDate);
 		if (active.length === 0) {
+			const unresolved = [...identities].filter(([id, identity]) => {
+				return !hasWindowsProcessExitProof(identity, retained.get(id));
+			});
+			if (unresolved.length) return { state: "unknown", reason: "verification-failed", diagnostic: `Windows retained identity has no exit proof: ${unresolved.map(([id, identity]) => `${id} (expected=${JSON.stringify(identity)}, retained=${JSON.stringify(retained.get(id)?.creationDate)})`).join(", ")}.` };
 			return priorDiagnostic
 				? { state: "unknown", reason: "verification-failed", diagnostic: priorDiagnostic }
 				: { state: "observed", mechanism: "windows-process-snapshot", rootProcessId: pid, verifiedAt: Date.now() };
 		}
 		if (deadline !== undefined && Date.now() >= deadline) {
-			return { state: "unknown", reason: "verification-failed", diagnostic: `Windows process tree ${pid} still has active members: ${active.map((process) => process.pid).join(", ")}.` };
+			return { state: "unknown", reason: "verification-failed", diagnostic: `Windows process tree ${pid} still has active members: ${active.map((process) => `${process.pid} (expected=${JSON.stringify(identities.get(process.pid))}, observed=${JSON.stringify(process.creationDate)})`).join(", ")}.` };
 		}
-		for (const process of active) terminateWindowsPid(process.pid);
-		// Start the grace period after signaling so slow enumeration cannot consume it before cleanup begins.
+		const targets = new Map<number, RetainedWindowsProcess>();
+		for (const process of active) {
+			const proof = retained.get(process.pid);
+			if (!proof || proof.creationDate !== process.creationDate) {
+				return { state: "unknown", reason: "verification-failed", diagnostic: `Windows owned PID ${process.pid} has no retained handle (expected=${JSON.stringify(identities.get(process.pid))}, observed=${JSON.stringify(process.creationDate)}, retained=${JSON.stringify(proof?.creationDate)}).` };
+			}
+			targets.set(process.pid, proof);
+		}
+		// The verification budget is shared by the whole batch, not restarted per PID.
 		deadline ??= Date.now() + verifyMs;
+		const failure = signalRetainedWindowsProcesses(targets, Math.max(0, deadline - Date.now()));
+		if (failure) return { state: "unknown", reason: "signal-failed", diagnostic: failure.diagnostic };
+
 		const remaining = deadline - Date.now();
 		if (remaining > 0) {
 			await new Promise<void>((resolve) => setTimeout(resolve, Math.min(VERIFY_INTERVAL_MS, remaining)));
@@ -250,7 +247,8 @@ function observedUnlessLiveDetached(processGroupId: number, detached: readonly n
 export interface OwnedProcessTreeController {
 	terminate(): Promise<ProcessTreeTerminal>;
 	finishAfterWriterClose(): Promise<ProcessTreeTerminal>;
-	/** Stop observation without signaling or certifying cleanup; no later termination is allowed. */
+	/** Stop observation without signaling or certifying cleanup; no later termination is allowed.
+	 * Throws if native ownership-handle release fails; the cached terminal result remains UNKNOWN. */
 	dispose(): void;
 }
 
@@ -259,9 +257,11 @@ export function createOwnedProcessTreeController(
 	options: { termGraceMs?: number; killVerifyMs?: number } = {},
 ): OwnedProcessTreeController {
 	let termination: Promise<ProcessTreeTerminal> | undefined;
+	let releaseDiagnostic: string | undefined;
 	const windows = process.platform === "win32";
 	const target = windows ? pid : -pid;
-	const initialWindowsProcesses = windows ? enumerateWindowsProcesses() : undefined;
+	const retainedWindowsProcesses = new Map<number, RetainedWindowsProcess>();
+	const initialWindowsProcesses = windows ? observeWindowsProcesses(retainedWindowsProcesses, pid) : undefined;
 	const windowsIdentities = new Map<number, string>();
 	let ownershipMonitorFailure: string | undefined;
 	const initialWindowsRoot = Array.isArray(initialWindowsProcesses)
@@ -278,7 +278,8 @@ export function createOwnedProcessTreeController(
 	}
 	const ownershipMonitor = windows
 		? setInterval(() => {
-			const snapshot = enumerateWindowsProcesses();
+			const observedSnapshot = observeWindowsProcesses(retainedWindowsProcesses);
+			const snapshot = Array.isArray(observedSnapshot) ? reconcileWindowsProcessSnapshot(observedSnapshot, retainedWindowsProcesses, windowsIdentities) : observedSnapshot;
 			if (!Array.isArray(snapshot)) {
 				ownershipMonitorFailure ??= snapshot.diagnostic;
 				return;
@@ -296,10 +297,21 @@ export function createOwnedProcessTreeController(
 	const initialPosixMembers = windows ? undefined : activeProcessGroupMembers(pid);
 	const initialDetached = windows ? undefined : knownDetachedDescendants(pid);
 
+	const settleWithRelease = (terminal: ProcessTreeTerminal): ProcessTreeTerminal => {
+		if (!windows) return terminal;
+		releaseDiagnostic = releaseWindowsProcesses(retainedWindowsProcesses)?.diagnostic;
+		if (!releaseDiagnostic) return terminal;
+		return {
+			state: "unknown", reason: "verification-failed",
+			diagnostic: terminal.state === "unknown" && terminal.diagnostic
+				? `${terminal.diagnostic} ${releaseDiagnostic}` : releaseDiagnostic,
+		};
+	};
+
 	const finish = (writerClosed: boolean): Promise<ProcessTreeTerminal> => {
 		if (termination) return termination;
 		if (ownershipMonitor) clearInterval(ownershipMonitor);
-		termination = (async () => {
+		termination = (async (): Promise<ProcessTreeTerminal> => {
 			if (windows) {
 				if (!Array.isArray(initialWindowsProcesses)) {
 					return { state: "unknown", reason: "verification-failed", diagnostic: initialWindowsProcesses!.diagnostic };
@@ -307,6 +319,7 @@ export function createOwnedProcessTreeController(
 				return terminateWindowsTree(
 					pid,
 					windowsIdentities,
+					retainedWindowsProcesses,
 					initialWindowsRoot !== undefined,
 					writerClosed,
 					options.killVerifyMs ?? DEFAULT_KILL_VERIFY_MS,
@@ -345,7 +358,10 @@ export function createOwnedProcessTreeController(
 				return { state: "unknown", reason: "verification-failed", diagnostic: killExit.diagnostic };
 			}
 			return observedUnlessLiveDetached(pid, detached);
-		})();
+		})().then(settleWithRelease, (error: unknown) => {
+			if (!windows) throw error;
+			return settleWithRelease({ state: "unknown", reason: "verification-failed", diagnostic: diagnostic(error) });
+		});
 		return termination;
 	};
 
@@ -354,10 +370,15 @@ export function createOwnedProcessTreeController(
 		finishAfterWriterClose: () => finish(true),
 		dispose: () => {
 			if (ownershipMonitor) clearInterval(ownershipMonitor);
-			termination ??= Promise.resolve({
-				state: "unknown", reason: "verification-failed",
-				diagnostic: "Process-tree observation was released without cleanup proof.",
-			});
+			if (!termination) {
+				termination = Promise.resolve(settleWithRelease({
+					state: "unknown", reason: "verification-failed",
+					diagnostic: "Process-tree observation was released without cleanup proof.",
+				}));
+			}
+			// Keep the void interface, but make failed disposal observable and cache its
+			// UNKNOWN result. Repeated calls never retry potentially recycled handles.
+			if (releaseDiagnostic) throw new Error(releaseDiagnostic);
 		},
 	};
 }

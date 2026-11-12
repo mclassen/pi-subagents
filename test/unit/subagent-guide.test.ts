@@ -30,14 +30,19 @@ describe("subagent guide", () => {
 	it("documents failed-lane recovery boundaries in packaged guide topics", () => {
 		const workflows = readSubagentGuide("workflows");
 		const toolReference = readSubagentGuide("tool-reference");
-		assert.match(workflows, /subagent workflow[\s\S]*child launch[\s\S]*prompt runtime[\s\S]*extension loading[\s\S]*child tooling setup[\s\S]*lane infrastructure blocker/);
-		assert.match(workflows, /exact failure[\s\S]*run\/status[\s\S]*(?:repo|repository)\/cwd\/worktree\/branch\/ref/);
-		assert.match(workflows, /clean[\s\S]*partial diff/);
-		assert.match(workflows, /same-protocol retry/);
-		assert.match(workflows, /asking the owner/);
-		assert.match(workflows, /external\/foreground\/CLI fallback requires explicit owner approval/);
-		assert.match(workflows, /Pi core[\s\S]*pi -ne[\s\S]*out-of-repo hint[\s\S]*not protocol-approved fallback/);
-		assert.match(toolReference, /lane infrastructure blocker[\s\S]*external\/foreground\/CLI fallback requires explicit owner approval[\s\S]*interactive_shell[\s\S]*pi -ne/);
+		for (const guide of [workflows, toolReference]) {
+			assert.match(guide, /failed\/disappeared runner is not task success/);
+			assert.match(guide, /subagent workflow[\s\S]*child launch[\s\S]*prompt runtime[\s\S]*extension loading[\s\S]*child tooling setup[\s\S]*lane infrastructure blockers/);
+			assert.match(guide, /exact failure[\s\S]*run\/status[\s\S]*(?:repo|repository)\/cwd\/worktree\/branch\/ref/);
+			assert.match(guide, /preserve tracked AND untracked partial edits/);
+			assert.match(guide, /old writer is terminal or demonstrably gone[\s\S]*exclusive ownership/);
+			assert.match(guide, /One bounded same-protocol recovery attempt[\s\S]*without fresh user confirmation[\s\S]*same approved model\/provider\/tools/);
+			assert.match(guide, /eligible retained-child resume by exact ID[\s\S]*unavailable or rejected[\s\S]*same-role replacement[\s\S]*distinct isolated workspace/);
+			assert.match(guide, /change the approach based on failure evidence/i);
+			assert.match(guide, /recovery fails again[\s\S]*ownership or authority is unresolved[\s\S]*stop[\s\S]*ask for the smallest needed decision/);
+			assert.match(guide, /No automatic execution-mode\/model\/provider fallback[\s\S]*external\/foreground\/CLI switching requires explicit owner approval/);
+			assert.match(guide, /Pi core's generic `pi -ne` extension-load hint is not protocol-approved fallback/);
+		}
 	});
 
 	it("keeps advanced workflow details in the packaged guide", () => {

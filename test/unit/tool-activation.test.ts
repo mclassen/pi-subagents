@@ -17,6 +17,8 @@ function createRuntime(messages: any[] = [], excluded: string[] = [], missingApi
 	const handlers = new Map<string, Handler[]>();
 	const tools = new Map<string, Tool>();
 	let activeNames = ["read"];
+	const selectionWrites: string[][] = [];
+	let selectionFailure: "throw" | "ignore" | undefined;
 	const excludedNames = new Set(excluded);
 	const missingApiNames = new Set(missingApis);
 	const pi = new Proxy({
@@ -35,6 +37,9 @@ function createRuntime(messages: any[] = [], excluded: string[] = [], missingApi
 		},
 		getActiveTools() { return [...activeNames]; },
 		setActiveTools(names: string[]) {
+			selectionWrites.push([...names]);
+			if (selectionFailure === "throw") throw new Error("selection restricted");
+			if (selectionFailure === "ignore") return;
 			const available = new Set([...tools.keys(), "read"].filter((name) => !excludedNames.has(name)));
 			activeNames = [...new Set(names.filter((name) => available.has(name)))];
 		},
@@ -68,7 +73,12 @@ function createRuntime(messages: any[] = [], excluded: string[] = [], missingApi
 	}
 	runtimes.push({ handlers, context });
 	return {
-		handlers, tools, context,
+		handlers, tools, context, selectionWrites,
+		failSelection: (failure: "throw" | "ignore") => { selectionFailure = failure; },
+		declarations: () => JSON.stringify(activeNames.map((name) => {
+			const tool = tools.get(name);
+			return { name, description: tool?.description, promptSnippet: tool?.promptSnippet, parameters: tool?.parameters };
+		})),
 		active: () => [...activeNames],
 		select: (names: string[]) => { activeNames = [...names]; },
 		async emit(name: string, event: any) {
@@ -110,9 +120,15 @@ describe("subagent tool activation", () => {
 		assert.notEqual(result?.isError, true);
 		assert.ok(runtime.active().includes("subagent"));
 		assert.ok(runtime.active().includes("read"));
+		assert.equal(runtime.selectionWrites.length, 2, "cold start and first enable change membership");
+		assert.match(result?.content?.[0]?.text ?? "", /reuse.*capability discovery.*same established runtime\/agent\/model\/tool configuration/i);
+		assert.match(result?.content?.[0]?.text ?? "", /otherwise.*subagent\(\{action:"list",capabilities:true\}\)/i);
 		const enabled = runtime.active();
+		const declarations = runtime.declarations();
 		await loader.execute?.("enable-again", {}, new AbortController().signal, undefined, runtime.context);
 		assert.deepEqual(runtime.active(), enabled);
+		assert.equal(runtime.selectionWrites.length, 2, "repeated enable must not write an identical selection");
+		assert.equal(runtime.declarations(), declarations);
 	});
 
 	it("restores native cold and warm transcript selections across start, reload, and tree navigation", async () => {
@@ -121,16 +137,33 @@ describe("subagent tool activation", () => {
 		const cold = createRuntime(history);
 		await cold.emit("session_start", { type: "session_start", reason: "reload" });
 		assert.equal(cold.active().includes("subagent"), false);
+		assert.equal(cold.selectionWrites.length, 1);
+		const coldDeclarations = cold.declarations();
 		await cold.emit("session_tree", { type: "session_tree", newLeafId: null, oldLeafId: null });
 		assert.equal(cold.active().includes("subagent"), false);
+		assert.equal(cold.selectionWrites.length, 1, "identical cold restoration must not write");
+		assert.equal(cold.declarations(), coldDeclarations);
 		history.push({ role: "system", content: "", toolsAdded: [tool], timestamp: 2 });
 		await cold.emit("session_tree", { type: "session_tree", newLeafId: null, oldLeafId: null });
 		assert.ok(cold.active().includes("subagent"));
+		assert.equal(cold.selectionWrites.length, 2, "tree membership addition must write");
+		assert.notEqual(cold.declarations(), coldDeclarations);
+		history.push({ role: "system", content: "", toolsAdded: [], toolsRemoved: [tool], timestamp: 3 } as any);
+		await cold.emit("session_tree", { type: "session_tree", newLeafId: null, oldLeafId: null });
+		assert.equal(cold.active().includes("subagent"), false);
+		assert.equal(cold.selectionWrites.length, 3, "tree membership removal must write");
+		assert.equal(cold.declarations(), coldDeclarations);
 
 		const warm = createRuntime([{ role: "system", content: "", toolsAdded: [tool], timestamp: 1 }]);
 		await warm.emit("session_start", { type: "session_start", reason: "resume" });
 		assert.ok(warm.active().includes("subagent"));
 		assert.ok(warm.active().includes("subagents_enable"));
+		assert.equal(warm.selectionWrites.length, 0, "warm selection is already active after registration");
+		const warmDeclarations = warm.declarations();
+		await warm.emit("session_start", { type: "session_start", reason: "reload" });
+		await warm.emit("session_tree", { type: "session_tree", newLeafId: null, oldLeafId: null });
+		assert.equal(warm.selectionWrites.length, 0, "identical warm restoration must not write");
+		assert.equal(warm.declarations(), warmDeclarations);
 	});
 
 	it("keeps eager compatibility for legacy history and when the loader is restricted", async () => {
@@ -143,6 +176,7 @@ describe("subagent tool activation", () => {
 		await restricted.emit("session_start", { type: "session_start", reason: "startup" });
 		assert.ok(restricted.active().includes("subagent"));
 		assert.equal(restricted.active().includes("subagents_enable"), false);
+		assert.equal(restricted.selectionWrites.length, 0);
 	});
 
 	it("does not activate delegation from prompt keywords and reports an unavailable target", async () => {
@@ -167,9 +201,46 @@ describe("subagent tool activation", () => {
 
 		(runtime.tools as Map<string, Tool>).delete("subagent");
 		const loader = runtime.tools.get("subagents_enable");
+		const writes = runtime.selectionWrites.length;
 		const result = await loader?.execute?.("missing", {}, new AbortController().signal, undefined, runtime.context);
 		assert.equal(result?.isError, true);
 		assert.match(result?.content?.[0]?.text ?? "", /unavailable.*subagent/i);
+		assert.deepEqual(result?.details, { unavailable: ["subagent"] });
+		assert.equal(runtime.selectionWrites.length, writes, "unavailable target must not write");
+	});
+
+	it("normalizes selections while preserving order and real membership changes", async () => {
+		const runtime = createRuntime();
+		await runtime.emit("session_start", { type: "session_start", reason: "startup" });
+		runtime.select(["subagents_enable", "read", "read"]);
+		const loader = runtime.tools.get("subagents_enable")!;
+		await loader.execute?.("ordered-enable", {}, new AbortController().signal, undefined, runtime.context);
+		assert.deepEqual(runtime.selectionWrites.at(-1), ["subagents_enable", "read", "subagent"]);
+		assert.deepEqual(runtime.active(), ["subagents_enable", "read", "subagent"]);
+		const writes = runtime.selectionWrites.length;
+		const declarations = runtime.declarations();
+		await loader.execute?.("ordered-enable-again", {}, new AbortController().signal, undefined, runtime.context);
+		assert.equal(runtime.selectionWrites.length, writes);
+		assert.equal(runtime.declarations(), declarations);
+		runtime.select(["read", "subagent"]);
+		await loader.execute?.("restore-loader", {}, new AbortController().signal, undefined, runtime.context);
+		assert.deepEqual(runtime.active(), ["read", "subagent", "subagents_enable"]);
+		assert.equal(runtime.selectionWrites.length, writes + 1, "missing loader membership must still write");
+	});
+
+	it("reports missing activation when the host rejects or ignores a selection change", async () => {
+		for (const failure of ["throw", "ignore"] as const) {
+			const runtime = createRuntime();
+			await runtime.emit("session_start", { type: "session_start", reason: "startup" });
+			const declarations = runtime.declarations();
+			runtime.failSelection(failure);
+			const result = await runtime.tools.get("subagents_enable")?.execute?.("restricted", {}, new AbortController().signal, undefined, runtime.context);
+			assert.equal(result?.isError, true);
+			assert.deepEqual(result?.details, { missing: ["subagent"] });
+			assert.match(result?.content?.[0]?.text ?? "", /Activation failed/);
+			assert.equal(runtime.selectionWrites.length, 2, "real membership change must reach the host");
+			assert.equal(runtime.declarations(), declarations);
+		}
 	});
 });
 

@@ -15,7 +15,7 @@ export interface FastWorkModel {
 export type FastWorkRoles = Record<FastWorkRole, FastWorkModel>;
 export const DEFAULT_FAST_WORK_ROLES = {
 	ORCHESTRATOR: { model: "openai-codex/gpt-6.1-sol", thinking: "medium" },
-	WORKER_STANDARD: { model: "openai-codex/gpt-6.1-sol", thinking: "medium" },
+	WORKER_STANDARD: { model: "openai-codex/gpt-6.1-terra", thinking: "medium" },
 	WORKER_STRONG: { model: "openai-codex/gpt-6.1-sol", thinking: "medium" },
 } as const satisfies Readonly<Record<FastWorkRole, Readonly<FastWorkModel>>>;
 

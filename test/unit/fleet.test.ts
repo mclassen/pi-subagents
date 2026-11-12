@@ -1035,7 +1035,9 @@ describe("native subagent fleet", () => {
 	});
 
 	it("renders selectable transcript detail and completed artifact paths within terminal width", () => {
-		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-fleet-render-"));
+		const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-fleet-render-"));
+		const root = path.join(tempRoot, ...Array.from({ length: 6 }, (_, index) => `${index}-${"long-artifact-root-".repeat(7)}`), "資料-é-🧪");
+		fs.mkdirSync(root, { recursive: true });
 		try {
 			const asyncDir = writeAsyncRun(root, { id: "async-finished", state: "complete", contexts: ["fork"], output: "FINAL ASYNC OUTPUT" });
 			const state = stateForTest();
@@ -1056,6 +1058,22 @@ describe("native subagent fleet", () => {
 				assert.ok(lines.some((line) => line.includes("worker") && line.includes("[fork]")));
 				assert.ok(lines.some((line) => line.includes("worker.jsonl")));
 				for (const line of lines) assert.ok(visibleWidth(line) <= 100, `line exceeded width: ${line}`);
+				for (const width of [60, 80, 100]) {
+					const rendered = component.render(width);
+					assert.ok(rendered.some((line) => line.includes("output-0.log")), `missing output basename at ${width}`);
+					assert.ok(rendered.some((line) => line.includes("worker.jsonl")), `missing session basename at ${width}`);
+					assert.ok(rendered.some((line) => line.includes("FINAL ASYNC OUTPUT")));
+					for (const line of rendered) assert.ok(visibleWidth(line) <= width);
+				}
+				// Full paths remain in the scrollable detail, not just basename summaries.
+				for (let page = 0; page < 20; page++) component.handleInput("\x1b[5~");
+				const detailRows: string[] = [];
+				for (let row = 0; row < 100; row++) {
+					detailRows.push(component.render(100)[3]!.split("│")[2]!.trim());
+					component.handleInput("J");
+				}
+				assert.ok(detailRows.join("").includes(path.join(asyncDir, "output-0.log")));
+				assert.ok(detailRows.join("").includes(path.join(asyncDir, "worker.jsonl")));
 				tui.terminal.rows = 10;
 				assert.ok(component.render(100).length <= 8, "short-terminal render should fit the overlay's 85% height cap");
 				component.handleInput("\x1b[6~");
@@ -1063,6 +1081,77 @@ describe("native subagent fleet", () => {
 				assert.ok(renderRequests >= 2);
 				component.handleInput("\x1b");
 				assert.equal(closed, true);
+			} finally {
+				component.dispose();
+			}
+		} finally {
+			fs.rmSync(tempRoot, { recursive: true, force: true });
+		}
+	});
+
+	it("renders selectable transcript detail with narrow Unicode artifact summaries and ANSI styling", () => {
+		const state = stateForTest();
+		const basename = "資料-é-🧪.jsonl";
+		const sessionFile = path.join(process.cwd(), "long-directory/".repeat(30), basename);
+		state.foregroundRuns!.set("unicode-artifacts", {
+			runId: "unicode-artifacts", mode: "single", cwd: process.cwd(), sessionId: "session-current", updatedAt: 200,
+			children: [{ agent: "worker", index: 0, status: "completed", sessionFile, finalOutput: "UNICODE RESULT" }],
+		});
+		const component = new SubagentFleetComponent(
+			{ terminal: { rows: 32 }, requestRender() {} },
+			{ fg: (_name: string, text: string) => `\x1b[36m${text}\x1b[0m`, bold: (text: string) => `\x1b[1m${text}\x1b[0m` } as never,
+			state, () => {}, { refreshMs: 60_000, markdownTheme },
+		);
+		try {
+			for (const width of [36, 60, 80, 100]) {
+				const lines = component.render(width);
+				for (const line of lines) assert.ok(visibleWidth(line) <= width);
+				if (width >= 60) assert.ok(lines.some((line) => line.includes(basename)));
+				assert.ok(lines.length <= 27);
+			}
+		} finally {
+			component.dispose();
+		}
+	});
+
+	it("renders selectable transcript detail without treating artifact-looking output as metadata", () => {
+		const state = stateForTest();
+		const output = `Output: ${"ordinary-output/".repeat(12)}BODY_ONLY.txt`;
+		state.foregroundRuns!.set("artifact-looking-output", {
+			runId: "artifact-looking-output", mode: "single", cwd: process.cwd(), sessionId: "session-current", updatedAt: 200,
+			children: [{ agent: "worker", index: 0, status: "completed", finalOutput: output }],
+		});
+		const component = new SubagentFleetComponent(
+			{ terminal: { rows: 120 }, requestRender() {} }, theme as never,
+			state, () => {}, { refreshMs: 60_000, markdownTheme },
+		);
+		try {
+			const detail = component.render(100).slice(3, -3).map((line) => line.split("│")[2]!.trim()).join("");
+			assert.ok(detail.includes(output.slice("Output: ".length)), "the original transcript path text should remain intact");
+			assert.equal(detail.split("BODY_ONLY.txt").length - 1, 1, "transcript text must not produce an extra artifact summary");
+		} finally {
+			component.dispose();
+		}
+	});
+
+	it("renders selectable transcript detail without treating async recentOutput as artifact metadata", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-fleet-recent-output-"));
+		try {
+			const asyncDir = writeAsyncRun(root, { id: "recent-output", state: "complete" });
+			const outputPath = `${"ordinary-output/".repeat(12)}BODY_ONLY.txt`;
+			const statusFile = path.join(asyncDir, "status.json");
+			const status = JSON.parse(fs.readFileSync(statusFile, "utf-8"));
+			status.steps[0].recentOutput = [`Output: ${outputPath}`];
+			fs.writeFileSync(statusFile, JSON.stringify(status), "utf-8");
+			const component = new SubagentFleetComponent(
+				{ terminal: { rows: 120 }, requestRender() {} }, theme as never,
+				stateForTest(), () => {}, { asyncDirRoot: root, resultsDir: path.join(root, "results"), refreshMs: 60_000, markdownTheme },
+			);
+			try {
+				const detail = component.render(100).slice(3, -3).map((line) => line.split("│")[2]!.trim()).join("");
+				assert.ok(detail.includes("Recent output from status.json:"), "exercise the recent-output fallback");
+				assert.ok(detail.includes(outputPath), "the original recent-output path text should remain intact");
+				assert.equal(detail.split("BODY_ONLY.txt").length - 1, 1, "recentOutput must not produce an extra artifact summary");
 			} finally {
 				component.dispose();
 			}

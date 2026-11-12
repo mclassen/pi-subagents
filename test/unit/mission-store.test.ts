@@ -5,6 +5,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { describe, it } from "node:test";
 import { handleMissionAction } from "../../src/missions/actions.ts";
+import { prepareMissionLaunch } from "../../src/missions/lifecycle.ts";
 import {
 	createMission,
 	listGlobalMissions,
@@ -94,7 +95,7 @@ describe("mission store", () => {
 			const created = createMission(test.location, {
 				title: "Unbudgeted goal", objective: "Continue without a token cap", goal: true, status: "active",
 			}, now);
-			assert.deepEqual(created.goal, { status: "active" });
+			assert.deepEqual(created.goal, { status: "active", maxIterations: 8, iterationsStarted: 0, iterationActive: false });
 			assert.deepEqual(created.usage, { tokens: 0 });
 			assert.equal(Object.hasOwn(created, "budget"), false);
 			assert.deepEqual(readMission(test.location, created.id), created);
@@ -102,7 +103,7 @@ describe("mission store", () => {
 				summary: "Work recorded",
 				addRuns: [{ runId: "run-1", mode: "single", status: "complete", usage: { tokens: 250_000 } }],
 			}, now);
-			assert.deepEqual(updated.goal, { status: "active" });
+			assert.deepEqual(updated.goal, { status: "active", maxIterations: 8, iterationsStarted: 0, iterationActive: false });
 			assert.deepEqual(updated.usage, { tokens: 250_000 });
 			assert.equal(Object.hasOwn(updated, "budget"), false);
 			assert.equal(updateMission(test.location, created.id, { goal: { status: "paused" } }, now).goal?.status, "paused");
@@ -126,7 +127,7 @@ describe("mission store", () => {
 				goal: { status: "active" },
 				addRuns: [{ runId: "run-1", mode: "single", usage: { tokens: 12 } }],
 			}, now);
-			assert.deepEqual(enabled.goal, { status: "active" });
+			assert.deepEqual(enabled.goal, { status: "active", maxIterations: 8, iterationsStarted: 0, iterationActive: false });
 			assert.deepEqual(enabled.usage, { tokens: 12 });
 			assert.equal(Object.hasOwn(enabled, "budget"), false);
 			assert.deepEqual(readMission(test.location, created.id), enabled);
@@ -136,22 +137,118 @@ describe("mission store", () => {
 		}
 	});
 
-	it("still validates explicit goal token budgets on create, update, and read", () => {
+	it("keeps token usage informational and creates goals with iteration limits", () => {
 		const test = fixture();
 		try {
-			const input = { title: "Budget validation", objective: "Reject invalid caps", goal: true };
-			const created = createMission(test.location, input);
-			for (const tokens of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
-				assert.throws(() => createMission(test.location, { ...input, budget: { tokens } }), /positive integer/);
-				assert.throws(() => updateMission(test.location, created.id, { budget: { tokens } }), /positive integer/);
-				const recordPath = path.join(test.location.missionDir, `${created.id}.json`);
-				fs.writeFileSync(recordPath, JSON.stringify({ ...created, budget: { tokens } }));
-				assert.throws(() => readMission(test.location, created.id), /positive integer/);
-				fs.writeFileSync(recordPath, JSON.stringify(created));
+			const created = createMission(test.location, { title: "Iteration goal", objective: "Use iteration controls", goal: true });
+			assert.deepEqual(created.goal, { status: "active", maxIterations: 8, iterationsStarted: 0, iterationActive: false });
+			const explicit = createMission(test.location, { title: "Bounded goal", objective: "Use an explicit iteration limit", goal: true, maxIterations: 2 });
+			assert.equal(explicit.goal?.maxIterations, 2);
+			const highUsage = updateMission(test.location, created.id, { usage: { tokens: 900_000_000 } });
+			assert.deepEqual(highUsage.usage, { tokens: 900_000_000 });
+			assert.equal(Object.hasOwn(highUsage, "budget"), false);
+			const admitted = updateMission(test.location, created.id, { goal: { iteration: "begin" } });
+			assert.equal(admitted.goal?.iterationsStarted, 1);
+			assert.equal(admitted.goal?.iterationActive, true);
+			assert.equal(admitted.usage?.tokens, 900_000_000);
+			const checkpoint = updateMission(test.location, created.id, { summary: "Checkpoint metadata" });
+			assert.equal(checkpoint.usage?.tokens, 900_000_000);
+			const completed = updateMission(test.location, created.id, { goal: { iteration: "complete" } });
+			assert.equal(completed.usage?.tokens, 900_000_000);
+		} finally {
+			fs.rmSync(test.root, { recursive: true, force: true });
+		}
+	});
+
+	it("admits goal iterations atomically and enforces pause, decisions, run settlement, and iteration limits", async () => {
+		const test = fixture();
+		try {
+			const mission = createMission(test.location, { title: "Admission", objective: "Control iterations", goal: true, maxIterations: 1, status: "active" });
+			const first = updateMission(test.location, mission.id, { goal: { iteration: "begin" } });
+			assert.equal(first.goal?.iterationsStarted, 1);
+			assert.equal(first.goal?.iterationActive, true);
+			assert.equal(updateMission(test.location, mission.id, { goal: { iteration: "begin" } }).goal?.iterationsStarted, 1, "repeat admission does not count twice");
+			const concurrentMission = createMission(test.location, { title: "Concurrent admission", objective: "Count once across processes", goal: true, maxIterations: 2, status: "active" });
+			const admissionScript = `
+				import { updateMission } from "./src/missions/store.ts";
+				const location = JSON.parse(process.env.MISSION_LOCATION);
+				updateMission(location, process.env.MISSION_ID, { goal: { iteration: "begin" } });
+			`;
+			const beginFromProcess = () => new Promise<void>((resolve, reject) => {
+				let stderr = "";
+				const child = spawn(process.execPath, ["--experimental-strip-types", "--input-type=module", "--eval", admissionScript], {
+					cwd: process.cwd(),
+					env: { ...process.env, MISSION_LOCATION: JSON.stringify(test.location), MISSION_ID: concurrentMission.id },
+					stdio: ["ignore", "ignore", "pipe"],
+					windowsHide: true,
+				});
+				child.stderr?.on("data", (chunk) => { stderr += String(chunk); });
+				child.once("error", reject);
+				child.on("exit", (code, signal) => code === 0 && signal === null ? resolve() : reject(new Error(`Concurrent admission failed (${code}/${signal}): ${stderr}`)));
+			});
+			await Promise.all([beginFromProcess(), beginFromProcess()]);
+			assert.equal(readMission(test.location, concurrentMission.id).goal?.iterationsStarted, 1, "concurrent admission increments once");
+			updateMission(test.location, mission.id, { addRuns: [{ runId: "active-run", mode: "single", status: "running" }] });
+			assert.throws(() => updateMission(test.location, mission.id, { goal: { iteration: "complete" } }), /Settle linked runs/);
+			updateMission(test.location, mission.id, { addRuns: [{ runId: "active-run", mode: "single", status: "completed" }] });
+			const completed = updateMission(test.location, mission.id, { goal: { iteration: "complete" } });
+			assert.equal(completed.goal?.iterationActive, false);
+			assert.equal(completed.goal?.status, "iteration-limit");
+			assert.throws(() => updateMission(test.location, mission.id, { goal: { iteration: "begin" } }), /paused, blocked, closed, or at its iteration limit/);
+
+			for (const blocked of ["paused", "cancelled", "decision"] as const) {
+				const record = createMission(test.location, { title: `Blocked ${blocked}`, objective: "Must not launch", goal: true, status: "active" });
+				if (blocked === "paused") updateMission(test.location, record.id, { goal: { status: "paused" } });
+				if (blocked === "cancelled") updateMission(test.location, record.id, { status: "cancelled" });
+				if (blocked === "decision") updateMission(test.location, record.id, { addDecisions: [{ title: "Need a choice" }] });
+				assert.throws(() => updateMission(test.location, record.id, { goal: { iteration: "begin" } }), /paused, blocked, closed, or at its iteration limit/);
 			}
-			const budgeted = updateMission(test.location, created.id, { budget: { tokens: 10 }, usage: { tokens: 10 } });
-			assert.equal(budgeted.goal?.status, "budget-exhausted");
-			assert.equal(updateMission(test.location, created.id, { budget: { tokens: 20 }, usage: { tokens: 10 } }).goal?.status, "active");
+			assert.throws(() => updateMission(test.location, mission.id, { goal: { iterationsStarted: 0 } }), /cannot be rewritten or reset/);
+		} finally {
+			fs.rmSync(test.root, { recursive: true, force: true });
+		}
+	});
+
+	it("rejects mission relaunch when an open decision blocks an active planned goal", () => {
+		const test = fixture();
+		try {
+			const mission = createMission(test.location, {
+				title: "Decision-blocked goal",
+				objective: "Do not launch before resolving the decision",
+				goal: true,
+				status: "planned",
+				ownerSessionId: "mission-owner",
+			});
+			updateMission(test.location, mission.id, { goal: { iteration: "begin" } });
+			updateMission(test.location, mission.id, { addDecisions: [{ title: "Choose the next step" }] });
+			const beforeLaunch = readMission(test.location, mission.id);
+			assert.equal(beforeLaunch.status, "planned");
+			assert.equal(beforeLaunch.goal?.iterationActive, true);
+			assert.equal(beforeLaunch.decisions.some((decision) => decision.status === "open"), true);
+
+			assert.throws(() => prepareMissionLaunch({
+				params: { missionId: mission.id, task: "Continue goal" },
+				projectRoot: test.projectRoot,
+				config: { directory: path.relative(test.projectRoot, test.location.missionDir), globalIndexDir: test.location.globalIndexDir },
+				ownerSessionId: "mission-owner",
+			}), /paused, blocked, at its iteration limit, or has no active iteration/);
+			assert.deepEqual(readMission(test.location, mission.id), beforeLaunch, "rejected admission must not change status, decision, or checkpoint");
+		} finally {
+			fs.rmSync(test.root, { recursive: true, force: true });
+		}
+	});
+
+	it("requires evidence-based reconciliation for legacy goal iteration counters", () => {
+		const test = fixture();
+		try {
+			const mission = createMission(test.location, { title: "Legacy goal", objective: "Reconcile checkpoint", goal: true });
+			const recordPath = path.join(test.location.missionDir, `${mission.id}.json`);
+			const legacy = { ...mission, goal: { status: "active" } };
+			fs.writeFileSync(recordPath, JSON.stringify(legacy));
+			assert.throws(() => updateMission(test.location, mission.id, { goal: { iteration: "begin" } }), /Reconcile the existing goal/);
+			const reconciled = updateMission(test.location, mission.id, { goal: { maxIterations: 3, iterationsStarted: 1, iterationActive: true } });
+			assert.deepEqual(reconciled.goal, { status: "active", maxIterations: 3, iterationsStarted: 1, iterationActive: true });
+			assert.throws(() => updateMission(test.location, mission.id, { goal: { iterationsStarted: 2 } }), /cannot be rewritten or reset/);
 		} finally {
 			fs.rmSync(test.root, { recursive: true, force: true });
 		}
@@ -310,6 +407,7 @@ describe("mission store", () => {
 				cwd: process.cwd(),
 				env: { ...process.env, MISSION_LOCATION: JSON.stringify(test.location), MISSION_ID: mission.id, READY_FILE: readyPath },
 				stdio: ["ignore", "pipe", "pipe"],
+				windowsHide: true,
 			});
 			let stderr = "";
 			child.stderr?.on("data", (chunk) => { stderr += String(chunk); });
@@ -353,8 +451,12 @@ describe("mission store", () => {
 	it("recovers abandoned workflow state locks even when the owner pid was reused", () => {
 		const test = fixture();
 		try {
-			const mission = createMission(test.location, { title: "Reused pid", objective: "Recover by lock age" });
-			const state = createMissionWorkflowState(test.location, mission.id);
+			const mission = createMission(test.location, { title: "Reused pid", objective: "Recover by observed process identity" });
+			const state = createMissionWorkflowState(test.location, mission.id, {
+				isProcessAlive: () => true,
+				getProcessStartKey: () => "replacement-process",
+				retryDelaysMs: [],
+			});
 			const lockPath = `${state.path}.lock`;
 			fs.mkdirSync(lockPath, { recursive: true });
 			fs.writeFileSync(path.join(lockPath, "owner.json"), JSON.stringify({ pid: process.pid, token: "abandoned", createdAt: Date.now(), processKey: "stale-process" }), "utf-8");
@@ -409,10 +511,11 @@ describe("mission store", () => {
 			fs.mkdirSync(lockPath, { recursive: true });
 			const staleAt = new Date(Date.now() - 120_000);
 			fs.utimesSync(lockPath, staleAt, staleAt);
+			// Exercise competing reclamation with real process liveness, without an unrelated OS start-key query.
 			const script = `
 				import { createMissionWorkflowState } from "./src/missions/workflow-state.ts";
 				const location = JSON.parse(process.env.MISSION_LOCATION);
-				createMissionWorkflowState(location, process.env.MISSION_ID).set(process.env.STATE_KEY, process.env.STATE_VALUE);
+				createMissionWorkflowState(location, process.env.MISSION_ID, { getProcessStartKey: () => undefined }).set(process.env.STATE_KEY, process.env.STATE_VALUE);
 			`;
 			const spawnWriter = (key: string, value: string) => {
 				let stderr = "";
@@ -420,6 +523,7 @@ describe("mission store", () => {
 					cwd: process.cwd(),
 					env: { ...process.env, MISSION_LOCATION: JSON.stringify(test.location), MISSION_ID: mission.id, STATE_KEY: key, STATE_VALUE: value },
 					stdio: ["ignore", "pipe", "pipe"],
+					windowsHide: true,
 				});
 				child.stderr?.on("data", (chunk) => { stderr += String(chunk); });
 				return new Promise<void>((resolve, reject) => {

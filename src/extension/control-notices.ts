@@ -10,6 +10,7 @@ export interface SubagentControlMessageDetails {
 	asyncDir?: string;
 	childIntercomTarget?: string;
 	noticeText?: string;
+	goalContinuation?: boolean;
 }
 
 export function controlNoticeTarget(details: SubagentControlMessageDetails): string | undefined {
@@ -26,19 +27,24 @@ function deliverControlNotice(input: {
 	details: SubagentControlMessageDetails;
 }): void {
 	const childIntercomTarget = controlNoticeTarget(input.details);
-	const key = controlNotificationKey(input.details.event, childIntercomTarget);
+	const key = input.details.source === "goal" ? input.details.event.runId : controlNotificationKey(input.details.event, childIntercomTarget);
 	if (input.visibleControlNotices.has(key)) return;
 	input.visibleControlNotices.add(key);
 	const noticeText = input.details.noticeText ?? formatControlNoticeMessage(input.details.event, childIntercomTarget);
-	input.pi.sendMessage(
-		{
-			customType: SUBAGENT_CONTROL_MESSAGE_TYPE,
-			content: noticeText,
-			display: true,
-			details: { ...input.details, childIntercomTarget, noticeText },
-		},
-		{ triggerTurn: input.details.source === "async" },
-	);
+	try {
+		input.pi.sendMessage(
+			{
+				customType: SUBAGENT_CONTROL_MESSAGE_TYPE,
+				content: noticeText,
+				display: true,
+				details: { ...input.details, childIntercomTarget, noticeText },
+			},
+			{ triggerTurn: input.details.source === "async" || (input.details.source === "goal" && input.details.goalContinuation === true) },
+		);
+	} catch (error) {
+		input.visibleControlNotices.delete(key);
+		throw error;
+	}
 }
 
 export function handleSubagentControlNotice(input: {

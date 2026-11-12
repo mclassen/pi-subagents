@@ -43,8 +43,9 @@ setTimeout(() => { if (phase === "old") fs.writeFileSync(${JSON.stringify(oldDon
 			? `@echo off\r\n"${process.execPath}" "%~dp0fake-npm.cjs" %*\r\n`
 			: `#!/bin/sh\nexec "${process.execPath}" "$(dirname "$0")/fake-npm.cjs" "$@"\n`);
 		if (process.platform !== "win32") fs.chmodSync(npm, 0o755);
-		const env = { ...process.env, PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}`, HOME: path.join(temp, "home"), USERPROFILE: path.join(temp, "home"), PI_CODING_AGENT_DIR: path.join(temp, "home"), TEST_PROJECT: path.join(fixtureRoot, "project"), TEST_OLD_DONE: oldDone, TEST_NPM_PHASE: "initial", APPDATA: path.join(temp, "missing-appdata") };
-		delete env.PI_OFFLINE;
+		const env: NodeJS.ProcessEnv = { ...process.env, PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}`, HOME: path.join(temp, "home"), USERPROFILE: path.join(temp, "home"), PI_CODING_AGENT_DIR: path.join(temp, "home"), TEST_PROJECT: path.join(fixtureRoot, "project"), TEST_OLD_DONE: oldDone, TEST_NPM_PHASE: "initial", APPDATA: path.join(temp, "missing-appdata") };
+		// Core disables remote catalogs for a defined value; local npm fixtures allow "0".
+		env.PI_OFFLINE = "0";
 		delete env[SUBAGENT_CHILD_ENV];
 		const hostRoot = resolveInstalledPiPackageRoot();
 		if (hostRoot) env[PI_CODING_AGENT_PACKAGE_ROOT_ENV] = hostRoot;
@@ -142,7 +143,7 @@ setTimeout(() => { if (phase === "old") fs.writeFileSync(${JSON.stringify(oldDon
 			start({ reason: "reload" }, ctx);
 			await assert.rejects(tools.get("subagent").execute("invalid", { action: "list" }, new AbortController().signal, undefined, ctx), /Failed to parse settings file/);
 			console.log("responsive session_start; complete first prompt and loader");
-		`], { cwd: repo, env, encoding: "utf8", timeout: 30_000 });
+		`], { cwd: repo, env, encoding: "utf8", windowsHide: true, timeout: 30_000 });
 		assert.match(output, /responsive session_start; complete first prompt and loader/);
 	} finally {
 		fs.rmSync(temp, { recursive: true, force: true });

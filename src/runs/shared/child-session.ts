@@ -336,6 +336,31 @@ export function createDefaultChildSessionFactory(options: DefaultChildSessionFac
 				...(launch.appendSystemPrompt !== undefined ? { appendSystemPrompt: [launch.appendSystemPrompt] } : {}),
 			});
 			let shutdownFailure: unknown;
+			const shutdownSession = async (session: Awaited<ReturnType<PiCodingAgentModule["createAgentSession"]>>["session"]): Promise<void> => {
+				let timer: ReturnType<typeof setTimeout> | undefined;
+				let unsubscribeError: (() => void) | undefined;
+				try {
+					const runner = session.extensionRunner;
+					if (runner.hasHandlers("session_shutdown")) {
+						// Initial selection rejection can precede bindExtensions' listener.
+						// Pi dispatches hook failures through onError, not emit rejection.
+						unsubscribeError = runner.onError((error) => {
+							if (error.event === "session_shutdown") shutdownFailure = error.error;
+						});
+						await Promise.race([
+							runner.emit({ type: "session_shutdown", reason: "quit" }),
+							new Promise<never>((_resolve, reject) => {
+								timer = setTimeout(() => reject(new Error("Child session shutdown timed out; cleanup is unverified.")), shutdownTimeoutMs);
+							}),
+						]);
+					}
+					if (shutdownFailure !== undefined) throw new Error(`Child session shutdown failed: ${String(shutdownFailure)}`);
+				} finally {
+					if (timer !== undefined) clearTimeout(timer);
+					try { unsubscribeError?.(); } finally { session.dispose(); }
+				}
+			};
+			let checkSelection = () => {};
 			const open = async () => {
 				const requiredPaths = new Set((launch.requiredExtensions ?? []).map(({ path }) => path));
 				applyProcessEnv(launch.processEnv);
@@ -367,6 +392,7 @@ export function createDefaultChildSessionFactory(options: DefaultChildSessionFac
 					? pi.resolveCliModel({ cliModel: launch.model, modelRuntime })
 					: undefined;
 				if (resolvedModel?.error) throw new Error(resolvedModel.error);
+				if (launch.model && !resolvedModel?.model) throw new Error(`Requested child model '${launch.model}' did not resolve.`);
 				const { session } = await pi.createAgentSession({
 					cwd: launch.cwd,
 					agentDir,
@@ -380,8 +406,20 @@ export function createDefaultChildSessionFactory(options: DefaultChildSessionFac
 					settingsManager,
 					sessionStartEvent: { type: "session_start", reason: "startup" },
 				});
-				pinChildCacheRetention(session.agent);
+				// Compare Pi's actual selection, not the requested suffix used in tool stats.
+				// Omitted model/effort deliberately retains Pi's inherit/default semantics.
+				checkSelection = () => {
+					const expected = resolvedModel?.model;
+					if (expected && (session.model?.provider !== expected.provider || session.model?.id !== expected.id)) {
+						throw new Error(`Requested child model '${expected.provider}/${expected.id}' was changed to '${session.model ? `${session.model.provider}/${session.model.id}` : "none"}'.`);
+					}
+					if (resolvedModel?.thinkingLevel !== undefined && session.thinkingLevel !== resolvedModel.thinkingLevel) {
+						throw new Error(`Requested child thinking level '${resolvedModel.thinkingLevel}' was clamped or changed to '${session.thinkingLevel}'.`);
+					}
+				};
 				try {
+					pinChildCacheRetention(session.agent);
+					checkSelection();
 					await session.bindExtensions({
 						mode: "print",
 						onError: (error) => {
@@ -389,8 +427,14 @@ export function createDefaultChildSessionFactory(options: DefaultChildSessionFac
 							launch.onExtensionError?.({ extensionPath: error.extensionPath, event: error.event, error: error.error });
 						},
 					});
+					checkSelection();
 				} catch (error) {
-					session.dispose();
+					try {
+						await shutdownSession(session);
+					} catch (cleanupError) {
+						shutdownFailures.push(cleanupError);
+						throw new AggregateError([error, cleanupError], `Child session opening failed: ${String(error)}; cleanup failed: ${String(cleanupError)}`);
+					}
 					throw error;
 				}
 				return session;
@@ -403,6 +447,9 @@ export function createDefaultChildSessionFactory(options: DefaultChildSessionFac
 			const activePrompts = new Set<Promise<void>>();
 			const runPrompt = (text: string): Promise<void> => {
 				if (!acceptingPrompts) return Promise.reject(new Error("Child session is disposing and cannot accept a prompt."));
+				try { checkSelection(); } catch (error) {
+					return child.dispose().then(() => { throw error; });
+				}
 				const prompt = session.prompt(text);
 				activePrompts.add(prompt);
 				void prompt.then(() => { activePrompts.delete(prompt); }, () => { activePrompts.delete(prompt); });
@@ -413,6 +460,7 @@ export function createDefaultChildSessionFactory(options: DefaultChildSessionFac
 			// watchers, servers, and timers. Do the same, then dispose.
 			const shutdown = async (): Promise<void> => {
 				let timer: ReturnType<typeof setTimeout> | undefined;
+				let shutdownStarted = false;
 				try {
 					acceptingPrompts = false;
 					if (activePrompts.size > 0) {
@@ -431,26 +479,20 @@ export function createDefaultChildSessionFactory(options: DefaultChildSessionFac
 							timer = undefined;
 						}
 					}
-					const runner = session.extensionRunner;
-					if (runner.hasHandlers("session_shutdown")) {
-						await Promise.race([
-							runner.emit({ type: "session_shutdown", reason: "quit" }),
-							new Promise<never>((_resolve, reject) => {
-								timer = setTimeout(() => reject(new Error("Child session shutdown timed out; cleanup is unverified.")), shutdownTimeoutMs);
-							}),
-						]);
-					}
-					if (shutdownFailure !== undefined) throw new Error(`Child session shutdown failed: ${String(shutdownFailure)}`);
+					shutdownStarted = true;
+					await shutdownSession(session);
 				} finally {
 					if (timer !== undefined) clearTimeout(timer);
-					session.dispose();
+					// shutdownSession owns disposal once shutdown begins; abort failures
+					// must still release the session before reaching that boundary.
+					if (!shutdownStarted) session.dispose();
 				}
 			};
 			const child: ChildSession = {
 				subscribe: (listener) => session.subscribe((event) => listener(event as unknown as ChildSessionEvent)),
 				prompt: runPrompt,
-				steer: (text) => session.steer(text),
-				followUp: (text) => session.followUp(text),
+				steer: async (text) => { await session.steer(text); },
+				followUp: async (text) => { await session.followUp(text); },
 				abort: () => session.abort(),
 				hasQueuedMessages: () => session.agent?.hasQueuedMessages?.() === true,
 				dispose: () => {

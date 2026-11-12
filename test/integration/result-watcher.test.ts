@@ -14,7 +14,7 @@ import { writeAsyncResultFile, writePendingAsyncResultFile } from "../../src/run
 import { encodeIndexSegment, MAX_INDEX_SEGMENT_BYTES } from "../../src/runs/background/index-segment.ts";
 import { createScheduledRunManager, scheduledRunStorePath } from "../../src/runs/background/scheduled-runs.ts";
 import { prepareMissionLaunch, writeMissionAsyncBinding } from "../../src/missions/lifecycle.ts";
-import { readMission, updateMission } from "../../src/missions/store.ts";
+import { missionRecordPath, readMission, updateMission } from "../../src/missions/store.ts";
 import { createNestedRoute, writeNestedEvent } from "../../src/runs/shared/nested-events.ts";
 import { SUBAGENT_ASYNC_COMPLETE_EVENT, type SubagentState } from "../../src/shared/types.ts";
 import type { AsyncRunSummary } from "../../src/runs/background/async-status.ts";
@@ -451,7 +451,7 @@ describe("result watcher", () => {
 		}
 	});
 
-	it("observes a hash-only mission result once when its public alias is unaddressable", async (t) => {
+	it("preserves goal state and mission observation evidence across foreign hash-only replay", async (t) => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-result-watcher-mission-enametoolong-"));
 		const resultsDir = path.join(root, "results");
 		const project = path.join(root, "project");
@@ -474,13 +474,17 @@ describe("result watcher", () => {
 			}) as typeof fsDefault.renameSync);
 			syncBuiltinESMExports();
 			const binding = prepareMissionLaunch({
-				params: { mission: { title: "Long result mission" }, task: "Run async child" },
+				params: { mission: { title: "Long result mission", objective: "Preserve goal ownership", goal: true, maxIterations: 3 }, task: "Run async child" },
 				projectRoot: project,
 				config: { directory: path.join(root, "missions"), globalIndexDir: path.join(root, "global-index") },
 				ownerSessionId: "session-owner",
 			});
 			assert.ok(binding);
 			writeMissionAsyncBinding(asyncDir, binding);
+			updateMission(binding.location, binding.missionId, { summary: "Preserved checkpoint", usage: { tokens: 41 } });
+			const missionPath = missionRecordPath(binding.location, binding.missionId);
+			const missionBytesBeforeForeignReplay = fs.readFileSync(missionPath);
+			const missionObserverIndex = path.join(resultsDir, "result-index", "observers", "mission", `${encodeIndexSegment(runId)}.json`);
 			console.error = (...args: unknown[]) => { errors.push(args); };
 			writeIndexedResult(publicResultPath, {
 				id: runId,
@@ -490,6 +494,7 @@ describe("result watcher", () => {
 				state: "complete",
 				success: true,
 				summary: "Long mission result completed",
+				totalTokens: { total: 41 },
 			});
 			const pendingPath = path.join(resultsDir, "result-pending", encodeIndexSegment("session-owner"), `${encodeIndexSegment(runId, MAX_INDEX_SEGMENT_BYTES - Buffer.byteLength(".json"))}.json`);
 			assert.equal(fs.existsSync(pendingPath), true);
@@ -506,18 +511,38 @@ describe("result watcher", () => {
 			});
 			try {
 				watcher.primeExistingResults();
-				assert.equal(await waitForPredicate(() => observed === 1), true);
+				assert.equal(await waitForPredicate(() => observed >= 1), true);
 				watcher.primeExistingResults();
+				assert.equal(await waitForPredicate(() => observed >= 2), true, "foreign shared observation remains replayable");
 				await new Promise((resolve) => setTimeout(resolve, 25));
 			} finally {
 				watcher.stopResultWatcher();
 			}
 
-			assert.equal(parsed, 1);
-			assert.equal(observed, 1);
+			assert.equal(parsed, 2, "both foreign observer replays parse the retained payload");
+			assert.equal(observed, 2);
 			assert.equal(fs.existsSync(pendingPath), true);
 			assert.equal((JSON.parse(fs.readFileSync(pendingPath, "utf-8")) as { notificationDeliveredAt?: unknown }).notificationDeliveredAt, undefined);
-			assert.equal(readMission(binding.location, binding.missionId).runs.some((run) => run.runId === runId), true);
+			assert.equal(fs.existsSync(missionObserverIndex), true, "foreign replay must retain the mission observer index");
+			assert.deepEqual(fs.readFileSync(missionPath), missionBytesBeforeForeignReplay,
+				"foreign replay must leave exact mission bytes, goal counters, usage, and summary unchanged");
+			const ownerState = createState();
+			ownerState.currentSessionId = "session-owner";
+			const ownerWatcher = createResultWatcher({ events: { on: () => () => {}, emit() {} } }, ownerState, resultsDir, 60_000);
+			try {
+				ownerWatcher.primeExistingResults();
+				assert.equal(await waitForPredicate(() => readMission(binding.location, binding.missionId).runs.some((run) => run.runId === runId)), true);
+			} finally {
+				ownerWatcher.stopResultWatcher();
+			}
+			const reconciled = readMission(binding.location, binding.missionId);
+			assert.equal(reconciled.goal?.iterationsStarted, 1);
+			assert.equal(reconciled.goal?.maxIterations, 3);
+			assert.equal(reconciled.goal?.iterationActive, true);
+			assert.equal(reconciled.usage?.tokens, 41);
+			assert.equal(reconciled.summary, "Preserved checkpoint", "goal completion preserves the existing checkpoint summary");
+			assert.ok(reconciled.runs.some((run) => run.runId === runId));
+			assert.equal(fs.existsSync(missionObserverIndex), false, "owning replay may consume the mission observer index");
 			assert.equal(errors.some((entry) => /Failed to (?:promote|inspect|process).*result/i.test(String(entry[0] ?? ""))), false);
 		} finally {
 			console.error = originalError;

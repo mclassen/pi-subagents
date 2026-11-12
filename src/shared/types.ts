@@ -1061,6 +1061,8 @@ export interface AcceptanceReviewGate {
 }
 
 export interface AcceptanceConfig {
+	/** Parent-declared explicit relative file inputs beneath the evaluation cwd. */
+	candidate?: { files: string[] };
 	level?: AcceptanceLevel;
 	report?: "on" | "off";
 	/** Preserve an intentional launch-time staged index, while rejecting any terminal index change. */
@@ -1084,6 +1086,7 @@ export interface ResolvedAcceptanceGate extends AcceptanceGate {
 }
 
 export interface ResolvedAcceptanceConfig {
+	candidate?: { files: string[] };
 	level: Exclude<AcceptanceLevel, "auto">;
 	explicit: boolean;
 	inferredReason: string[];
@@ -1191,7 +1194,18 @@ export interface AcceptanceRecoveryMetadata {
 	reportHash: string;
 }
 
+export interface AcceptanceIdentity {
+	version: 1;
+	producerRunId: string;
+	cwd: string;
+	files: Array<{ path: string; state: "present" | "absent"; bytes?: number; sha256?: string }>;
+	policyHash: string;
+	commands: Array<{ id: string; command: string; cwd: string; envHash: string; envOverridesHash: string; optionsHash: string }>;
+	digest: string;
+}
+
 export interface AcceptanceLedger {
+	identity?: AcceptanceIdentity;
 	status: AcceptanceLedgerStatus;
 	evidenceStatus: AcceptanceEvidenceStatus;
 	explicit: boolean;
@@ -1243,7 +1257,6 @@ export interface UsageBudgetLimitConfig {
 }
 
 export interface UsageBudgetConfig {
-	tokens?: UsageBudgetLimitConfig;
 	costUsd?: UsageBudgetLimitConfig;
 }
 
@@ -1254,12 +1267,11 @@ export interface UsageBudgetMetricState extends UsageBudgetLimitConfig {
 
 export interface UsageBudgetState {
 	version: 1;
-	/** Enforced from usage reported by completed or streaming child runs; no reservation estimates. */
+	/** Monetary limits are enforced from reported usage; token totals remain informational only. */
 	source: "reported";
-	tokens?: UsageBudgetMetricState;
 	costUsd?: UsageBudgetMetricState;
 	exhausted: boolean;
-	reason?: "tokens" | "costUsd";
+	reason?: "costUsd";
 }
 
 export interface SingleResult {

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { DEFAULT_FAST_WORK_ROLES } from "../../src/api/fast-work.ts";
 import { describe, it } from "node:test";
 import { FastWorkPlan, resolveFastWorkModel, type FastWorkTask, type FastWorkRegistryModel } from "pi-subagents/fast-work";
 import { delegateFastWork, type FastWorkEvents } from "../../src/fast-work/delegation.ts";
@@ -9,6 +10,7 @@ import type { PromptTemplateBridgeResult } from "../../src/slash/delegation-adap
 const models: FastWorkRegistryModel[] = [
 	{ provider: "openai-codex", id: "gpt-6-luna", reasoning: true },
 	{ provider: "openai-codex", id: "gpt-6.1-sol", reasoning: true },
+	{ provider: "openai-codex", id: "gpt-6.1-terra", reasoning: true },
 ];
 const task = (id: string, dependsOn: string[] = []): FastWorkTask => ({
 	id, dependsOn, goal: "Inspect the parser", context: "Frozen read-only scope", inputs: ["src/parser.ts"],
@@ -80,7 +82,7 @@ describe("extension-owned fast-work policy through the public delegation bridge"
 		harness.bridge.dispose();
 	});
 
-	it("caps independent leaves at three with fresh contexts and default Sol medium requests", async () => {
+	it("caps independent leaves at three with fresh contexts and default Terra medium requests", async () => {
 		const harness = owner();
 		const graph = plan([task("a"), task("b"), task("c"), task("d"), task("e")]);
 		const running = graph.runReady(harness.delegate, new AbortController().signal);
@@ -96,20 +98,22 @@ describe("extension-owned fast-work policy through the public delegation bridge"
 		assert.equal(graph.metrics().peakActive, 3);
 		for (const { request } of harness.requests) {
 			assert.equal(request.context, "fresh");
-			assert.equal(request.model, "openai-codex/gpt-6.1-sol");
+			assert.equal(request.model, "openai-codex/gpt-6.1-terra");
 			assert.equal(request.thinking, "medium");
 			assert.match(request.task, /No edits, commands, nested delegation/);
 		}
 		harness.bridge.dispose();
 	});
 
-	it("defaults to Sol medium in every profile without requiring Luna or falling back to it", () => {
+	it("defaults to Terra medium in every profile without requiring Luna or falling back to it", () => {
+		assert.deepEqual(DEFAULT_FAST_WORK_ROLES.ORCHESTRATOR, { model: "openai-codex/gpt-6.1-sol", thinking: "medium" });
+		assert.deepEqual(DEFAULT_FAST_WORK_ROLES.WORKER_STRONG, { model: "openai-codex/gpt-6.1-sol", thinking: "medium" });
 		for (const profile of ["normal", "fast", "deep"] as const) {
-			const graph = new FastWorkPlan({ profile, cwd: process.cwd(), agent: "fast-work-leaf", tasks: [task("A")], models: models.filter((model) => model.id === "gpt-6.1-sol") });
-			assert.equal(graph.metrics().tasks[0]!.model, "openai-codex/gpt-6.1-sol");
+			const graph = new FastWorkPlan({ profile, cwd: process.cwd(), agent: "fast-work-leaf", tasks: [task("A")], models: models.filter((model) => model.id === "gpt-6.1-terra") });
+			assert.equal(graph.metrics().tasks[0]!.model, "openai-codex/gpt-6.1-terra");
 			assert.equal(graph.metrics().tasks[0]!.thinking, "medium");
 		}
-		assert.throws(() => new FastWorkPlan({ profile: "fast", cwd: process.cwd(), agent: "fast-work-leaf", tasks: [task("A")], models: models.filter((model) => model.id === "gpt-6-luna") }), /unavailable.*gpt-6\.1-sol/);
+		assert.throws(() => new FastWorkPlan({ profile: "fast", cwd: process.cwd(), agent: "fast-work-leaf", tasks: [task("A")], models: models.filter((model) => model.id === "gpt-6-luna") }), /unavailable.*gpt-6\.1-terra/);
 	});
 
 	it("isolates failure and transitively blocks dependents without losing independent results", async () => {

@@ -25,6 +25,7 @@ import type {
 	SubagentRunMode,
 	ChildWatchdogProgress,
 } from "../../shared/types.ts";
+import { ACCEPTANCE_VERIFY_DEFAULT_TIMEOUT_MS, acceptanceCommandOptionsDigest, acceptanceDigest, acceptancePolicyDigest, captureAcceptanceCandidate, redactAcceptancePolicy, sealAcceptanceIdentity, validateCandidateFiles } from "./acceptance-identity.ts";
 import { unresolvedChildWatchdogBlockers } from "../../watchdog/child-status.ts";
 import { isAgentContract } from "./agent-contract.ts";
 import { validateStructuredOutputValue } from "./structured-output.ts";
@@ -51,7 +52,7 @@ const VALID_EVIDENCE_KINDS: AcceptanceEvidenceKind[] = [
 const VALID_EVIDENCE = new Set<AcceptanceEvidenceKind>(VALID_EVIDENCE_KINDS);
 const ACCEPTANCE_EVIDENCE_HELP = `Supported evidence kinds: ${VALID_EVIDENCE_KINDS.join(", ")}. Example: { level: "checked", evidence: ["commands-run", "changed-files"] }.`;
 const ACCEPTANCE_OBJECT_EXAMPLE = "Example: { level: \"checked\", evidence: [\"commands-run\", \"changed-files\"] }.";
-const ACCEPTANCE_CONFIG_KEYS = new Set(["level", "report", "preserveStagedIndex", "criteria", "evidence", "verify", "review", "stopRules", "reason"]);
+const ACCEPTANCE_CONFIG_KEYS = new Set(["level", "report", "candidate", "preserveStagedIndex", "criteria", "evidence", "verify", "review", "stopRules", "reason"]);
 const ACCEPTANCE_GATE_KEYS = new Set(["id", "must", "evidence", "severity"]);
 const ACCEPTANCE_VERIFY_KEYS = new Set(["id", "command", "timeoutMs", "cwd", "env", "allowFailure", "output", "schema"]);
 const ACCEPTANCE_REVIEW_KEYS = new Set(["agent", "focus", "required"]);
@@ -270,6 +271,10 @@ export function validateAcceptanceInput(input: unknown, pathLabel = "acceptance"
 	const value = input as Record<string, unknown>;
 	for (const key of Object.keys(value)) {
 		if (!ACCEPTANCE_CONFIG_KEYS.has(key)) errors.push(`${pathLabel}.${key} is not supported.`);
+	}
+	if (value.candidate !== undefined) {
+		try { validateCandidateFiles(value.candidate); }
+		catch (error) { errors.push(`${pathLabel}.${error instanceof Error ? error.message : String(error)}`); }
 	}
 	if (value.level === "reviewed") {
 		errors.push(`${pathLabel}.level ${EXPLICIT_REVIEWED_UNAVAILABLE}`);
@@ -494,6 +499,7 @@ export function resolveEffectiveAcceptance(input: {
 			inferredReason: [],
 			criteria,
 			evidence,
+			candidate: explicit.candidate,
 			preserveStagedIndex: explicit.preserveStagedIndex,
 			verify: explicit.verify ?? [],
 			review: explicit.review,
@@ -520,6 +526,7 @@ export function resolveEffectiveAcceptance(input: {
 		inferredReason: inferred.reasons,
 		criteria: level === "none" ? [] : criteria,
 		evidence: level === "none" ? [] : evidence,
+		candidate: explicit.candidate,
 		preserveStagedIndex: explicit.preserveStagedIndex,
 		verify: explicit.verify ?? [],
 		review,
@@ -1213,7 +1220,7 @@ export function aggregateAcceptanceReport(input: {
 	};
 }
 
-const DEFAULT_VERIFY_TIMEOUT_MS = 120_000;
+const DEFAULT_VERIFY_TIMEOUT_MS = ACCEPTANCE_VERIFY_DEFAULT_TIMEOUT_MS;
 
 function hash(value: string): string {
 	return createHash("sha256").update(value).digest("hex");
@@ -1406,9 +1413,10 @@ function runVerifyCommand(command: AcceptanceVerifyCommand, defaultCwd: string, 
 		let timedOut = false;
 		let settled = false;
 		let hardKill: NodeJS.Timeout | undefined;
+		const env = effectiveVerifyEnv(command.env);
 		const child = spawn(quoteExecutableForShell(command.command), {
 			cwd,
-			env: effectiveVerifyEnv(command.env),
+			env,
 			shell: true,
 			stdio: ["ignore", "pipe", "pipe"],
 			windowsHide: true,
@@ -1424,6 +1432,7 @@ function runVerifyCommand(command: AcceptanceVerifyCommand, defaultCwd: string, 
 				command: command.command,
 				cwd,
 				durationMs: Date.now() - startedAt,
+				envHash: acceptanceDigest(env),
 				...result,
 			});
 		};
@@ -1508,7 +1517,21 @@ export async function evaluateAcceptance(input: {
 		runtimeChecks: [],
 		verifyRuns: [],
 	};
+	if (acceptance.candidate) ledger.effectiveAcceptance = redactAcceptancePolicy(acceptance);
 	if (acceptance.level === "none") return ledger;
+
+	const policyBefore = acceptance.candidate ? acceptancePolicyDigest(acceptance) : undefined;
+	let candidateBefore: ReturnType<typeof captureAcceptanceCandidate> | undefined;
+	if (acceptance.candidate) {
+		try {
+			if (!input.runId) throw new Error("Acceptance producer runId is unavailable");
+			candidateBefore = captureAcceptanceCandidate(input.cwd, acceptance.candidate);
+		} catch {
+			ledger.runtimeChecks.push({ id: "candidate-identity", status: "failed", message: "Declared candidate identity is unavailable." });
+			ledger.status = ledger.evidenceStatus = "rejected";
+			return ledger;
+		}
+	}
 
 	if (input.watchdog) {
 		const unresolved = unresolvedChildWatchdogBlockers(input.watchdog);
@@ -1577,7 +1600,7 @@ export async function evaluateAcceptance(input: {
 		} else {
 			ledger.verifyRuns = [];
 			for (const command of acceptance.verify) {
-				const run = await runMemoizedVerifyCommand(command, input.cwd, {
+				const run = await (acceptance.candidate ? runVerifyCommand : runMemoizedVerifyCommand)(command, input.cwd, {
 					signal: input.signal,
 					abortMessage: input.abortMessage,
 					artifactsDir: input.artifactsDir,
@@ -1594,6 +1617,21 @@ export async function evaluateAcceptance(input: {
 				ledger.status = "verified";
 				ledger.evidenceStatus = "verified";
 			}
+		}
+	}
+
+	if (acceptance.candidate && candidateBefore) {
+		try {
+			const after = captureAcceptanceCandidate(input.cwd, acceptance.candidate);
+			if (acceptanceDigest(after) !== acceptanceDigest(candidateBefore) || acceptancePolicyDigest(acceptance) !== policyBefore) throw new Error("changed");
+			if (ledger.verifyRuns.length !== acceptance.verify.length || ledger.verifyRuns.some((run) => !/^[a-f0-9]{64}$/.test(run.envHash ?? ""))) throw new Error("Verification identity is incomplete");
+			ledger.identity = sealAcceptanceIdentity({
+				version: 1, producerRunId: input.runId!, cwd: fs.realpathSync(input.cwd), files: candidateBefore,
+				policyHash: policyBefore!,
+				commands: acceptance.verify.map((command, index) => ({ id: command.id, command: command.command, cwd: path.resolve(input.cwd, command.cwd ?? "."), envHash: ledger.verifyRuns[index]!.envHash!, envOverridesHash: acceptanceDigest(command.env ?? {}), optionsHash: acceptanceCommandOptionsDigest(command) })),
+			});
+		} catch {
+			ledger.runtimeChecks.push({ id: "candidate-identity", status: "failed", message: "Declared candidate changed during verification or became unreadable." });
 		}
 	}
 
@@ -1642,7 +1680,7 @@ export function buildSkippedAcceptanceLedger(acceptance: ResolvedAcceptanceConfi
 		status,
 		evidenceStatus: status,
 		explicit: acceptance.explicit,
-		effectiveAcceptance: acceptance,
+		effectiveAcceptance: acceptance.candidate ? redactAcceptancePolicy(acceptance) : acceptance,
 		inferredReason: acceptance.inferredReason,
 		criteria: acceptance.criteria,
 		runtimeChecks: acceptance.level === "none"

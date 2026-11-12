@@ -6,54 +6,47 @@ import { describe, it } from "node:test";
 const readProjectFile = (file: string): string => readFileSync(join(process.cwd(), file), "utf-8");
 
 describe("local orchestration policy", () => {
-	it("keeps child implementation subordinate to the parent eligibility gate", () => {
+	it("keeps coding eligibility and parent decision authority explicit", () => {
 		const skill = readProjectFile("skills/pi-subagents/SKILL.md");
 		const prompting = readProjectFile("skills/pi-subagents/references/prompting-and-roles.md");
-		const constraints = readProjectFile("skills/pi-subagents/references/constraints-and-recipes.md");
-		const reviewLoop = readProjectFile("prompts/review-loop.md");
-
 		assert.match(skill, /Delegation is subordinate to user\/global eligibility policy/);
-		assert.match(skill, /A Sol parent codes and reviews by default/);
-		assert.doesNotMatch(skill, /delegate asynchronously.*most non-trivial requests/i);
-		assert.match(prompting, /Parent implements by default/);
-		assert.doesNotMatch(prompting, /one async `worker` implements or fixes/);
-		assert.match(constraints, /parent owns causality, design, and coding by default/i);
-		assert.match(reviewLoop, /Implementation requested.*does not automatically require a child writer/i);
+		assert.match(skill, /Terra high defaults for bounded coding, test-writing and nested writers/i);
+		assert.match(prompting, /escalate new product, architecture or shared-contract decisions/i);
+		assert.doesNotMatch([skill, prompting].join("\n"), /Sol 6\.1 medium defaults for coding|Sol 6\.1 medium writers/i);
 	});
 
-	it("routes child work to Luna high by default and keeps higher effort manual-only", () => {
+	it("routes coding and test-writing to Terra high while preserving explicit selections and non-coding policy", () => {
 		const skill = readProjectFile("skills/pi-subagents/SKILL.md");
 		const prompting = readProjectFile("skills/pi-subagents/references/prompting-and-roles.md");
 		const reviewLoop = readProjectFile("prompts/review-loop.md");
 		const worker = readProjectFile("agents/worker.md");
-		const scout = readProjectFile("agents/scout.md");
-		const researcher = readProjectFile("agents/researcher.md");
 		const oracle = readProjectFile("agents/oracle.md");
 
 		for (const text of [skill, prompting, reviewLoop]) {
-			assert.match(text, /Luna high/i);
-			assert.match(text, /Luna xhigh\/max.*manual-only|manual-only.*Luna xhigh\/max/i);
-			assert.doesNotMatch(text, /(?:select|route) Terra automatically|automatically (?:select|route) Terra/i);
-			assert.match(text, /Luna max.*never automatic|never route Luna max|Luna xhigh\/max.*manual-only/i);
+			assert.match(text, /Terra high/i);
+			assert.match(text, /routine, unbounded, complex or correctness-heavy coding/i);
+			assert.match(text, /never use Luna for coding workers/i);
 		}
-		assert.match(worker, /Default to Luna high/i);
-		assert.match(worker, /higher effort is user-selected and never automatic/i);
-		assert.match(scout, /thinking: high/);
-		assert.match(researcher, /thinking: high/);
+		assert.match(worker, /^model: openai-codex\/gpt-6\.1-terra\r?$/m);
+		assert.match(worker, /thinking: high/);
+		assert.match(worker, /Default explicitly to Terra high.*coding and test-writing/i);
+		assert.match(worker, /preserve explicit user model\/thinking selections/i);
+		assert.match(skill, /Terra high defaults for bounded coding, test-writing and nested writers/i);
+		assert.match(prompting, /Default bounded coding, test-writing and nested writer work to Terra high/i);
+		assert.match(reviewLoop, /default coding\/test-writing workers.*Terra high/i);
+		assert.match(reviewLoop, /Sol 6\.1 medium remains the default reviewer tier/i);
+		assert.doesNotMatch([skill, prompting, reviewLoop, worker].join("\n"), /Never route implementation.*Luna|Terra high is not.*implementation/i);
 		assert.match(oracle, /thinking: medium/);
 		assert.match(oracle, /Sol high only when.*complex|Sol high only for.*complex/i);
+		assert.match(readProjectFile("docs/fast-work.md"), /Standard leaves default to `openai-codex\/gpt-6\.1-terra` with `medium` thinking/i);
+		assert.match(readProjectFile("prompts/review-loop.md"), /Sol 6\.1 medium remains the default reviewer tier/i);
 	});
 
-	it("keeps Sol and Astra review loops from defaulting to Luna reviewers", () => {
+	it("keeps review routing separate from Luna coding defaults", () => {
 		const reviewLoop = readProjectFile("prompts/review-loop.md");
-
-		assert.match(reviewLoop, /Sol-medium or Astra-low parent reviews directly by default/i);
-		assert.match(reviewLoop, /In a Sol- or Astra-parent session, never launch a Luna reviewer/i);
-		assert.match(reviewLoop, /explicitly launch the reviewer at Sol medium or higher/i);
-		assert.match(reviewLoop, /use Astra low only when the review itself meets the extreme-complexity threshold/i);
-		assert.match(reviewLoop, /Luna reviewers are limited to Luna-parent sessions/i);
-		assert.match(reviewLoop, /Luna medium for bounded mechanics/i);
-		assert.match(reviewLoop, /do not rely on a configured Luna default in a Sol- or Astra-parent session/i);
+		assert.match(reviewLoop, /default coding\/test-writing workers.*Terra high/i);
+		assert.match(reviewLoop, /Sol 6\.1 medium remains the default reviewer tier/i);
+		assert.doesNotMatch(reviewLoop, /Never route implementation.*Luna/i);
 	});
 
 	it("keeps every child in a distinct isolated workspace", () => {
@@ -63,8 +56,8 @@ describe("local orchestration policy", () => {
 		const prompting = readProjectFile("skills/pi-subagents/references/prompting-and-roles.md");
 
 		assert.match(skill, /every child a distinct isolated execution workspace\/resource/i);
-		assert.match(execution, /distinct execution workspace\/resource for every child/i);
-		assert.match(lanes, /never share a checkout\/directory between children/i);
+		assert.match(execution, /distinct temporary execution workspace\/resource.*every child/i);
+		assert.match(lanes, /never share the parent checkout or a checkout\/directory between children/i);
 		assert.doesNotMatch(lanes, /Read-only runs can share a checkout/i);
 		assert.doesNotMatch(prompting, /only child allowed to edit the active worktree/i);
 		assert.doesNotMatch(prompting, /sole writer for the active worktree/i);

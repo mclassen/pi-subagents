@@ -15,24 +15,20 @@ export function validateUsageBudgetConfig(value: unknown, label = "usageBudget")
 	if (value === undefined) return {};
 	if (!value || typeof value !== "object" || Array.isArray(value)) return { error: `${label} must be an object.` };
 	const raw = value as Record<string, unknown>;
-	const unknown = Object.keys(raw).find((key) => key !== "tokens" && key !== "costUsd");
+	if (raw.tokens !== undefined) return { error: `${label}.tokens has been removed; only costUsd limits are supported.` };
+	const unknown = Object.keys(raw).find((key) => key !== "costUsd");
 	if (unknown) return { error: `${label}.${unknown} is not supported.` };
 	const budget: UsageBudgetConfig = {};
-	if (raw.tokens !== undefined) {
-		const tokens = validateLimit(raw.tokens, `${label}.tokens`);
-		if (tokens.error) return { error: tokens.error };
-		budget.tokens = tokens.limit;
-	}
 	if (raw.costUsd !== undefined) {
 		const costUsd = validateLimit(raw.costUsd, `${label}.costUsd`);
 		if (costUsd.error) return { error: costUsd.error };
 		budget.costUsd = costUsd.limit;
 	}
-	if (!budget.tokens && !budget.costUsd) return { error: `${label} must include tokens or costUsd.` };
+	if (!budget.costUsd) return { error: `${label} must include costUsd.` };
 	return { budget };
 }
 
-function metricState(limit: UsageBudgetLimitConfig | undefined, used: number): UsageBudgetState["tokens"] {
+function metricState(limit: UsageBudgetLimitConfig | undefined, used: number): UsageBudgetState["costUsd"] {
 	if (!limit) return undefined;
 	return {
 		...limit,
@@ -43,23 +39,18 @@ function metricState(limit: UsageBudgetLimitConfig | undefined, used: number): U
 
 export function usageBudgetState(config: UsageBudgetConfig | undefined, totals: CostSummary | undefined): UsageBudgetState | undefined {
 	if (!config) return undefined;
-	const inputTokens = totals?.inputTokens ?? 0;
-	const outputTokens = totals?.outputTokens ?? 0;
-	const tokens = metricState(config.tokens, inputTokens + outputTokens);
 	const costUsd = metricState(config.costUsd, totals?.costUsd ?? 0);
-	const reason = tokens?.outcome === "hard-exceeded" ? "tokens" : costUsd?.outcome === "hard-exceeded" ? "costUsd" : undefined;
+	const exhausted = costUsd?.outcome === "hard-exceeded";
 	return {
 		version: 1,
 		source: "reported",
-		...(tokens ? { tokens } : {}),
 		...(costUsd ? { costUsd } : {}),
-		exhausted: reason !== undefined,
-		...(reason ? { reason } : {}),
+		exhausted,
+		...(exhausted ? { reason: "costUsd" as const } : {}),
 	};
 }
 
 export function usageBudgetExceededMessage(state: UsageBudgetState): string {
-	if (state.reason === "tokens" && state.tokens) return `Usage budget exhausted: reported tokens ${state.tokens.used} reached hard limit ${state.tokens.hard}.`;
 	if (state.reason === "costUsd" && state.costUsd) return `Usage budget exhausted: reported cost $${state.costUsd.used.toFixed(6)} reached hard limit $${state.costUsd.hard.toFixed(6)}.`;
 	return "Usage budget exhausted.";
 }

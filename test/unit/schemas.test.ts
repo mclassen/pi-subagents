@@ -356,9 +356,9 @@ describe("SubagentParams schema", { skip: !schemasAvailable ? "typebox not avail
 		assert.ok(CompileSchema);
 		const validator = CompileSchema!(SubagentParams);
 		assert.equal(validator.Check({ usageBudget: {} }), false);
-		assert.equal(validator.Check({ usageBudget: { tokens: { hard: 1 } } }), true);
-		assert.equal(usageBudgetSchema.properties?.tokens?.properties?.soft?.exclusiveMinimum, 0);
-		assert.equal(usageBudgetSchema.properties?.tokens?.properties?.hard?.exclusiveMinimum, 0);
+		assert.equal(validator.Check({ usageBudget: { tokens: { hard: 1 } } }), false);
+		assert.equal(validator.Check({ usageBudget: { costUsd: { hard: 1 } } }), true);
+		assert.equal(usageBudgetSchema.properties?.tokens, undefined);
 		assert.equal(usageBudgetSchema.properties?.costUsd?.properties?.soft?.exclusiveMinimum, 0);
 		assert.equal(usageBudgetSchema.properties?.costUsd?.properties?.hard?.exclusiveMinimum, 0);
 		assert.match(String(usageBudgetSchema.description ?? ""), /root-only/i);
@@ -505,8 +505,8 @@ describe("SubagentParams schema", { skip: !schemasAvailable ? "typebox not avail
 		const missionDescription = String((schema.properties as Record<string, JsonSchemaNode> | undefined)?.mission?.description ?? "");
 		assert.match(missionDescription, /exactly one non-empty title or summary/);
 		assert.match(missionDescription, /goal only true/);
-		assert.match(missionDescription, /budget\.tokens optional/);
-		assert.doesNotMatch(missionDescription, /requires budget/);
+		assert.match(missionDescription, /maxIterations optional positive integer \(default 8\)/);
+		assert.doesNotMatch(missionDescription, /budget\.tokens|requires budget/);
 
 		const nestedDescriptionPaths: string[] = [];
 		const stack: Array<{ path: string; value: unknown }> = [{ path: "SubagentParams", value: schema }];
@@ -641,7 +641,7 @@ describe("SubagentParams schema", { skip: !schemasAvailable ? "typebox not avail
 		}
 		const validValues = [
 			{ mission: { title: "Continue goal", goal: true } },
-			{ mission: { title: "Bounded goal", goal: true, budget: { tokens: 100 } } },
+			{ mission: { title: "Bounded goal", goal: true, maxIterations: 2 } },
 			{ skill: "review" },
 			{ workflowScript: "return await runs.run(\"one\", {agent: \"reviewer\", task: \"check\"})" },
 			{ workflowScriptPath: "workflows/review.js" },

@@ -4,10 +4,11 @@ import { Type } from "typebox";
 import { registerAgentViaEvents, type RuntimeAgentRegistration } from "./src/api/agents.ts";
 import {
 	DEFAULT_FAST_WORK_ROLES, FastWorkPlan, resolveFastWorkModel,
-	type FastWorkMetrics, type FastWorkProfile, type FastWorkRoles, type FastWorkTaskResult,
+	type FastWorkMetrics, type FastWorkProfile, type FastWorkRegistryModel, type FastWorkRoles, type FastWorkTaskResult,
 } from "./src/api/fast-work.ts";
 import { delegateFastWork } from "./src/fast-work/delegation.ts";
 import { FastWorkTelemetry } from "./src/fast-work/telemetry.ts";
+import { FAST_WORK_PROFILE_EVENT, FAST_WORK_PROFILE_VERSION, validateFastWorkProfiles, type FastWorkProfileRequest } from "./src/api/fast-work-profiles.ts";
 
 const TOOL = "fast_work";
 const AGENT = "fast-work-leaf";
@@ -15,7 +16,7 @@ const PLAN_IMPLEMENTATION_PROMPT = `Read repository-root PLAN.md; implement its 
 
 Reuse identity-matched valid setup/discovery/startup/acceptance evidence; rerun for changed inputs or missing facts. Let the first useful isolated writer establish startup; no routine probe. Follow established recovery safeguards: preserve tracked/untracked partials/evidence, unaccepted unverified; confirm exclusive ownership/no live writer. One same-protocol recovery without confirmation: eligible resume or isolated same-role replacement; same approved model/provider/tools, existing limits. Change failed approach. Repeated/unsafe failure: checkpoint-and-ask. Honor pause/cancel. No unapproved local/foreground/external fallback.
 
-Launch 2–5 concurrent independent coding/test-writing workers through the ordinary subagent tool with read/write/edit; explicit model openai-codex/gpt-6.1-sol:medium, no substitutions. Read-only reviews, scouts and fast_work never count. Do not use fast_work for implementation. First resolve decisions and freeze only shared interfaces needed for bounded components, not all implementation details; eligibility is not limited to mechanical or context-light work. Workers solve local implementation details; escalate new product/architecture/shared-contract decisions. Keep genuinely coupled work, integration and acceptance in the parent; the parent being Sol or faster is not a blanket reason to take independent coding.
+Launch up to five concurrent independent coding/test-writing workers via ordinary subagent tool with read/write/edit; normally 2–5, use five if five useful safe lanes exist; no filler. model openai-codex/gpt-6.1-terra:high for bounded work; Sol medium for routine/unbounded or complex/correctness-heavy coding; never Luna; preserve user selections; no substitutions. Read-only reviews, scouts and fast_work never count. Do not use fast_work for implementation. Resolve decisions and freeze only shared interfaces needed for bounded components, not all implementation details; eligibility is not limited to mechanical or context-light work. Workers solve local implementation details; escalate new product/architecture/shared-contract decisions. Keep coupled work, integration and acceptance in the parent; the parent being Sol or faster is not a blanket reason to take independent coding.
 
 Maintain a ready/running/blocked queue: lane, files/contract, dependencies, workspace/base, gate. Start ready lanes promptly; refill up to five without filler/overlap/fake concurrency. If fewer than two safe useful lanes are ready, report the concrete blocker and ask whether to rescope or proceed with fewer; never silently implement alone. The minimum ends when the queue naturally drains.
 
@@ -94,6 +95,23 @@ export default function fastWork(pi: ExtensionAPI, options: FastWorkOptions = {}
 	let telemetry: FastWorkTelemetry | undefined;
 	let completedPlans: FastWorkMetrics[] = [];
 	let observedOwner: string | undefined;
+	let getAvailableModels: (() => readonly FastWorkRegistryModel[]) | undefined;
+
+	pi.events.on(FAST_WORK_PROFILE_EVENT, (raw) => {
+		if (!raw || typeof raw !== "object" || Array.isArray(raw)) return;
+		const request = raw as FastWorkProfileRequest;
+		if (request.result !== undefined) return;
+		try {
+			if (request.version !== FAST_WORK_PROFILE_VERSION) throw new Error(`Unsupported fast-work profile protocol version '${String(request.version)}'.`);
+			if (executing || plan?.snapshot().some((task) => ["pending", "running", "awaiting_acceptance"].includes(task.state))) throw new Error("Fast-work profiles cannot change while a plan is unsettled.");
+			if (!getAvailableModels) throw new Error("Fast-work owner has no current model registry context; wait for session start before setting profiles.");
+			const changes = validateFastWorkProfiles(request.profiles, getAvailableModels());
+			roles = { ...roles, ...changes };
+			request.result = { ok: true };
+		} catch (error) {
+			request.result = { ok: false, error: error instanceof Error ? error.message : String(error) };
+		}
+	});
 
 	pi.registerFlag("fast-work-telemetry", { description: "Store metadata-only fast-work observations in the Pi session", type: "boolean", default: true });
 
@@ -113,24 +131,28 @@ export default function fastWork(pi: ExtensionAPI, options: FastWorkOptions = {}
 		telemetry = undefined;
 		completedPlans = [];
 		observedOwner = undefined;
+		getAvailableModels = undefined;
 		activate();
 	};
-	pi.on("session_start", reset);
+	pi.on("session_start", (_event, ctx) => {
+		reset();
+		getAvailableModels = () => ctx.modelRegistry.getAvailable();
+	});
 	pi.on("session_shutdown", () => {
+		getAvailableModels = undefined;
 		shutdown.abort();
 		registration?.dispose();
 		registration = undefined;
 	});
 
 	pi.registerCommand("implement-plan", {
-		description: "Implement the next PLAN.md milestone with 2–5 independent Sol medium writers; verify and clean up, no publication",
+		description: "Implement the next PLAN.md milestone with up to five independent writers; verify and clean up, no publication",
 		handler: async (args, ctx) => {
 			if (args.trim()) {
 				ctx.ui.notify("Usage: /implement-plan (uses repository-root PLAN.md)", "error");
 				return;
 			}
 			if (executing) throw new Error("Wait for the current fast-work frontier to finish.");
-			resolveFastWorkModel({ model: "openai-codex/gpt-6.1-sol", thinking: "medium" }, ctx.modelRegistry.getAvailable());
 			pi.sendUserMessage(PLAN_IMPLEMENTATION_PROMPT, { deliverAs: "followUp" });
 		},
 	});
@@ -232,13 +254,14 @@ export default function fastWork(pi: ExtensionAPI, options: FastWorkOptions = {}
 	});
 
 	pi.on("before_agent_start", (event, ctx) => {
+		getAvailableModels = () => ctx.modelRegistry.getAvailable();
 		const telemetrySetting = pi.getFlag("fast-work-telemetry");
 		if ((telemetrySetting === true || telemetrySetting === "true") && !telemetry) {
 			telemetry = new FastWorkTelemetry(profile, ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined, pi.getThinkingLevel());
 			completedPlans = [];
 			observedOwner = undefined;
 		}
-		if (profile !== "normal") event.systemPromptOptions.promptGuidelines.push(`Fast-work ${profile} is available for bounded independent read-only tasks. Use fast_work only when the user explicitly requests it for the current task; availability, a startup profile or general delegation permission is not that request. These leaves share the parent checkout: pause all checkout writers until the frontier has settled; never overlap them with mutations. Keep genuinely coupled work, acceptance and synthesis in the parent; delegate ready independent coding components to writers rather than read-only agents. Bounded components need not be mechanical or context-light. Workers solve local implementation details; escalate new product/architecture/shared-contract decisions. Do not invent filler or overlap another task's prerequisites. Use compact capsules with applicable constraints and exact source references, not the transcript. Inspect child evidence before advance; accepted summaries must contain only relevant parent-validated facts. WORKER_STRONG needs demonstrated insufficiency or specialist correctness; fast permits one strong leaf per plan. The fast_work DAG remains read-only; implementation writers use ordinary isolated subagents with read/write/edit tools, explicitly model openai-codex/gpt-6.1-sol:medium; plan implementation requires 2–5 concurrent independent coding/test-writing workers, not reviews/scouts/fast_work. If fewer than two safe useful lanes are ready, report the blocker and ask whether to rescope or proceed with fewer; the minimum ends as the queue naturally drains. Each writer owns named files in a distinct temporary workspace outside extension auto-discovery, gets current inputs and a cold-start-complete brief, and delivers a patch, focused tests and acceptance evidence. The parent integrates/verifies and owns safe cleanup after settlement. Read-only reviews need a named unresolved question and never substitute for ready coding lanes. No automatic model switch: the live parent model/thinking is the operator's selection; recommended ORCHESTRATOR ${roles.ORCHESTRATOR.model}:${roles.ORCHESTRATOR.thinking}.`);
+		if (profile !== "normal") event.systemPromptOptions.promptGuidelines.push(`Fast-work ${profile} is available for bounded independent read-only tasks. Use fast_work only when the user explicitly requests it for the current task; availability, a startup profile or general delegation permission is not that request. These leaves share the parent checkout: pause all checkout writers until the frontier has settled; never overlap them with mutations. Keep genuinely coupled work, acceptance and synthesis in the parent; delegate ready independent coding components to writers rather than read-only agents. Bounded components need not be mechanical or context-light. Workers solve local implementation details; escalate new product/architecture/shared-contract decisions. Do not invent filler or overlap another task's prerequisites. Use compact capsules with applicable constraints and exact source references, not the transcript. Inspect child evidence before advance; accepted summaries must contain only relevant parent-validated facts. WORKER_STRONG needs demonstrated insufficiency or specialist correctness; fast permits one strong leaf per plan. The fast_work DAG remains read-only; implementation writers use ordinary isolated subagents with read/write/edit tools, bounded default model openai-codex/gpt-6.1-terra:high, Sol medium for routine, unbounded, complex or correctness-heavy coding, never Luna coding workers; preserve explicit user selections; plan implementation uses up to five concurrent independent coding/test-writing workers (normally 2–5; use five when five useful safe lanes exist, without filler), not reviews/scouts/fast_work. If fewer than two safe useful lanes are ready, report the blocker and ask whether to rescope or proceed with fewer; the minimum ends as the queue naturally drains. Each writer owns named files in a distinct temporary workspace outside extension auto-discovery, gets current inputs and a cold-start-complete brief, and delivers a patch, focused tests and acceptance evidence. The parent integrates/verifies and owns safe cleanup after settlement. Read-only reviews need a named unresolved question and never substitute for ready coding lanes. No automatic model switch: the live parent model/thinking is the operator's selection; recommended ORCHESTRATOR ${roles.ORCHESTRATOR.model}:${roles.ORCHESTRATOR.thinking}.`);
 	});
 	pi.on("message_update", (event) => { if (event.assistantMessageEvent.type === "text_delta" && event.assistantMessageEvent.delta) telemetry?.firstText(); });
 	pi.on("tool_execution_start", () => telemetry?.firstTool());

@@ -112,7 +112,9 @@ function setSelection(pi: ExtensionAPI, includeSubagent: boolean): void {
 	const active = pi.getActiveTools();
 	const next = includeSubagent ? [...active, SUBAGENT_NAME] : active.filter((name) => name !== SUBAGENT_NAME);
 	if (!next.includes(LOADER_NAME)) next.push(LOADER_NAME);
-	pi.setActiveTools([...new Set(next)]);
+	const normalized = [...new Set(next)];
+	if (active.length === normalized.length && active.every((name, index) => name === normalized[index])) return;
+	pi.setActiveTools(normalized);
 }
 
 function applyRecordedSelection(pi: ExtensionAPI, ctx: ExtensionContext): void {
@@ -177,7 +179,7 @@ export function registerSubagentToolActivation(
 			};
 			const advertised = await options.advertisedPrompt();
 			return {
-				content: [{ type: "text", text: `Enabled: subagent. On the next model request, call subagent({action:\"list\",capabilities:true}) for current capabilities.${advertised ? `\n\n${advertised}` : ""}` }],
+				content: [{ type: "text", text: `Enabled: subagent. Reuse current capability discovery only for the same established runtime/agent/model/tool configuration; otherwise, on the next model request, call subagent({action:\"list\",capabilities:true}) for current capabilities.${advertised ? `\n\n${advertised}` : ""}` }],
 				details: { enabled: [SUBAGENT_NAME] },
 			};
 		},

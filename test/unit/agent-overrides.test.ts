@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
 import { buildBuiltinOverrideConfig, discoverAgents, discoverAgentsAll, removeBuiltinAgentOverride, saveBuiltinAgentOverride } from "../../src/agents/agents.ts";
+import { applyThinkingSuffix } from "../../src/runs/shared/child-tool-plan.ts";
 
 let tempHome = "";
 let tempProject = "";
@@ -52,14 +53,16 @@ describe("builtin agent overrides", () => {
 		fs.rmSync(tempProject, { recursive: true, force: true });
 	});
 
-	it("bundled builtin agents inherit the default model", () => {
+	it("keeps the bounded worker explicit while unprofiled builtin agents inherit the parent model", () => {
 		const builtins = discoverAgentsAll(tempProject).builtin;
-		assert.ok(builtins.length > 0);
+		assert.ok(builtins.length > 1);
+		assert.equal(builtins.find((agent) => agent.name === "worker")?.model, "openai-codex/gpt-6.1-terra");
+		assert.ok(builtins.some((agent) => agent.name === "scout" && agent.model === undefined));
 		assert.deepEqual(
 			builtins
 				.filter((agent) => agent.model !== undefined)
 				.map((agent) => agent.name),
-			[],
+			["worker"],
 		);
 	});
 
@@ -79,7 +82,9 @@ describe("builtin agent overrides", () => {
 		assert.equal(scout?.model, "deepseek-v4-flash");
 		assert.equal(scout?.modelSource?.type, "subagents.defaultModel");
 		assert.equal(scout?.modelSource?.scope, "user");
-		assert.equal(builtins.find((agent) => agent.name === "worker")?.model, "deepseek-v4-flash");
+		const worker = builtins.find((agent) => agent.name === "worker");
+		assert.equal(worker?.model, "openai-codex/gpt-6.1-terra");
+		assert.equal(worker?.modelSource, undefined);
 		const oracle = builtins.find((agent) => agent.name === "oracle");
 		assert.equal(oracle?.model, "deepseek-v4-pro");
 		assert.equal(oracle?.modelSource, undefined);
@@ -245,9 +250,56 @@ describe("builtin agent overrides", () => {
 			subagents: { defaultModel: "deepseek-v4-pro" },
 		});
 
-		const worker = discoverAgents(tempProject, "both").agents.find((agent) => agent.name === "worker");
-		assert.ok(worker);
-		assert.equal(worker.model, "deepseek-v4-pro");
+		const agents = discoverAgents(tempProject, "both").agents;
+		const scout = agents.find((agent) => agent.name === "scout");
+		assert.equal(scout?.model, "deepseek-v4-pro");
+		assert.equal(scout?.modelSource?.scope, "project");
+		const worker = agents.find((agent) => agent.name === "worker");
+		assert.equal(worker?.model, "openai-codex/gpt-6.1-terra");
+		assert.equal(worker?.modelSource, undefined);
+	});
+
+	it("applies thinking-only user and project worker overrides to the launch candidate", () => {
+		const candidate = () => {
+			const worker = discoverAgents(tempProject, "both").agents.find((agent) => agent.name === "worker");
+			assert.ok(worker);
+			return applyThinkingSuffix(worker.model, worker.thinking, false);
+		};
+		assert.equal(candidate(), "openai-codex/gpt-6.1-terra:high");
+
+		writeJson(path.join(tempHome, ".pi", "agent", "settings.json"), {
+			subagents: { agentOverrides: { worker: { thinking: "medium" } } },
+		});
+		assert.equal(candidate(), "openai-codex/gpt-6.1-terra:medium");
+
+		writeJson(path.join(tempHome, ".pi", "agent", "settings.json"), {});
+		writeJson(path.join(tempProject, ".pi", "settings.json"), {
+			subagents: { agentOverrides: { worker: { thinking: "medium" } } },
+		});
+		assert.equal(candidate(), "openai-codex/gpt-6.1-terra:medium");
+
+		writeJson(path.join(tempProject, ".pi", "settings.json"), {
+			subagents: { agentOverrides: { worker: { model: "openai-codex/gpt-6.1-terra:high", thinking: "medium" } } },
+		});
+		assert.equal(candidate(), "openai-codex/gpt-6.1-terra:high");
+	});
+
+	it("lets user and project worker model overrides replace the builtin model", () => {
+		writeJson(path.join(tempHome, ".pi", "agent", "settings.json"), {
+			subagents: { defaultModel: "user-default", agentOverrides: { worker: { model: "user-worker" } } },
+		});
+		const userWorker = discoverAgents(tempProject, "both").agents.find((agent) => agent.name === "worker");
+		assert.equal(userWorker?.model, "user-worker");
+		assert.equal(userWorker?.override?.scope, "user");
+		assert.equal(userWorker?.modelSource, undefined);
+
+		writeJson(path.join(tempProject, ".pi", "settings.json"), {
+			subagents: { defaultModel: "project-default", agentOverrides: { worker: { model: "project-worker" } } },
+		});
+		const projectWorker = discoverAgents(tempProject, "both").agents.find((agent) => agent.name === "worker");
+		assert.equal(projectWorker?.model, "project-worker");
+		assert.equal(projectWorker?.override?.scope, "project");
+		assert.equal(projectWorker?.modelSource, undefined);
 	});
 
 	it("applies default providers with per-agent overrides", () => {
@@ -1191,8 +1243,8 @@ describe("builtin agent overrides", () => {
 		assert.deepEqual(scout?.defaultReads, ["CONTEXT.md"]);
 
 		const whitespaceDescription = buildBuiltinOverrideConfig(
-			{ description: "Base description" },
-			{ description: "   " } as Parameters<typeof buildBuiltinOverrideConfig>[1],
+			{ description: "Base description", systemPromptMode: "replace", inheritProjectContext: true, inheritGlobalContext: false, inheritSkills: false, systemPrompt: "Base prompt" },
+			{ description: "   ", systemPromptMode: "replace", inheritProjectContext: true, inheritGlobalContext: false, inheritSkills: false, systemPrompt: "Base prompt" },
 		);
 		assert.equal(whitespaceDescription, undefined);
 	});

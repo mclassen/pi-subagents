@@ -117,8 +117,14 @@ describe("default factory queued-message probe", () => {
 						subscribe: () => () => {},
 						prompt: async () => {},
 						abort: async () => {},
-						steer: async () => {},
-						followUp: async () => {},
+						steer: async (text: string) => {
+							if (text === "fail") throw new Error("steering rejected");
+							return "queued";
+						},
+						followUp: async (text: string) => {
+							if (text === "fail") throw new Error("follow-up rejected");
+							return "queued";
+						},
 						messages: [],
 						sessionId: "queued",
 					},
@@ -137,5 +143,10 @@ describe("default factory queued-message probe", () => {
 		});
 		assert.equal(child.hasQueuedMessages?.(), true);
 		assert.equal(childSessionHasQueuedMessages(child), true);
+		assert.equal(await child.steer("next"), undefined);
+		assert.equal(await child.followUp("next"), undefined);
+		await assert.rejects(child.steer("fail"), /steering rejected/);
+		await assert.rejects(child.followUp("fail"), /follow-up rejected/);
+		await factory.dispose();
 	});
 });
