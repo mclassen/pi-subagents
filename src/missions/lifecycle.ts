@@ -4,11 +4,11 @@ import { createHash, randomUUID } from "node:crypto";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import { writePrivateAtomicJson } from "../shared/atomic-json.ts";
 import { PROMPT_REDACTED } from "../shared/utils.ts";
-import { DIRS, type AcceptanceLedger, type Details, type SubagentRunMode } from "../shared/types.ts";
+import { DIRS, type AcceptanceLedger, type AcceptanceLedgerStatus, type Details, type SubagentRunMode } from "../shared/types.ts";
 import { resultFilePath } from "../runs/background/result-files.ts";
 import { validateMissionLaunch } from "./actions.ts";
 import { parseWorkflowChildSummary } from "../workflows/workflow-child-summary.ts";
-import type { MissionArtifact, MissionRecord, MissionRunLink, MissionRunMode, MissionStatus, MissionStoreConfig, MissionStoreLocation } from "./types.ts";
+import type { MissionArtifact, MissionCreateInput, MissionRecord, MissionRunLink, MissionRunMode, MissionStatus, MissionStoreConfig, MissionStoreLocation } from "./types.ts";
 import { createMission, createSessionGoal, MissionNotFoundError, missionRecordPath, readMission, resolveMissionStoreLocation, updateMission, validateMissionId } from "./store.ts";
 
 export const MISSION_BINDING_FILE = "mission.json";
@@ -24,6 +24,7 @@ export interface MissionLaunchParams {
 export interface MissionLaunchBinding {
 	missionId: string;
 	location: MissionStoreLocation;
+	/** True when the launch made the mission without a `mission` or `missionId` request. */
 	autoCreated: boolean;
 	announceInContent?: boolean;
 	acceptanceLaunchId?: string;
@@ -38,6 +39,7 @@ interface PersistedMissionBinding {
 	globalIndexDir: string;
 	writeGlobalIndex: boolean;
 	retainTerminal?: number;
+	autoCreated: boolean;
 }
 
 function workflowObjective(params: MissionLaunchParams): string | undefined {
@@ -82,7 +84,7 @@ export function prepareMissionLaunch(input: {
 	if (mission?.goal && !input.ownerSessionId) throw new Error("Creating a goal mission requires a current session");
 	const promptDerivedObjective = mission?.objective ?? (mission ? mission.title : objective ? PROMPT_REDACTED : undefined);
 	const title = mission?.title || PROMPT_REDACTED;
-	const record = (mission?.goal ? createSessionGoal : createMission)(location, {
+	const missionInput: MissionCreateInput = {
 		title,
 		objective: promptDerivedObjective || title,
 		...(mission?.goal === true ? { goal: true as const } : {}),
@@ -90,11 +92,12 @@ export function prepareMissionLaunch(input: {
 		status: "active",
 		...(mission?.labels ? { labels: mission.labels } : {}),
 		...(input.ownerSessionId ? { ownerSessionId: input.ownerSessionId } : {}),
-	}, new Date());
+	};
+	const record = mission?.goal ? createSessionGoal(location, missionInput, new Date()) : createMission(location, missionInput, new Date(), input.config?.retainTerminal);
 	if (record.goal) updateMission(location, record.id, { goal: { iteration: "begin" }, expectedGoalOwnerSessionId: input.ownerSessionId });
 	const acceptanceLaunchId = randomUUID();
 	updateMission(location, record.id, { acceptanceLaunch: { launchId: acceptanceLaunchId } });
-	return { missionId: record.id, location, autoCreated: true, announceInContent: true, acceptanceLaunchId };
+	return { missionId: record.id, location, autoCreated: input.params.mission === undefined, announceInContent: true, acceptanceLaunchId };
 }
 
 function toolResultIsError(result: AgentToolResult<Details>): boolean {
@@ -112,7 +115,31 @@ function runStatusForResult(result: AgentToolResult<Details>): string {
 	return "completed";
 }
 
-function missionStatusForRun(record: MissionRecord, runId: string, runStatus: string): MissionStatus {
+/** Acceptance statuses that mean nobody accepted the child's result. */
+const UNACCEPTED_ACCEPTANCE_STATUSES = new Set<string | undefined>(["pending", "claimed", "review-required", "rejected"] satisfies AcceptanceLedgerStatus[]);
+
+/** The first unaccepted acceptance status among child results, else the first status found. */
+export function missionAcceptanceStatus(results: unknown): string | undefined {
+	const statuses = (Array.isArray(results) ? results : [])
+		.map((result) => (result as { acceptance?: { status?: unknown } } | null | undefined)?.acceptance?.status)
+		.filter((status): status is string => typeof status === "string" && status.trim() !== "");
+	return statuses.find((status) => UNACCEPTED_ACCEPTANCE_STATUSES.has(status)) ?? statuses[0];
+}
+
+/**
+ * The status of a mission whose runs all finished successfully. Every path that
+ * completes a mission from run state goes through here.
+ */
+export function finishedMissionStatus(record: MissionRecord, autoCreated: boolean, runAcceptance: ReadonlyArray<{ runId: string; status: string | undefined }>): "completed" | "waiting" {
+	// Nobody is expected to close a mission made by default for an ordinary launch.
+	if (autoCreated) return "completed";
+	if (runAcceptance.some((run) => UNACCEPTED_ACCEPTANCE_STATUSES.has(run.status))) return "waiting";
+	// A run reported here supersedes its older workflow child record.
+	const reported = new Set<string | undefined>(runAcceptance.map((run) => run.runId));
+	return record.workflowChildren.some((child) => !reported.has(child.runId) && UNACCEPTED_ACCEPTANCE_STATUSES.has(child.acceptanceStatus)) ? "waiting" : "completed";
+}
+
+function missionStatusForRun(record: MissionRecord, runId: string, runStatus: string, acceptanceStatus: string | undefined, autoCreated: boolean): MissionStatus {
 	if (record.status === "completed" || record.status === "failed" || record.status === "cancelled") return record.status;
 	if (record.goal && (record.status === "waiting" || record.status === "needs_decision")) return record.status;
 	if (runStatus === "active" || runStatus === "queued" || runStatus === "running") return "active";
@@ -120,7 +147,7 @@ function missionStatusForRun(record: MissionRecord, runId: string, runStatus: st
 	if (runStatus === "paused") return "waiting";
 	const otherActive = record.runs.some((run) => run.runId !== runId && (run.status === "active" || run.status === "queued" || run.status === "running"));
 	if (otherActive) return "active";
-	if (runStatus === "completed" || runStatus === "complete") return "completed";
+	if (runStatus === "completed" || runStatus === "complete") return finishedMissionStatus(record, autoCreated, [{ runId, status: acceptanceStatus }]);
 	if (runStatus === "stopped" || runStatus === "rejected" || runStatus === "cancelled") return "cancelled";
 	return "failed";
 }
@@ -255,6 +282,7 @@ function persistedBinding(binding: MissionLaunchBinding): PersistedMissionBindin
 		globalIndexDir: binding.location.globalIndexDir,
 		writeGlobalIndex: binding.location.writeGlobalIndex,
 		...(binding.location.retainTerminal !== undefined ? { retainTerminal: binding.location.retainTerminal } : {}),
+		autoCreated: binding.autoCreated,
 	};
 }
 
@@ -305,7 +333,7 @@ export function attachMissionToLaunchResult(input: {
 		? completionAcceptance({ source: "foreground", runId, mode: input.result.details.mode, results: input.result.details.results, workflowChildren: input.result.details.workflowChildren })
 		: undefined;
 	let mission = updateMission(input.binding.location, input.binding.missionId, {
-		status: missionStatusForRun(current, runId, runStatus),
+		status: missionStatusForRun(current, runId, runStatus, missionAcceptanceStatus(input.result.details.results), input.binding.autoCreated),
 		...(input.binding.acceptanceLaunchId ? { acceptanceLaunch: { launchId: input.binding.acceptanceLaunchId, runId } } : {}),
 		addRuns: [run],
 		addArtifacts: artifactsForResult(input.result),
@@ -320,13 +348,15 @@ export function attachMissionToLaunchResult(input: {
 		const statusPath = path.join(input.result.details.asyncDir, "status.json");
 		if (fs.existsSync(statusPath)) {
 			try {
-				const status = JSON.parse(fs.readFileSync(statusPath, "utf-8")) as { state?: unknown };
+				const status = JSON.parse(fs.readFileSync(statusPath, "utf-8")) as { state?: unknown; steps?: unknown };
 				if (typeof status.state === "string" && !["queued", "running"].includes(status.state)) {
 					mission = syncMissionFromAsyncCompletion(savedMissionCompletion(input.result.details.asyncDir, runId) ?? {
 						runId,
 						asyncDir: input.result.details.asyncDir,
 						mode: input.result.details.mode,
 						state: status.state,
+						// A run that finished before this launch result was attached keeps its acceptance in the status steps.
+						...(Array.isArray(status.steps) ? { results: status.steps.map((step) => ({ acceptance: (step as { acceptance?: unknown } | null)?.acceptance })) } : {}),
 						...(firstText(input.result) ? { summary: firstText(input.result) } : {}),
 					}) ?? mission;
 				}
@@ -370,10 +400,12 @@ function parsePersistedBinding(value: unknown, source: string): MissionLaunchBin
 	}
 	if (typeof input.writeGlobalIndex !== "boolean") throw new Error(`${source}.writeGlobalIndex must be boolean`);
 	if (input.retainTerminal !== undefined && (!Number.isInteger(input.retainTerminal) || (input.retainTerminal as number) < 1)) throw new Error(`${source}.retainTerminal must be a positive integer`);
+	if (input.autoCreated !== undefined && typeof input.autoCreated !== "boolean") throw new Error(`${source}.autoCreated must be boolean`);
 	return {
 		...(typeof input.acceptanceLaunchId === "string" ? { acceptanceLaunchId: input.acceptanceLaunchId } : {}),
 		missionId: validateMissionId(input.missionId, `${source}.missionId`),
-		autoCreated: false,
+		// Bindings saved before this field existed belong to runs that completed their mission without an acceptance check.
+		autoCreated: input.autoCreated !== false,
 		location: {
 			projectRoot: input.projectRoot as string,
 			missionDir: input.missionDir as string,
@@ -387,7 +419,12 @@ function parsePersistedBinding(value: unknown, source: string): MissionLaunchBin
 export function readMissionBinding(asyncDir: string): MissionLaunchBinding | undefined {
 	const bindingPath = path.join(asyncDir, MISSION_BINDING_FILE);
 	if (!fs.existsSync(bindingPath)) return undefined;
-	return parsePersistedBinding(JSON.parse(fs.readFileSync(bindingPath, "utf-8")), bindingPath);
+	const raw = fs.readFileSync(bindingPath, "utf-8");
+	try {
+		return parsePersistedBinding(JSON.parse(raw), bindingPath);
+	} catch (error) {
+		throw new Error(`Invalid mission binding file '${bindingPath}': ${error instanceof Error ? error.message : String(error)}`, { cause: error });
+	}
 }
 
 export function syncMissionFromAsyncCompletion(value: unknown): MissionRecord | undefined {
@@ -463,8 +500,9 @@ export function syncMissionFromAsyncCompletion(value: unknown): MissionRecord | 
 	const completion = typeof event.state === "string" && terminalMissionRunStatus(event.state)
 		? completionAcceptance({ source: "async", runId, mode: event.mode, results: event.results, workflowChildren: event.workflowChildren })
 		: undefined;
+	const acceptanceStatus = missionAcceptanceStatus(event.results);
 	return updateMission(binding.location, binding.missionId, {
-		status: missionStatusForRun(current, runId, runStatus),
+		status: missionStatusForRun(current, runId, runStatus, acceptanceStatus, binding.autoCreated),
 		addRuns: [{ runId, mode: typeof event.mode === "string" && ["single", "parallel", "chain", "workflow"].includes(event.mode) ? event.mode as SubagentRunMode : "external", asyncDir: event.asyncDir, status: runStatus, completedAt, ...(summary ? { summary } : {}), ...(usage && usage.tokens > 0 ? { usage } : {}) }],
 		addArtifacts: artifacts,
 		...(completion ? {
@@ -478,6 +516,7 @@ export function syncMissionFromAsyncCompletion(value: unknown): MissionRecord | 
 			status: workflowChildStatus,
 			artifactPaths: artifacts.map((artifact) => artifact.path),
 			...(workflowChildTerminal ? { completedAt } : {}),
+			...(acceptanceStatus ? { acceptanceStatus } : {}),
 			heartbeat: { status: workflowChildStatus, ...(summary ? { message: summary } : {}) },
 		}] } : {}),
 		...(!current.goal && summary ? { summary } : {}),

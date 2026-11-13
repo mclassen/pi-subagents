@@ -34,7 +34,6 @@ function unquoteFrontmatterValue(value: string): string {
 	return trimmed;
 }
 
-/** Parse a `memory` frontmatter block string into a typed config, or undefined if invalid. */
 export function parseMemoryFrontmatter(raw: string | undefined): AgentMemoryConfig | undefined {
 	if (!raw) return undefined;
 	const entries = new Map<string, string>();
@@ -60,7 +59,7 @@ export function parseMemoryFrontmatter(raw: string | undefined): AgentMemoryConf
 	return { scope, path: scopedPath };
 }
 
-/** Whether an agent can write files this run (inherits default builtins when `tools` is unset). */
+/** Inherits default builtins when `tools` is unset. */
 export function agentHasWriteTools(agent: Pick<AgentConfig, "tools">): boolean {
 	const tools = agent.tools;
 	if (!tools) return true;
@@ -88,9 +87,9 @@ function samePath(left: string, right: string): boolean {
 	if (process.platform !== "win32") return false;
 	// Git for Windows and Node can spell the same temp path through different
 	// drive or 8.3 aliases, so use filesystem identity as the fail-closed fallback.
-	const leftStat = fs.statSync(left);
-	const rightStat = fs.statSync(right);
-	return leftStat.dev !== 0 && leftStat.ino !== 0 && leftStat.dev === rightStat.dev && leftStat.ino === rightStat.ino;
+	const leftStat = fs.statSync(left, { bigint: true });
+	const rightStat = fs.statSync(right, { bigint: true });
+	return leftStat.dev !== 0n && leftStat.ino !== 0n && leftStat.dev === rightStat.dev && leftStat.ino === rightStat.ino;
 }
 
 function readBoundedRegularFile(file: string): string | undefined {
@@ -158,8 +157,6 @@ function resolveProjectMemoryRoot(projectRoot: string): string {
 }
 
 /**
- * Resolve a memory directory under `rootDir` for the given scoped path.
- *
  * Rejects empty paths, `.`/`..` segments, paths that escape the root, and
  * existing directories whose real path (via symlink) lands outside the root.
  */
@@ -232,7 +229,9 @@ export function readMemoryFile(memoryDir: string): MemoryFileResult {
 	let fd: number;
 	try {
 		const noFollow = typeof fs.constants.O_NOFOLLOW === "number" ? fs.constants.O_NOFOLLOW : 0;
-		fd = fs.openSync(file, fs.constants.O_RDONLY | noFollow);
+		// A FIFO must not block the launch before fstat can reject non-files.
+		const nonBlock = typeof fs.constants.O_NONBLOCK === "number" ? fs.constants.O_NONBLOCK : 0;
+		fd = fs.openSync(file, fs.constants.O_RDONLY | noFollow | nonBlock);
 	} catch (error) {
 		const code = error && typeof error === "object" && "code" in error ? String(error.code) : "";
 		return code === "ELOOP" ? "unsafe" : null;

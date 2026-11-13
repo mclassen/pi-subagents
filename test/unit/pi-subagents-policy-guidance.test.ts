@@ -11,7 +11,8 @@ describe("pi-subagents delegation policy guidance", () => {
 		const prompting = readProjectFile("skills/pi-subagents/references/prompting-and-roles.md");
 		const recipes = readProjectFile("skills/pi-subagents/references/constraints-and-recipes.md");
 		const lanes = readProjectFile("skills/pi-subagents/references/multi-lane-orchestration.md");
-		const guidance = [skill, prompting, recipes, lanes].join("\n");
+		const orchestration = readProjectFile("skills/pi-subagents/references/orchestration.md");
+		const guidance = [skill, prompting, recipes, lanes, orchestration].join("\n");
 
 		assert.match(skill, /parent handles trivial, serial, or causally coupled work directly/i);
 		assert.match(skill, /delegation is subordinate to user\/global eligibility policy/i);
@@ -219,5 +220,11 @@ describe("pi-subagents delegation policy guidance", () => {
 		}
 		assert.match(skill, /up to three bounded read-only leaves.*all checkout writers are paused until verified settlement/is);
 		assert.match(skill, /exception permits no edits, commands, nested delegation or publication/i);
+	});
+
+	it("says which pi-subagents tools codemode scripts cannot call", () => {
+		const text = readProjectFile("skills/pi-subagents/SKILL.md");
+		assert.match(text, /`subagent`, `subagents_enable`, `subagent_supervisor`, `contact_supervisor`, and `structured_output`[^\n]*model-only/);
+		assert.match(text, /codemode scripts cannot reach them through `tools\.\*`, `ALL_TOOLS`, or `searchTools`/i);
 	});
 });

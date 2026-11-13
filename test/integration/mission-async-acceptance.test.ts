@@ -111,7 +111,8 @@ it("registered async workflow persists rejection, then corrected acceptance befo
 		assert.ok(execute, "package entrypoint registered public subagent tool");
 		for (const handler of handlers.get("session_start") ?? []) await handler({ reason: "startup" }, ctx);
 		let callId = 0;
-		const call = (params: Record<string, unknown>) => execute!(String(++callId), params, new AbortController().signal, undefined, ctx!);
+		// The public tool takes an inline script as options.script.
+		const call = ({ workflowScript, ...params }: Record<string, unknown>) => execute!(String(++callId), workflowScript === undefined ? params : { ...params, options: { script: workflowScript } }, new AbortController().signal, undefined, ctx!);
 		const created = await call({ action: "mission.create", mission: { title: "Synthetic async acceptance recovery", goal: true, maxIterations: 4 } });
 		assert.notEqual(created.isError, true, JSON.stringify(created));
 		const missionId = created.details.missionId!;

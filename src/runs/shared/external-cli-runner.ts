@@ -1,18 +1,22 @@
 import assert from "node:assert/strict";
+import { terminateWindowsTreeThenVerify } from "./worktree-setup-command.ts";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { finished } from "node:stream/promises";
 import type { ExternalProcessStatus, ProcessTreeTerminal } from "../../shared/types.ts";
 import { WINDOWS_APPLICATION_LAUNCH_SAFETY, WINDOWS_HIDDEN_PROCESS_OPTIONS } from "../../shared/windows-launch-safety.ts";
+import { SUBAGENT_STOPPED_MESSAGE, SUBAGENT_TIMED_OUT_MESSAGE } from "../../shared/utils.ts";
 import { createOwnedProcessTreeController, type OwnedProcessTreeController } from "../background/owned-process-tree.ts";
 import { omitExtensionBindingsEnv } from "./extension-bindings.ts";
 import { omitGitRoutingEnv } from "./git-environment.ts";
 import {
 	invalidateExternalCliPreflight,
 	preflightExternalCli,
+	resolveExternalCliSpawn,
 	type ExternalCliPreflightResult,
 	type ExternalCliPreflightSpec,
+	type ExternalCliSpawn,
 } from "./external-cli-preflight.ts";
 
 const MAX_OUTPUT_TAIL_BYTES = 64 * 1024;
@@ -22,7 +26,9 @@ const MAX_PARSER_LINE_BYTES = 256 * 1024;
 const MAX_PARSER_STREAM_BYTES = 32 * 1024 * 1024;
 const MAX_PARSER_OUTPUT_BYTES = 1024 * 1024;
 const MAX_OVERSIZED_LINE_PREFIX_BYTES = 512;
-const MAX_SKIPPABLE_LINE_BYTES = 1024 * 1024;
+// A skipped line keeps only its prefix in memory, and the stream limit still bounds the run.
+// Claude Code puts a read image's base64 in its tool-result line twice.
+const MAX_SKIPPABLE_LINE_BYTES = 8 * 1024 * 1024;
 const PARSER_PROGRESS_INTERVAL_MS = 100;
 
 export function buildExternalCliPrompt(systemInstructions: string, task: string): string {
@@ -190,6 +196,7 @@ export function runExternalCli(input: {
 		};
 		const env = externalEnvironment(input.environment?.allowlist, input.environment?.values);
 		let preflight: ExternalCliPreflightResult | undefined;
+		let launch: ExternalCliSpawn;
 		try {
 			for (const directory of input.temporaryDirectories ?? []) {
 				fs.mkdirSync(directory, { mode: 0o700 });
@@ -202,6 +209,7 @@ export function runExternalCli(input: {
 				finally { fs.closeSync(promptDescriptor); }
 			}
 			if (input.preflight) preflight = preflightExternalCli(input.command, input.preflight, env, input.cwd);
+			launch = resolveExternalCliSpawn(preflight?.binaryPath ?? input.command, input.args ?? [], env);
 		} catch (error) {
 			const endedAt = Date.now();
 			const externalProcess = { startedAt, endedAt, durationMs: endedAt - startedAt, exitCode: 1, processSignal: null, stdoutPath, stderrPath, ...(input.finalOutputPath ? { finalOutputPath: input.finalOutputPath } : {}) } satisfies ExternalProcessStatus;
@@ -234,6 +242,18 @@ export function runExternalCli(input: {
 		let processTree: OwnedProcessTreeController | undefined;
 		let processPid: number | undefined;
 		let termination: Promise<ProcessTreeTerminal> | undefined;
+		// A throwing onProcess fails the run only after the process is stopped and temp paths are removed.
+		let callbackFailed = false;
+		let callbackError: unknown;
+		const notifyProcess = (status: ExternalProcessStatus) => {
+			try { input.onProcess?.(status); }
+			catch (error) {
+				if (callbackFailed) return;
+				callbackFailed = true;
+				callbackError = error;
+				if (!settled && processTree && processPid !== undefined) termination ??= terminateWindowsTreeThenVerify(processPid, processTree);
+			}
+		};
 		const flushProgress = () => {
 			if (!latestProgress) return;
 			input.onParserProgress?.(latestProgress);
@@ -253,16 +273,16 @@ export function runExternalCli(input: {
 			progressTimer.unref?.();
 		};
 		const terminate = (reason: "timeout" | "stop") => {
-			if (settled || timedOut || stopped || parserError) return;
+			if (settled || timedOut || stopped || parserError || callbackFailed) return;
 			timedOut = reason === "timeout";
 			stopped = reason === "stop";
-			if (processTree && processPid !== undefined) termination = processTree.terminate();
+			if (processTree && processPid !== undefined) termination = terminateWindowsTreeThenVerify(processPid, processTree);
 		};
 		const failParser = (error: unknown) => {
 			if (parserError) return;
 			parserError = error instanceof Error ? error : new Error(String(error));
 			if (input.preflight) invalidateExternalCliPreflight(input.command, input.preflight, "parser");
-			if (processTree && processPid !== undefined) termination = processTree.terminate();
+			if (processTree && processPid !== undefined) termination = terminateWindowsTreeThenVerify(processPid, processTree);
 		};
 		const parseLine = (line: Buffer, byteLength = line.length): boolean => {
 			if (!input.parser || parserError) return false;
@@ -321,7 +341,7 @@ export function runExternalCli(input: {
 			}
 			appendPendingLine(chunk.subarray(start));
 		};
-		const child = spawn(preflight?.binaryPath ?? input.command, input.args ?? [], {
+		const child = spawn(launch.command, launch.args, {
 			cwd: input.cwd,
 			env,
 			stdio: ["pipe", "pipe", "pipe"],
@@ -339,7 +359,7 @@ export function runExternalCli(input: {
 			stderrPath,
 			...(input.finalOutputPath ? { finalOutputPath: input.finalOutputPath } : {}),
 		};
-		input.onProcess?.(initialProcess);
+		notifyProcess(initialProcess);
 		child.stdout.on("data", (chunk: Buffer) => {
 			parseChunk(chunk);
 			writeBoundedLog(child.stdout, stdoutStream, chunk, stdoutLog, limits.stdoutLogBytes);
@@ -387,16 +407,16 @@ export function runExternalCli(input: {
 					...(stdoutLog.total > stdoutLog.bytes ? { stdoutTruncated: true } : {}),
 					...(stderrLog.total > stderrLog.bytes ? { stderrTruncated: true } : {}),
 				};
-				input.onProcess?.(externalProcess);
+				notifyProcess(externalProcess);
 				const stderr = stderrTail.text().trim();
 				const parserFailure = parserError?.message ?? (parserTerminal?.state === "failed" ? parserTerminal.error ?? "External CLI parser reported terminal failure." : undefined);
 				const treeFailure = treeProof?.state === "unknown"
 					? `Process-tree cleanup failed: ${treeProof.reason}.`
 					: undefined;
 				const error = stopped
-					? input.stopMessage ?? "Subagent stopped by user."
+					? input.stopMessage ?? SUBAGENT_STOPPED_MESSAGE
 					: timedOut
-						? input.timeoutMessage ?? "Subagent timed out."
+						? input.timeoutMessage ?? SUBAGENT_TIMED_OUT_MESSAGE
 						: spawnError?.message ?? parserFailure ?? treeFailure ?? (exitCode === 0 ? undefined : stderr || `External CLI exited with code ${exitCode}.`);
 				if (error && input.preflight && !parserError) invalidateExternalCliPreflight(input.command, input.preflight, classifyInvalidation(error));
 				const result: ExternalCliRunResult = {
@@ -416,9 +436,10 @@ export function runExternalCli(input: {
 				const streamFailure = streamResults.find((streamResult) => streamResult.status === "rejected");
 				try { cleanupTemporaryPaths(); }
 				catch (cleanupError) { reject(cleanupError); return; }
-				if (streamFailure?.status === "rejected") reject(streamFailure.reason);
+				if (callbackFailed) reject(callbackError);
+				else if (streamFailure?.status === "rejected") reject(streamFailure.reason);
 				else resolve(result);
-			})();
+			})().catch(reject);
 		});
 	});
 }

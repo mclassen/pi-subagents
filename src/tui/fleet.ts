@@ -2,7 +2,9 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import { getMarkdownTheme, type ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi, type Component, type MarkdownTheme } from "@earendil-works/pi-tui";
+import { matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi, type Component, type MarkdownTheme, type TuiMouseEvent, type TuiMouseEventResult } from "@earendil-works/pi-tui";
+import { fleetContains, fleetLayout, type FleetLayout } from "./fleet-layout.ts";
+import { FleetViewport } from "./fleet-viewport.ts";
 import { snapshotExternalRuns, type ExternalRun } from "../api/external-runs.ts";
 import { getArtifactPaths, getArtifactsDir } from "../shared/artifacts.ts";
 import { formatDuration, formatModelThinking, formatTokens, formatTokenUsage, shortenPath } from "../shared/formatters.ts";
@@ -16,8 +18,14 @@ import type { SteerDeliveryMode } from "../runs/background/control-channel.ts";
 import { stopAsyncRun } from "../runs/foreground/async-stop-action.ts";
 import { resolveWorkflowForegroundSteeringTarget, steerWorkflowForegroundTarget } from "../runs/foreground/workflow-foreground-steering.ts";
 import { contextModeBadge, contextModeLabel } from "../runs/shared/context-mode.ts";
+import { foregroundChildStateLabel } from "../runs/foreground/foreground-history.ts";
 import { FLEET_STATUS_WIDGET_KEY } from "./fleet-status.ts";
-import { readFleetTranscript, renderFleetTranscript, type FleetTranscript } from "./fleet-transcript.ts";
+import { reportSessionWarning } from "../shared/session-warnings.ts";
+import { stepTaskSummary } from "./render.ts";
+import { renderFleetTranscript } from "./fleet-transcript.ts";
+import { readFleetTranscript, type FleetTranscript } from "../shared/fleet-transcript-reader.ts";
+import { runningTone } from "./running-tone.ts";
+import { childThinkingLevel, type ThinkingLevel } from "../shared/model-info.ts";
 import { handleInspectorAction } from "../inspectors/actions.ts";
 import type { InspectorPlugin } from "../inspectors/types.ts";
 import { getLivePromptAudit, type LivePromptAudit, type PromptAuditView } from "../runs/foreground/prompt-audit.ts";
@@ -80,7 +88,7 @@ type AsyncStep = AsyncRunSummary["steps"][number];
 export type FleetItem = (
 	| { key: string; kind: "foreground-active"; runId: string; index?: number; agent: string; state: "running"; updatedAt: number; control: ForegroundRunControl; activeChild?: ForegroundChildControl }
 	| { key: string; kind: "foreground-recent"; runId: string; index: number; agent: string; state: ForegroundResumeChild["status"]; updatedAt: number; run: ForegroundResumeRun; child: ForegroundResumeChild }
-	| { key: string; kind: "async"; runId: string; index?: number; agent: string; state: string; updatedAt: number; run: AsyncRunSummary; step?: AsyncStep }
+	| { key: string; kind: "async"; runId: string; index?: number; agent: string; state: string; updatedAt: number; run: AsyncRunSummary; step?: AsyncStep; task?: string }
 	| { key: string; kind: "external"; runId: string; agent: string; state: ExternalRun["state"]; updatedAt: number; run: ExternalRun }
 ) & { description?: string };
 
@@ -110,7 +118,7 @@ export interface FleetViewOptions {
 	fleetKeybindings?: FleetKeybindingsConfig;
 	actions?: FleetActionHandlers;
 	copyText?: (text: string) => Promise<void> | void;
-	inspectorPlugins?: readonly InspectorPlugin[];
+	inspectorPlugins?: () => readonly InspectorPlugin[];
 	inspectorEnv?: NodeJS.ProcessEnv;
 }
 
@@ -166,18 +174,22 @@ function asyncItems(run: AsyncRunSummary, description?: string): FleetItem[] {
 	if (run.steps.length === 0 || run.mode === "workflow") {
 		return [{ key: `async:${run.id}`, kind: "async", runId: run.id, agent: run.mode, state: run.state, updatedAt, run, ...(description ? { description } : {}) }];
 	}
-	return run.steps.map((step) => ({
-		key: `async:${run.id}:${step.index}`,
-		kind: "async" as const,
-		runId: run.id,
-		index: step.index,
-		agent: step.label ? `${step.label} (${step.agent})` : step.agent,
-		state: step.status,
-		updatedAt: step.lastActivityAt ?? updatedAt,
-		run,
-		step,
-		...(description ? { description } : {}),
-	}));
+	return run.steps.map((step) => {
+		const task = stepTaskSummary(step, step.agent);
+		return {
+			key: `async:${run.id}:${step.index}`,
+			kind: "async" as const,
+			runId: run.id,
+			index: step.index,
+			agent: step.label ? `${step.label} (${step.agent})` : step.agent,
+			state: step.status,
+			updatedAt: step.lastActivityAt ?? updatedAt,
+			run,
+			step,
+			...(task ? { task } : {}),
+			...(description ? { description } : {}),
+		};
+	});
 }
 
 function orderFleetAsyncRuns(runs: AsyncRunSummary[], terminalLimit: number, trackedJobs: Map<string, AsyncJobState>): AsyncRunSummary[] {
@@ -274,6 +286,7 @@ export function collectFleetSnapshot(
 				entryLimit: MAX_FLEET_HISTORY_CANDIDATES,
 				resultsDir: options.resultsDir ?? DIRS.results,
 				reconcile: false,
+				onCorruptStatus: (warning) => reportSessionWarning(state, warning),
 			}).filter((run) => !trackedIds.has(run.id));
 			runs = [...trackedRuns, ...history];
 		} else {
@@ -288,7 +301,7 @@ export function collectFleetSnapshot(
 
 	if (state.currentSessionId) {
 		try {
-			for (const run of snapshotExternalRuns(state.currentSessionId, { ignoreMalformed: true, onMalformedRecord: (message) => console.warn(`[pi-subagents] Removed ${message}`) })) {
+			for (const run of snapshotExternalRuns(state.currentSessionId, { ignoreMalformed: true, onMalformedRecord: (message) => reportSessionWarning(state, `Removed ${message}`) })) {
 				items.push({
 					key: `external:${run.id}`,
 					kind: "external",
@@ -348,8 +361,18 @@ function visibleWorkflowParentKeyForForegroundKey(state: SubagentState, key: str
 	return undefined;
 }
 
+/** The recorded level of the one child a running Fleet row stands for; a whole run or an external run has none. */
+function fleetItemThinkingLevel(item: FleetItem): ThinkingLevel | undefined {
+	switch (item.kind) {
+		case "foreground-active": return childThinkingLevel(item.activeChild ?? item.control);
+		case "foreground-recent": return childThinkingLevel(item.child);
+		case "async": return childThinkingLevel(item.step);
+		case "external": return undefined;
+	}
+}
+
 function statusGlyph(item: FleetItem, theme: Theme): string {
-	if (item.state === "running") return theme.fg("accent", "●");
+	if (item.state === "running") return runningTone(theme, fleetItemThinkingLevel(item))("●");
 	if (item.state === "queued" || item.state === "pending") return theme.fg("muted", "◦");
 	if (item.state === "complete" || item.state === "completed") return theme.fg("success", "✓");
 	if (item.state === "paused" || item.state === "stopped" || item.state === "detached") return theme.fg("warning", "■");
@@ -485,7 +508,7 @@ function foregroundRecentDetail(item: Extract<FleetItem, { kind: "foreground-rec
 	const lines = [
 		`Run: ${item.runId}`,
 		"Source: foreground",
-		`State: ${child.status}`,
+		`State: ${foregroundChildStateLabel(run, child)}`,
 		`Mode: ${run.mode}`,
 		`Child: ${child.index} (${child.agent})${contextModeLabel(child.context) ? ` ${contextModeLabel(child.context)}` : ""}`,
 		modelThinking ? `Model: ${modelThinking}` : undefined,
@@ -815,8 +838,10 @@ interface FleetTranscriptCache {
 
 function transcriptFingerprint(filePath: string): string {
 	try {
-		const stat = fs.statSync(filePath);
-		return `${stat.size}:${stat.mtimeMs}`;
+		// ino and ctime catch a same-size, same-mtime replacement. Bigint keeps
+		// Windows file ids, which exceed 2^53, exact.
+		const stat = fs.statSync(filePath, { bigint: true });
+		return `${stat.ino}:${stat.size}:${stat.mtimeNs}:${stat.ctimeNs}`;
 	} catch {
 		return "missing";
 	}
@@ -826,11 +851,8 @@ export class SubagentFleetComponent implements Component {
 	private snapshot: FleetSnapshot = { items: [] };
 	private selected = 0;
 	private selectedKey: string | undefined;
-	private detailScroll = 0;
-	private detailAutoFollow = true;
-	private detailLineCount = 0;
-	private detailViewportHeight = 8;
-	private bodyHeight = 8;
+	private readonly viewport: FleetViewport;
+	private renderedLayout: FleetLayout | undefined;
 	private expandedTools = false;
 	private promptAuditOpen = false;
 	private promptAuditView: PromptAuditView = "authored";
@@ -860,6 +882,7 @@ export class SubagentFleetComponent implements Component {
 		options: FleetViewOptions = {},
 	) {
 		this.tui = tui;
+		this.viewport = new FleetViewport(() => this.tui.requestRender());
 		this.theme = theme;
 		this.markdownTheme = options.markdownTheme ?? getMarkdownTheme();
 		this.state = state;
@@ -878,7 +901,7 @@ export class SubagentFleetComponent implements Component {
 			this.refreshTimer = undefined;
 			if (this.disposed) return;
 			try {
-				this.invalidate();
+				this.refresh();
 				this.tui.requestRender();
 			} finally {
 				this.scheduleRefresh();
@@ -906,10 +929,14 @@ export class SubagentFleetComponent implements Component {
 	}
 
 	private moveSelection(delta: number): void {
-		if (this.snapshot.items.length === 0) return;
-		this.selected = Math.max(0, Math.min(this.snapshot.items.length - 1, this.selected + delta));
+		this.selectItem(Math.max(0, Math.min(this.snapshot.items.length - 1, this.selected + delta)));
+	}
+
+	private selectItem(index: number): void {
+		if (!this.snapshot.items[index]) return;
+		this.selected = index;
 		this.selectedKey = this.snapshot.items[this.selected]?.key;
-		this.detailAutoFollow = true;
+		this.viewport.follow();
 		this.resetActionInput();
 		this.tui.requestRender();
 	}
@@ -945,8 +972,7 @@ export class SubagentFleetComponent implements Component {
 		if (!target) return;
 		this.selected = this.snapshot.items.findIndex((item) => item.key === target.key);
 		this.selectedKey = target.key;
-		this.detailScroll = 0;
-		this.detailAutoFollow = false;
+		this.viewport.resetTop();
 		this.tui.requestRender();
 	}
 
@@ -1025,8 +1051,7 @@ export class SubagentFleetComponent implements Component {
 	private setActionNotice(result: FleetActionResult): void {
 		this.actionNotice = result;
 		this.resetActionInput();
-		this.detailAutoFollow = false;
-		this.detailScroll = 0;
+		this.viewport.resetTop();
 		this.refresh();
 		this.tui.requestRender();
 	}
@@ -1046,10 +1071,34 @@ export class SubagentFleetComponent implements Component {
 	}
 
 	private scrollDetail(delta: number): void {
-		const maxScroll = Math.max(0, this.detailLineCount - this.detailViewportHeight);
-		this.detailScroll = Math.max(0, Math.min(maxScroll, this.detailScroll + delta));
-		this.detailAutoFollow = this.detailScroll >= maxScroll;
-		this.tui.requestRender();
+		this.viewport.scroll.scrollBy(delta);
+	}
+
+	handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+		// Block pointer fallback as well as inspector actions while a text/confirmation modal owns input.
+		if (this.steerDraft !== undefined || this.redoGuidanceDraft !== undefined || this.stopConfirming || this.actionBusy) {
+			return { handled: true, render: false };
+		}
+		const layout = this.renderedLayout;
+		if (!layout || layout.width !== event.width || layout.rows !== (this.tui.terminal?.rows ?? 32)) {
+			// Never use hit regions from a different size; wheel must not escape to the transcript.
+			return event.type === "wheel" ? { handled: true, render: false } : undefined;
+		}
+		if (event.type === "wheel" && fleetContains(layout.output, event.x, event.y)) {
+			this.scrollDetail(event.wheelDelta ?? 0);
+			return { handled: true, render: false };
+		}
+		if (this.promptAuditOpen) return { handled: true, render: false };
+		if (event.type === "click" && event.button === "left" && !event.shift && !event.alt && !event.ctrl
+			&& fleetContains(layout.roster, event.x, event.y)) {
+			const key = layout.rosterKeys[event.y - layout.roster.y];
+			const index = key === undefined ? -1 : this.snapshot.items.findIndex((item) => item.key === key);
+			if (index < 0) return undefined;
+			this.selectItem(index);
+			return { handled: true, render: false };
+		}
+		// Unowned wheel inside the overlay would otherwise scroll the transcript behind it.
+		return event.type === "wheel" ? { handled: true, render: false } : undefined;
 	}
 
 	handleInput(data: string): void {
@@ -1087,7 +1136,7 @@ export class SubagentFleetComponent implements Component {
 		if (this.promptAuditOpen) {
 			if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c")) {
 				this.promptAuditOpen = false;
-				this.detailAutoFollow = true;
+				this.viewport.follow();
 				this.tui.requestRender();
 				return;
 			}
@@ -1095,7 +1144,7 @@ export class SubagentFleetComponent implements Component {
 			if (data === "k") return this.movePromptSelection(-1);
 			if (data === "1" || data === "2" || data === "3") {
 				this.promptAuditView = data === "1" ? "authored" : data === "2" ? "runtime" : "effective";
-				this.detailScroll = 0;
+				this.viewport.resetTop();
 				this.tui.requestRender();
 				return;
 			}
@@ -1107,8 +1156,7 @@ export class SubagentFleetComponent implements Component {
 				else {
 					this.actionNotice = undefined;
 					this.redoGuidanceDraft = "";
-					this.detailAutoFollow = false;
-					this.detailScroll = 0;
+					this.viewport.resetTop();
 					this.tui.requestRender();
 				}
 				return;
@@ -1125,8 +1173,8 @@ export class SubagentFleetComponent implements Component {
 			}
 			if (matchesFleetAction(data, this.keybindings, "scrollUp")) return this.scrollDetail(-1);
 			if (matchesFleetAction(data, this.keybindings, "scrollDown")) return this.scrollDetail(1);
-			if (matchesFleetAction(data, this.keybindings, "pageUp")) return this.scrollDetail(-this.detailViewportHeight);
-			if (matchesFleetAction(data, this.keybindings, "pageDown")) return this.scrollDetail(this.detailViewportHeight);
+			if (matchesFleetAction(data, this.keybindings, "pageUp")) return this.scrollDetail(-this.viewport.scroll.viewportHeight);
+			if (matchesFleetAction(data, this.keybindings, "pageDown")) return this.scrollDetail(this.viewport.scroll.viewportHeight);
 			return;
 		}
 		if (this.steerDraft !== undefined) {
@@ -1193,8 +1241,8 @@ export class SubagentFleetComponent implements Component {
 		if (matchesFleetAction(data, this.keybindings, "selectDown")) return this.moveSelection(1);
 		if (matchesFleetAction(data, this.keybindings, "selectFirst")) return this.moveSelection(-this.snapshot.items.length);
 		if (matchesFleetAction(data, this.keybindings, "selectLast")) return this.moveSelection(this.snapshot.items.length);
-		if (matchesFleetAction(data, this.keybindings, "pageUp")) return this.scrollDetail(-this.detailViewportHeight);
-		if (matchesFleetAction(data, this.keybindings, "pageDown")) return this.scrollDetail(this.detailViewportHeight);
+		if (matchesFleetAction(data, this.keybindings, "pageUp")) return this.scrollDetail(-this.viewport.scroll.viewportHeight);
+		if (matchesFleetAction(data, this.keybindings, "pageDown")) return this.scrollDetail(this.viewport.scroll.viewportHeight);
 		if (matchesFleetAction(data, this.keybindings, "refresh")) {
 			this.transcriptCache = undefined;
 			this.refresh();
@@ -1206,8 +1254,7 @@ export class SubagentFleetComponent implements Component {
 			else {
 				this.promptAuditOpen = true;
 				this.promptAuditView = "authored";
-				this.detailScroll = 0;
-				this.detailAutoFollow = false;
+				this.viewport.resetTop();
 				this.actionNotice = undefined;
 				this.tui.requestRender();
 			}
@@ -1219,8 +1266,7 @@ export class SubagentFleetComponent implements Component {
 			else {
 				this.actionNotice = undefined;
 				this.steerDraft = "";
-				this.detailAutoFollow = false;
-				this.detailScroll = 0;
+				this.viewport.resetTop();
 				this.tui.requestRender();
 			}
 			return;
@@ -1231,8 +1277,7 @@ export class SubagentFleetComponent implements Component {
 			else {
 				this.actionNotice = undefined;
 				this.stopConfirming = true;
-				this.detailAutoFollow = false;
-				this.detailScroll = 0;
+				this.viewport.resetTop();
 				this.tui.requestRender();
 			}
 			return;
@@ -1249,17 +1294,20 @@ export class SubagentFleetComponent implements Component {
 		}
 	}
 
-	private rosterLines(width: number): string[] {
+	private rosterLines(layout: FleetLayout): string[] {
 		if (this.snapshot.items.length === 0) return [this.theme.fg("dim", "No tracked children")];
-		const start = Math.max(0, Math.min(this.selected - this.bodyHeight + 1, Math.max(0, this.snapshot.items.length - this.bodyHeight)));
-		return this.snapshot.items.slice(start, start + this.bodyHeight).map((item, offset) => {
-			const index = start + offset;
+		return layout.rosterKeys.map((_key, offset) => {
+			const index = layout.rosterStart + offset;
+			const item = this.snapshot.items[index]!;
 			const marker = index === this.selected ? this.theme.fg("accent", "›") : " ";
 			const context = item.kind === "async" ? contextModeBadge(this.theme, item.step?.context ?? item.run.context) : item.kind === "foreground-recent" ? contextModeBadge(this.theme, item.child.context) : "";
-			const agent = index === this.selected ? this.theme.bold(item.agent) : item.agent;
-			const identity = item.runId.slice(0, 8);
+			// A child's task tells rows of one run apart; the run id stays in the detail header.
+			const task = item.kind === "async" ? item.task : undefined;
+			const name = task && item.kind === "async" && item.step ? item.step.agent : item.agent;
+			const agent = index === this.selected ? this.theme.bold(name) : name;
+			const identity = task ?? item.runId.slice(0, 8);
 			const left = `${marker} ${statusGlyph(item, this.theme)} ${agent}${context} ${this.theme.fg("dim", `· ${identity}`)}`;
-			return rightAligned(left, this.theme.fg("dim", item.state), width);
+			return rightAligned(left, this.theme.fg("dim", item.state), layout.roster.width);
 		});
 	}
 
@@ -1280,7 +1328,10 @@ export class SubagentFleetComponent implements Component {
 		const body = transcript.events.length > 0
 			? renderFleetTranscript(transcript, width, this.theme, this.markdownTheme, { expandedTools: this.expandedTools })
 			: [];
-		this.transcriptCache = { path: target.path, fingerprint, width, expandedTools: this.expandedTools, transcript, body };
+		// A failed read (refused path, read error) may recover without a metadata change, so retry it.
+		this.transcriptCache = transcript.readFailed
+			? undefined
+			: { path: target.path, fingerprint, width, expandedTools: this.expandedTools, transcript, body };
 		return { transcript, body: [...body] };
 	}
 
@@ -1356,23 +1407,20 @@ export class SubagentFleetComponent implements Component {
 	}
 
 	render(width: number): string[] {
-		if (width < 36) return [truncateToWidth("Subagent fleet needs at least 36 columns. Esc closes.", width)];
+		const layout = fleetLayout(width, this.tui.terminal?.rows ?? 32, this.selected, this.snapshot.items);
+		this.renderedLayout = layout;
+		if (!layout) return [truncateToWidth("Subagent fleet needs at least 36 columns. Esc closes.", width)];
 		const innerWidth = width - 2;
-		const rows = this.tui.terminal?.rows ?? 32;
-		this.bodyHeight = Math.max(2, Math.floor(rows * 0.85) - 6);
-		const rosterWidth = Math.max(22, Math.min(46, Math.floor((innerWidth - 1) * 0.38)));
-		const detailWidth = Math.max(1, innerWidth - rosterWidth - 1);
-		const roster = this.rosterLines(rosterWidth);
+		const { bodyHeight } = layout;
+		const rosterWidth = layout.roster.width;
+		const detailWidth = layout.output.width;
+		const roster = this.rosterLines(layout);
 		const detail = this.wrappedDetail(detailWidth);
-		const detailHeader = detail.header.slice(0, Math.max(0, this.bodyHeight - 1));
-		this.detailViewportHeight = Math.max(1, this.bodyHeight - detailHeader.length);
-		this.detailLineCount = detail.body.length;
-		const maxDetailScroll = Math.max(0, detail.body.length - this.detailViewportHeight);
-		if (this.detailAutoFollow) this.detailScroll = maxDetailScroll;
-		else if (this.detailScroll > maxDetailScroll) this.detailScroll = maxDetailScroll;
+		const detailHeader = detail.header.slice(0, Math.max(0, bodyHeight - 1));
+		const outputBodyHeight = bodyHeight - detailHeader.length;
 		const visibleDetails = [
 			...detailHeader,
-			...detail.body.slice(this.detailScroll, this.detailScroll + this.detailViewportHeight),
+			...this.viewport.render(detail.body, detailWidth, outputBodyHeight),
 		];
 		const lines = [this.theme.fg("border", `╭${"─".repeat(innerWidth)}╮`)];
 		const selected = this.snapshot.items[this.selected];
@@ -1384,7 +1432,7 @@ export class SubagentFleetComponent implements Component {
 			: this.theme.fg("dim", "no children ");
 		lines.push(this.theme.fg("border", "│") + rightAligned(title, selectedStatus, innerWidth) + this.theme.fg("border", "│"));
 		lines.push(this.theme.fg("border", `├${"─".repeat(rosterWidth)}┬${"─".repeat(detailWidth)}┤`));
-		for (let index = 0; index < this.bodyHeight; index++) {
+		for (let index = 0; index < bodyHeight; index++) {
 			lines.push(
 				this.theme.fg("border", "│")
 				+ fit(roster[index] ?? "", rosterWidth)
@@ -1406,6 +1454,7 @@ export class SubagentFleetComponent implements Component {
 	}
 
 	invalidate(): void {
+		this.renderedLayout = undefined;
 		this.transcriptCache = undefined;
 		this.refresh();
 	}
@@ -1459,7 +1508,7 @@ export async function openSubagentFleet(ctx: ExtensionContext, state: SubagentSt
 			cwd: state.baseCwd,
 			...(state.authorityPolicy ? { authorityPolicy: state.authorityPolicy } : {}),
 			...(state.missionStoreConfig ? { missions: state.missionStoreConfig } : {}),
-			...(options.inspectorPlugins ? { plugins: options.inspectorPlugins } : {}),
+			plugins: options.inspectorPlugins?.(),
 			...(options.inspectorEnv ? { env: options.inspectorEnv } : {}),
 		}), `Failed to open inspector for async run ${input.runId}.`),
 		redoPrompt: async (input: { runId: string; index: number; guidance: string; control?: ForegroundRunControl }) => {

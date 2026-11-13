@@ -5,8 +5,9 @@ import os from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
 import { Worker } from "node:worker_threads";
+import { WorkflowScriptProcess } from "../../src/workflows/workflow-script-worker.ts";
 import { formatChildToolDiagnostic } from "../../src/runs/shared/tool-availability.ts";
-import { formatWorkflowJsonPreview, previewSimpleWorkflowRun, runWorkflowScript, validateWorkflowScript, WorkflowScriptError } from "../../src/workflows/scripted-workflow.ts";
+import { formatWorkflowJsonPreview, previewSimpleWorkflowRun, runWorkflowScript, validateWorkflowScript, WorkflowScriptError, type WorkflowScriptChildResult } from "../../src/workflows/scripted-workflow.ts";
 import { workflowChildSummary } from "../../src/workflows/workflow-child-summary.ts";
 import { preflightWorkflowWorktrees } from "../../src/runs/foreground/subagent-executor.ts";
 import { runSetupCommand } from "../../src/runs/shared/worktree-setup-command.ts";
@@ -74,6 +75,258 @@ describe("scripted workflow runtime", () => {
 		assert.deepEqual(escape.value, ["EvalError", "EvalError", "EvalError"], "args prototypes must belong to the VM realm so Function is blocked by codeGeneration.strings:false");
 	});
 
+	const realmHost = {
+		async launch(key: string) {
+			return key === "fails"
+				? { key, ok: false, output: "child failed", error: "child failed", artifactPaths: [] }
+				: { key, ok: true, output: `done ${key}`, runId: `run-${key}`, artifactPaths: [] };
+		},
+		async status(key: string) {
+			return key === "missing" ? { key, ok: false, output: "not found", artifactPaths: [] } : { key, ok: true, output: "ok", artifactPaths: [] };
+		},
+		async steer(key: string) { return { key, state: "delivered" as const }; },
+		async host(key: string) { return { key, kind: "command" as const, ok: true, state: "passed" as const, exitCode: 0, stdout: "", stderr: "", outputPath: "out.log", durationMs: 1 }; },
+		state: { get: () => ({ saved: true }), set: () => undefined },
+	};
+
+	it("blocks string compilation through every API value a workflow script receives", async () => {
+		const result = await runWorkflowScript({
+			...realmHost,
+			script: `
+				function realmOf(value) {
+					const outcomes = [() => value.constructor.constructor, () => Object.getPrototypeOf(value).constructor.constructor].map((getFunction) => {
+						try { getFunction()("return 1")(); return "worker"; } catch (error) { return error.name; }
+					});
+					return outcomes[0] === outcomes[1] ? outcomes[0] : outcomes.join("/");
+				}
+				const launched = runs.run("child", { agent: "worker", task: "t" });
+				const child = await launched;
+				const all = await runs.all([{ key: "all", agent: "worker", task: "t" }]);
+				let thrown;
+				try { runs.run(1); } catch (error) { thrown = error; }
+				const rejected = await runs.status("missing").then(() => undefined, (error) => error);
+				const nativePromise = WebAssembly.compile(new Uint8Array(0));
+				nativePromise.catch(() => undefined);
+				let customInspectorArgs;
+				console.log({ [Symbol.for("nodejs.util.inspect.custom")](depth, options, inspect) { customInspectorArgs = [options, inspect]; return "custom"; } });
+				const callSiteValues = [];
+				const captureSites = (error, sites) => { for (const site of sites) callSiteValues.push(site, site.getFunction(), site.getThis()); return "trace"; };
+				for (const ErrorClass of [Error, thrown.constructor]) { try { ErrorClass.prepareStackTrace = captureSites; } catch {} }
+				console.log(new Error("stack first read by console"));
+				void new Error("script stack").stack;
+				try { runs.run(2); } catch (error) { void error.stack; }
+				const replacedErrorSites = [];
+				const OriginalError = Error;
+				globalThis.Error = function ReplacedError() {};
+				globalThis.Error.prepareStackTrace = (error, sites) => { replacedErrorSites.push(...sites); return "trace"; };
+				void new OriginalError("stack read with a replaced Error").stack;
+				globalThis.Error = OriginalError;
+				const routes = {
+					globalThis, runs, emit, "console.log": console.log, "state.get": state.get,
+					...Object.fromEntries(Object.keys(runs).map((name) => ["runs." + name, runs[name]])),
+					Promise, "Promise.prototype": Promise.prototype, "new Promise": new Promise((resolve) => resolve(1)),
+					"runs.run promise": launched, "promise then": launched.then, "promise catch": launched.catch, "promise finally": launched.finally,
+					"runs.run result": child, "result toString": child.toString, "runs.status promise": runs.status("child"),
+					"runs.all result": all, "runs.all result map": all.map,
+					"thrown error": thrown, "rejected error": rejected, "script promise then": nativePromise.then,
+				};
+				return {
+					...Object.fromEntries(Object.entries(routes).map(([name, value]) => [name, realmOf(value)])),
+					"custom inspector": customInspectorArgs ? customInspectorArgs.map(realmOf).join("/") : "not called",
+					"stack trace hook": callSiteValues.length === 0 ? "locked" : callSiteValues.filter(Boolean).every((value) => realmOf(value) === "EvalError") ? "EvalError" : "worker",
+					"replaced Error stack hook": replacedErrorSites.flatMap((site) => [site, site.getFunction(), site.getThis()]).filter(Boolean).every((value) => realmOf(value) === "EvalError") ? "EvalError" : "worker",
+				};
+			`,
+		});
+		const value = result.value as Record<string, string>;
+		assert.deepEqual(
+			Object.entries(value).filter(([, realm]) => realm !== "EvalError"),
+			[["custom inspector", "not called"], ["stack trace hook", "locked"]],
+			"every value must come from a realm whose Function cannot compile strings",
+		);
+		assert.ok(Object.keys(value).length > 25);
+	});
+
+	it("finds no worker-realm value anywhere a workflow script can walk to", async () => {
+		const result = await runWorkflowScript({
+			...realmHost,
+			script: `
+				const seen = new Set();
+				const leaks = [];
+				function compilesStrings(value) {
+					for (const getFunction of [() => value.constructor.constructor, () => Object.getPrototypeOf(value).constructor.constructor]) {
+						let candidate;
+						try { candidate = getFunction(); } catch { continue; }
+						if (typeof candidate !== "function") continue;
+						try { candidate("return 1")(); return true; } catch {}
+					}
+					return false;
+				}
+				function sweep(path, value, depth) {
+					if (value === null || (typeof value !== "object" && typeof value !== "function") || seen.has(value)) return;
+					seen.add(value);
+					if (compilesStrings(value)) leaks.push(path);
+					if (depth === 0) return;
+					try { sweep(path + ".[[Prototype]]", Object.getPrototypeOf(value), depth - 1); } catch {}
+					let keys = [];
+					try { keys = Reflect.ownKeys(value); } catch {}
+					for (const key of keys) {
+						let descriptor;
+						try { descriptor = Object.getOwnPropertyDescriptor(value, key); } catch { continue; }
+						if (!descriptor) continue;
+						const name = path + "." + String(key);
+						sweep(name, descriptor.value, depth - 1);
+						sweep(name + "[get]", descriptor.get, depth - 1);
+						sweep(name + "[set]", descriptor.set, depth - 1);
+						sweep(name + "[descriptor]", descriptor, depth - 1);
+					}
+				}
+				const callers = [];
+				const callSites = [];
+				function probeFrames(callback) { callers.push(callback.caller); void new Error("probe").stack; }
+				Error.prepareStackTrace = (error, sites) => { for (const site of sites) callSites.push(site, site.getFunction(), site.getThis()); return "trace"; };
+				const values = {};
+				const launched = runs.run("child", { agent: "worker", task: "t" });
+				values.launched = launched;
+				values.chained = [launched.then(function onValue(value) { probeFrames(onValue); return value; }), launched.catch(() => undefined), launched.finally(() => undefined)];
+				values.child = await launched;
+				values.all = await runs.all([{ key: "all", agent: "worker", task: "t" }]);
+				values.lanes = await runs.lanes([{ key: "lane", stages: [{ key: "first", agent: "worker", task: "t" }] }]);
+				values.proxied = await runs.run("proxied", new Proxy({ agent: "worker", task: "t" }, { ownKeys: function ownKeys(target) { probeFrames(ownKeys); return Reflect.ownKeys(target); } })).then((value) => value, (error) => error);
+				values.status = await runs.status("child");
+				values.steer = await runs.steer("child", "guide");
+				values.host = await runs.host("check", { kind: "command", command: "true", timeoutMs: 1000 });
+				values.state = [await state.get("saved"), await state.set("saved", { a: 1 })];
+				values.failed = await runs.run("fails", { agent: "worker", task: "t" }).then(() => undefined, (error) => error);
+				values.missing = await runs.status("missing").then(() => undefined, (error) => error);
+				values.combinators = [Promise.resolve(1), Promise.all([launched]), Promise.allSettled([1]), Promise.race([1]), Promise.any([1]), Promise.withResolvers ? Promise.withResolvers() : null];
+				values.constructed = new Promise(function executor(resolve, reject) { probeFrames(executor); values.executorArgs = [resolve, reject]; resolve(1); });
+				await Promise.resolve({ then(resolve, reject) { values.thenableArgs = [resolve, reject]; resolve(1); } });
+				values.native = WebAssembly.compile(new Uint8Array(0));
+				values.nativeError = await values.native.then(() => undefined, (error) => error);
+				console.log(new Error("stack first read by console"));
+				values.thrown = [
+					() => runs.run(1), () => runs.all(1), () => runs.lanes(1), () => runs.ref(null), () => runs.refs(1), () => runs.host("bad key"),
+					() => runs.steer("bad key", "m"), () => state.get(1), () => state.set("k", () => 1), () => emit(() => 1), () => Promise(), () => values.all.missing,
+				].map((call) => { try { return call(); } catch (error) { return error; } });
+				const RuntimeError = values.thrown[0].constructor;
+				RuntimeError.prepareStackTrace = Error.prepareStackTrace;
+				try { runs.run(2); } catch (error) { void error.stack; }
+				RuntimeError.prepareStackTrace = undefined;
+				Error.prepareStackTrace = undefined;
+				values.callers = callers;
+				values.callSites = callSites;
+				sweep("globalThis", globalThis, 3);
+				sweep("values", values, 4);
+				return { leaks, swept: seen.size, callers: callers.length, visibleCallers: callers.filter((caller) => caller !== null).length, callSites: callSites.length };
+			`,
+		});
+		const value = result.value as { leaks: string[]; swept: number; callers: number; visibleCallers: number; callSites: number };
+		assert.deepEqual(value.leaks, []);
+		assert.ok(value.swept > 500, `sweep reached only ${value.swept} values`);
+		assert.ok(value.callers >= 3, "callbacks the runtime invokes must have been probed");
+		assert.equal(value.callSites, 0, "Error.prepareStackTrace must stay locked in both realms");
+		assert.equal(value.visibleCallers, 0, "a script callback's .caller must not expose the runtime function that invoked it");
+	});
+
+	// Engine and host internals can raise errors created outside the script realm. Whatever realm such an
+	// error comes from, the workflow runtime contract is the same: nothing reached from it compiles code.
+	const compileOutcome = `
+		function compileOutcome(getFunction) {
+			try { return getFunction()("return 1")() === 1 ? "compiled" : "blocked"; } catch { return "blocked"; }
+		}
+	`;
+
+	it("keeps a redefined locked global in the script realm", async () => {
+		const result = await runWorkflowScript({
+			...realmHost,
+			script: `${compileOutcome}
+				Object.defineProperty(globalThis, "locked", { value: 1, writable: false, configurable: false });
+				try {
+					Object.defineProperty(globalThis, "locked", { value: 2 });
+					return "no error";
+				} catch (error) {
+					return compileOutcome(() => error.constructor.constructor);
+				}
+			`,
+		});
+		assert.equal(result.value, "blocked");
+	});
+
+	it("keeps stack-limit errors in the script realm", async () => {
+		const result = await runWorkflowScript({
+			...realmHost,
+			script: `${compileOutcome}
+				const outcomes = [];
+				function recurse(atLimit) {
+					try { recurse(atLimit); } catch (overflow) {
+						if (outcomes.length < 50) {
+							try { atLimit(); } catch (error) { outcomes.push(compileOutcome(() => error.constructor.constructor)); }
+						}
+						throw overflow;
+					}
+				}
+				for (const atLimit of [() => void new Error("read near the limit").stack, () => new Promise((resolve) => resolve(1)).then((value) => value)]) {
+					try { recurse(atLimit); } catch {}
+				}
+				return { caught: outcomes.length, compiled: outcomes.filter((outcome) => outcome === "compiled").length };
+			`,
+		});
+		const value = result.value as { caught: number; compiled: number };
+		assert.ok(value.caught > 0, "reading a stack near the limit must have thrown at least once");
+		assert.equal(value.compiled, 0);
+	});
+
+	it("worker built-in constructors cannot compile code", async () => {
+		const result = await runWorkflowScript({
+			...realmHost,
+			script: `${compileOutcome}
+				const errors = [];
+				Object.defineProperty(globalThis, "locked", { value: 1, writable: false, configurable: false });
+				try { Object.defineProperty(globalThis, "locked", { value: 2 }); } catch (error) { errors.push(error); }
+				function recurse() {
+					try { recurse(); } catch (overflow) {
+						if (errors.length < 20) { try { void new Error("read near the limit").stack; } catch (error) { errors.push(error); } }
+						throw overflow;
+					}
+				}
+				try { recurse(); } catch {}
+				const sites = [];
+				const outcomes = errors.map((error) => {
+					const ErrorConstructor = error.constructor;
+					const BaseError = Object.getPrototypeOf(ErrorConstructor);
+					for (const target of [ErrorConstructor, BaseError]) {
+						try { target.prepareStackTrace = (thrown, callSites) => { sites.push(...callSites); return "trace"; }; } catch {}
+					}
+					try { void new ErrorConstructor("formatted").stack; } catch {}
+					return [
+						compileOutcome(() => ErrorConstructor.constructor),
+						compileOutcome(() => BaseError.constructor),
+						compileOutcome(() => Object.getPrototypeOf(BaseError).constructor),
+					];
+				});
+				return {
+					errors: errors.length,
+					compiled: outcomes.flat().filter((outcome) => outcome === "compiled").length,
+					frameFunctions: sites.flatMap((site) => [site, site.getFunction(), site.getThis()]).filter(Boolean).filter((value) => compileOutcome(() => value.constructor.constructor) === "compiled").length,
+				};
+			`,
+		});
+		const value = result.value as { errors: number; compiled: number; frameFunctions: number };
+		assert.ok(value.errors > 0, "the script must have caught an engine-raised error");
+		assert.equal(value.compiled, 0);
+		assert.equal(value.frameFunctions, 0);
+	});
+
+	it("rejects import() before the script runs", async () => {
+		for (const script of [`await import("node:fs");`, `return 1;\n})();\nimport("node:fs").catch(() => undefined);\n(() => {`]) {
+			await assert.rejects(
+				runWorkflowScript({ script, ...realmHost }),
+				(error: unknown) => error instanceof WorkflowScriptError && /cannot load modules with import\(\)/.test(error.message),
+			);
+		}
+	});
+
 	it("uses ordinary statement-body return semantics", async () => {
 		const implicit = await runWorkflowScript({
 			script: `({ answer: 42 });`,
@@ -137,6 +390,14 @@ describe("scripted workflow runtime", () => {
 		assert.ok((syntax.errors[0]?.column ?? 0) > 0);
 		assert.doesNotMatch(syntax.errors[0]?.message ?? "", /\(3:\d+\)$/);
 
+		for (const path of ["/tmp/x.json", "./wf.js", "~/flows/review.mjs"]) {
+			const [error] = validateWorkflowScript(` ${path}\n`).errors;
+			assert.ok(error?.message.endsWith(`. The script looks like a file path ('${path}'): options.script takes the script's source text; pass a script file as workflow: "${path}".`), path);
+			assert.equal(error?.line, 1, path);
+		}
+		assert.match(validateWorkflowScript("/[/.test(args.text);").errors[0]!.message, /^Unterminated regular expression/);
+		assert.match(validateWorkflowScript("return (;").errors[0]!.message, /^Unexpected token/);
+
 		const structural = validateWorkflowScript([
 			`const results = await runs.all([{ key: "bad key", agent: "worker" }, { key: "someChild", agent: "reviewer" }]);`,
 			`async function helper() { return "no"; }`,
@@ -151,6 +412,11 @@ describe("scripted workflow runtime", () => {
 		assert.equal(invalidRunKey.ok, false);
 		assert.ok(invalidRunKey.errors.some((error) => error.message.includes("runs.run key")));
 
+		const objectRunKey = validateWorkflowScript(`const plan = await runs.run({ key: "plan", agent: "scout", task: "x" });\nreturn plan.output;`);
+		assert.equal(objectRunKey.ok, false);
+		assert.ok(objectRunKey.errors.some((error) => error.message.includes("got an object as the first argument") && error.message.includes(`runs.run("plan", { agent, task })`)));
+		assert.equal(validateWorkflowScript(`const runs = { run: (item) => item.task };\nreturn runs.run({ task: "x" });`).ok, true);
+
 		for (const script of [
 			`return runs.run("single", { agent: "worker", task: undefined });`,
 			`return runs.all([{ key: "same", agent: "worker", task: undefined }]);`,
@@ -163,6 +429,38 @@ describe("scripted workflow runtime", () => {
 
 		assert.deepEqual(validateWorkflowScript(`return runs.all([{ ...{ key: "bad key" }, agent: "worker" }]);`), { ok: true, errors: [] });
 		assert.deepEqual(validateWorkflowScript(`return runs.run("same", { agent: selectedAgent });`), { ok: true, errors: [] });
+	});
+
+	it("rejects runs.all items that are certain to have no key, and leaves the rest to the runtime", async () => {
+		for (const [script, message, line, column] of [
+			[`const results = await runs.all([\n  { key: "a", agent: "worker", task: "x" },\n  { agent: "worker", task: "y" },\n]);`, "runs.all item 1 has no key", 3, 3],
+			[`return runs.all(files.map((file) => ({ agent: "reviewer", task: file })));`, "runs.all items built by this map(...) callback have no key", 1, 38],
+			[`return runs.all(files.map(function (file) { const task = "Review " + file;\n  return { agent: "reviewer", task }; }));`, "runs.all items built by this map(...) callback have no key", 2, 10],
+		] as const) {
+			const result = validateWorkflowScript(script);
+			assert.equal(result.ok, false, script);
+			assert.deepEqual(result.errors, [{ message: `${message}; every runs.all item needs a stable key, for example runs.all([{ key: "review", agent, task }]).`, line, column }], script);
+		}
+		for (const script of [
+			`return runs.all([{ ...base, agent: "worker", task: "x" }]);`,
+			`return runs.all([{ [field]: "a", agent: "worker", task: "x" }]);`,
+			`return runs.all([{ __proto__: base, agent: "worker", task: "x" }]);`,
+			`return runs.all([{ then: child.then }]);`,
+			`return runs.all(files.map(makeItem));`,
+			`return runs.all(files.map((file) => ({ key: file, agent: "reviewer", task: file })));`,
+			`return runs.all(files.map((file) => { if (file.skip) return { agent: "worker", task: "x" }; return { key: file.name, agent: "worker", task: "y" }; }));`,
+			`const runs = { all: (items) => items };\nreturn runs.all([{ agent: "worker", task: "x" }]);`,
+		]) assert.equal(validateWorkflowScript(script).ok, true, script);
+
+		await assert.rejects(
+			runWorkflowScript({
+				script: `return await runs.all([{ agent: "worker", task: "x" }]);`,
+				timeoutMs: 2_000,
+				async launch(key) { return { key, ok: true, output: "unexpected", artifactPaths: [], results: [] }; },
+				async status(key) { return { key, ok: true, output: "ok", artifactPaths: [] }; },
+			}),
+			(error: unknown) => error instanceof WorkflowScriptError && /runs\.all item 0 has no key; keys must be 1-128 characters/.test(error.message),
+		);
 	});
 
 	it("reports literal child baseRef policy errors with source locations offline", () => {
@@ -331,6 +629,26 @@ describe("scripted workflow runtime", () => {
 		assert.deepEqual(validateWorkflowScript(script, { maxSubagentSpawnsPerRun: 6 }), { ok: true, errors: [] });
 	});
 
+	it("checks literal child agent names that resolve from the workflow cwd and scope", () => {
+		const known = new Set(["worker", "reviewer"]);
+		const result = validateWorkflowScript([
+			`const scan = await runs.run("scan", { agent: "worker", task: "Scan" });`,
+			`await runs.all([{ key: "review", agent: "reviwer", task: scan.output }]);`,
+			`await runs.lanes([{ key: "lane", stages: [{ key: "write", agent: "wroker", task: "Write" }, { key: "fix", resume: "previous", task: "Fix" }] }]);`,
+			`await runs.run("elsewhere", { agent: "remote-only", cwd: "../other", task: "Scan" });`,
+			`await runs.run("scoped", { agent: "project-only", agentScope: "project", task: "Scan" });`,
+			`await runs.run("spread", { agent: "missing", ...overrides });`,
+			`await runs.lanes([{ key: "replaced", stages: [{ key: "write", agent: "missing", task: "Write" }], ...laneOverrides }]);`,
+			`return runs.run("dynamic", { agent: selectedAgent, task: "Scan" });`,
+		].join("\n"), { agentNameError: (name) => known.has(name) ? undefined : `Unknown agent '${name}'.` });
+		assert.equal(result.ok, false);
+		assert.deepEqual(result.errors.map(({ kind, message, line }) => ({ kind, message, line })), [
+			{ kind: "agent", message: "runs.all item: Unknown agent 'reviwer'.", line: 2 },
+			{ kind: "agent", message: "runs.lanes stage: Unknown agent 'wroker'.", line: 3 },
+		]);
+		assert.deepEqual(validateWorkflowScript(`const runs = { run: (key) => key };\nreturn runs.run("local", { agent: "missing" });`, { agentNameError: () => "Unknown agent." }), { ok: true, errors: [] });
+	});
+
 	it("warns instead of guessing a dynamic spawn count", () => {
 		const result = validateWorkflowScript([
 			`const prefix = "lane";`,
@@ -428,9 +746,10 @@ describe("scripted workflow runtime", () => {
 		assert.deepEqual(validateWorkflowScript(`return undefined;`), { ok: true, errors: [] });
 		assert.deepEqual(validateWorkflowScript(`return [void 0, { value: void 0 }];`), { ok: true, errors: [] });
 		assert.deepEqual(validateWorkflowScript(`return [undefined, { value: undefined }];`), { ok: true, errors: [] });
+		assert.deepEqual(validateWorkflowScript(`emit(void 0); emit([undefined, { value: undefined }]); return 1;`), { ok: true, errors: [] });
 		const result = validateWorkflowScript(`emit(void 0); emit(undefined); state.set("void", void 0); state.set("undefined", undefined); return [1, , 2];`);
 		assert.equal(result.ok, false);
-		assert.equal(result.errors.filter((error) => error.message.includes("undefined is not JSON-representable")).length, 4);
+		assert.equal(result.errors.filter((error) => error.message.includes("undefined is not JSON-representable")).length, 2);
 		assert.ok(result.errors.some((error) => error.message.includes("sparse arrays")));
 	});
 
@@ -920,6 +1239,29 @@ describe("scripted workflow runtime", () => {
 		]);
 	});
 
+	it("keeps lane board text within 256 UTF-8 bytes without splitting characters", async () => {
+		for (const [input, expected] of [
+			["a".repeat(257), "a".repeat(253) + "..."],
+			["é".repeat(129), "é".repeat(126) + "..."],
+			["界".repeat(86), "界".repeat(84) + "..."],
+			["😀".repeat(65), "😀".repeat(63) + "..."],
+			["a".repeat(249) + "😀tail", "a".repeat(249) + "😀..."],
+			["界".repeat(85) + "a", "界".repeat(85) + "a"],
+		]) {
+			const result = await runWorkflowScript({
+				script: `return await runs.lanes([{ key: "lane", stages: [{ key: "check", agent: "worker", task: "check" }] }]);`,
+				async launch(key) {
+					return { key, ok: false, output: "", error: input, structuredOutput: { verdict: input }, artifactPaths: [] };
+				},
+				async status() { throw new Error("Unexpected status lookup"); },
+			});
+			const stage = (result.value as Array<{ stages: Array<{ error: string; verdict: string }> }>)[0]!.stages[0]!;
+			assert.equal(stage.error, expected);
+			assert.equal(stage.verdict, expected);
+			assert.ok(Buffer.byteLength(stage.error, "utf8") <= 256);
+		}
+	});
+
 	it("gives actionable guidance for a retained stage-0 resume", async () => {
 		let launches = 0;
 		await assert.rejects(
@@ -935,6 +1277,34 @@ describe("scripted workflow runtime", () => {
 				&& error.message.includes('start the lane with an agent stage and use resume: "previous" later'),
 		);
 		assert.equal(launches, 0);
+	});
+
+	it("reports a literal retained stage-0 resume in validate with the launch error", async () => {
+		const script = [
+			`return runs.lanes([`,
+			`  { key: "a", stages: [{ key: "write", agent: "worker", task: "w" }, { key: "fix", resume: "previous", task: "f" }] },`,
+			`  { key: "b", stages: [{ key: "fix", resume: "retained-run", task: "continue" }] },`,
+			`]);`,
+		].join("\n");
+		const launchError = await runWorkflowScript({
+			script,
+			timeoutMs: 2_000,
+			async launch(key) { return { key, ok: true, output: "unexpected", artifactPaths: [], results: [] }; },
+			async status(key) { return { key, ok: true, output: "ok", artifactPaths: [] }; },
+		}).then(() => undefined, (error: unknown) => error instanceof Error ? error.message.split("\n")[0]!.replace(/^Error: /, "") : String(error));
+		const validation = validateWorkflowScript(script);
+		assert.equal(validation.ok, false);
+		assert.deepEqual(validation.errors.map((error) => [error.message, error.line]), [[launchError, 3]]);
+		// An identifier lane holds one slot, so a later literal lane keeps its index.
+		assert.deepEqual(validateWorkflowScript(`return runs.lanes([existingLane, { key: "b", stages: [{ key: "fix", resume: "retained-run", task: "continue" }] }]);`).errors.map((error) => error.message), [launchError]);
+
+		// Values only the runtime can see stay unchecked.
+		for (const unknown of [
+			`return runs.lanes([{ key: "b", stages: [{ key: "fix", resume: retainedId, task: "continue" }] }]);`,
+			`return runs.lanes([{ key: "b", stages: [{ key: "fix", resume: "retained-run", ...extra, task: "continue" }] }]);`,
+			`return runs.lanes([...earlier, { key: "b", stages: [{ key: "fix", resume: "retained-run", task: "continue" }] }]);`,
+			`return runs.lanes(lanes);`,
+		]) assert.equal(validateWorkflowScript(unknown).ok, true, unknown);
 	});
 
 	it("validates all lane stages before launching any child", async () => {
@@ -1491,6 +1861,13 @@ describe("scripted workflow runtime", () => {
 			["reviewer", "Read-only review. Do not edit files. /usr/bin/rm -rf ."],
 			["reviewer", "Read-only review. Do not edit files. /usr/local/bin/rm -rf ."],
 			["reviewer", "Read-only review. Do not edit files. Validation after fix: git -C . reset --hard."],
+			["reviewer", "Read-only review. Do not edit files. git -C -1 reset --hard"],
+			["reviewer", "Read-only review. Do not edit files. git --work-tree='dir with spaces' reset --hard"],
+			["reviewer", 'Read-only review. Do not edit files. git --work-tree="dir with spaces" reset --hard'],
+			["reviewer", 'Read-only review. Do not edit files. git -C "x -a reset"'],
+			["reviewer", "Read-only review. Do not edit files. git -C 'git reset' status"],
+			["reviewer", 'Read-only review. Do not edit files. git -c "x reset"'],
+			["reviewer", "Read-only review. Do not edit files. git -C --hard reset"],
 			["reviewer", "Read-only review. Do not edit files. git --work-tree . reset --hard."],
 			["reviewer", "Read-only review. Do not edit files. git --work-tree \"/tmp/my repo\" reset --hard."],
 			["reviewer", "Read-only review. Do not edit files. git --work-tree '/tmp/my repo' reset --hard."],
@@ -1504,6 +1881,7 @@ describe("scripted workflow runtime", () => {
 			["reviewer", "Read-only review. Do not edit files. git stash."],
 			["reviewer", "Read-only review. Do not edit files. git revert abc123."],
 			["reviewer", "Read-only review. Do not edit files. Stage the changed files."],
+			["reviewer", "Read-only review. Do not edit files. git --no-pager commit -m fix."],
 			["reviewer", "Read-only review. Do not edit files. git reset --hard"],
 			["reviewer", "Read-only review. Do not edit files. git restore src/workflows/scripted-workflow.ts"],
 		]) {
@@ -1534,6 +1912,133 @@ describe("scripted workflow runtime", () => {
 				(error: unknown) => error instanceof WorkflowScriptError && /only explicit read-only review children with acceptance:false may follow/.test(error.message),
 			);
 			assert.deepEqual(launches, ["writer"]);
+		}
+	});
+
+	const reviewRecovery = {
+		status: "available-for-review" as const,
+		reason: "acceptance-metadata-rejected" as const,
+		reportPath: "/tmp/writer-report.md",
+		reportHash: "a".repeat(64),
+	};
+	const runReviewAfterRejectedWriter = (task: string) => {
+		const launches: string[] = [];
+		const run = runWorkflowScript({
+			script: `
+				const writer = await runs.run("writer", { agent: "worker", task: "write" });
+				const review = await runs.run("review", { agent: "reviewer", task: ${JSON.stringify(task)}, acceptance: false });
+				return review.ok;
+			`,
+			launch(key) {
+				launches.push(key);
+				if (key === "writer") {
+					return Promise.resolve({
+						key,
+						ok: false,
+						output: "saved writer report",
+						error: "Acceptance rejected: malformed acceptance-report",
+						runId: "writer-run",
+						outputReference: reviewRecovery.reportPath,
+						recovery: reviewRecovery,
+						artifactPaths: [reviewRecovery.reportPath],
+						results: [{ acceptance: { status: "rejected", recovery: reviewRecovery } }],
+					});
+				}
+				return Promise.resolve({ key, ok: true, output: "review complete", runId: "review-run", artifactPaths: [] });
+			},
+			async status(key) { return { key, ok: true, output: "ok", artifactPaths: [] }; },
+		});
+		return { launches, run };
+	};
+
+	it("preserves file-command detection after a durable acceptance metadata rejection", async () => {
+		for (const [command, blocked] of [
+			["rm -rf .", true],
+			["/usr/bin/rmdir dir", true],
+			["folder'part/unlink file", true],
+			['folder"part/truncate file', true],
+			["folder;part/mv a b", true],
+			["folder,part/cp a b", true],
+			["folder(part[part{part/CHMOD file", true],
+			["folder`part/chown file", true],
+			["folder.part/rmé", true],
+			["xrm", false],
+			["folder-rm", false],
+			["/usr/bin/rm_", false],
+			["/usr/bin/rmdirx", false],
+			["folder'part/rmx", false],
+			["folder\\rm", false],
+			// Short git options take only separated values, so -C=x is not a work-tree option.
+			["git -C=x reset", false],
+		] as const) {
+			const { launches, run } = runReviewAfterRejectedWriter(`Read-only review. Do not edit files. ${command}`);
+			if (blocked) {
+				await assert.rejects(run, (error: unknown) => error instanceof WorkflowScriptError && /only explicit read-only review children with acceptance:false may follow/.test(error.message), command);
+			} else {
+				assert.equal((await run).value, true, command);
+			}
+			assert.deepEqual(launches, blocked ? ["writer"] : ["writer", "review"], command);
+		}
+	});
+
+	it("blocks dash-live actions and allows inert separator text after a durable acceptance metadata rejection", async () => {
+		// Every separator reaches a live action even when another separator sits inside the line it
+		// has to scan.
+		for (const task of [
+			"Read-only review. Do not edit files. Delta — git log:x8 checkout main. Return findings only.",
+			"Read-only review. Do not edit files. Delta – git status:restore. Return findings only.",
+			"Read-only review. Do not edit files. Delta -- git log:x8 switch main. Return findings only.",
+		]) {
+			const { launches, run } = runReviewAfterRejectedWriter(task);
+			await assert.rejects(
+				run,
+				(error: unknown) => error instanceof WorkflowScriptError && /only explicit read-only review children with acceptance:false may follow/.test(error.message),
+			);
+			assert.deepEqual(launches, ["writer"]);
+		}
+		// Separator text whose branch never reaches its word stays allowed.
+		for (const task of [
+			"Read-only review. Do not edit files. Delta — workers. Return findings only.",
+			"Read-only review. Do not edit files. Delta — git log. Return findings only.",
+			"Read-only review. Do not edit files. Delta — /my-dir/notes.md. Return findings only.",
+			"Read-only review. Do not edit files. Delta — run. Return findings only.",
+			"Read-only review. Do not edit files. Delta — then review the patch. Return findings only.",
+			"Read-only review. Do not edit files. Delta — rmaware. Return findings only.",
+			"Read-only review. Do not edit files. Delta — git logging:x8. Return findings only.",
+			"Read-only review. Do not edit files. Delta - review the patch. Return findings only.",
+		]) {
+			const { launches, run } = runReviewAfterRejectedWriter(task);
+			assert.equal((await run).value, true);
+			assert.deepEqual(launches, ["writer", "review"]);
+		}
+	});
+
+	it("scans adversarial read-only review prompts in bounded time", async () => {
+		// Each prompt repeats one quote, separator or git-option family, 100,000 to 280,000 characters.
+		// The elapsed-time assertion includes the workflow process.
+		for (const stream of [
+			"'".repeat(100_000),
+			'"'.repeat(100_000),
+			";,.([{`".repeat(15_000),
+			"/".repeat(100_000),
+			`git${" -a".repeat(66_000)}`,
+			"git -a ".repeat(25_000),
+			"--/".repeat(90_000),
+			"—/".repeat(75_000),
+			":/".repeat(90_000),
+			"-- git ".repeat(40_000),
+		]) {
+			const startedAt = performance.now();
+			const { launches, run } = runReviewAfterRejectedWriter(`Read-only review. Do not edit files. ${stream}`);
+			const result = await run;
+			const elapsedMs = performance.now() - startedAt;
+
+			assert.deepEqual(launches, ["writer", "review"]);
+			assert.equal(result.value, true);
+			assert.ok(
+				elapsedMs < 10_000,
+				`the read-only review scan took ${Math.round(elapsedMs)} ms on a ${stream.length}-character prompt`,
+			);
 		}
 	});
 
@@ -1600,9 +2105,87 @@ describe("scripted workflow runtime", () => {
 				async status(key) { return { key, ok: true, output: "ok", artifactPaths: [] }; },
 			}),
 			(error: unknown) => error instanceof WorkflowScriptError
-				&& error.errorKind === undefined
+				&& error.errorKind === "script"
 				&& /manual hard failure/.test(error.message)
 				&& error.partial.children[0]?.detached === true,
+		);
+	});
+
+	it("classifies validation, script, return serialization, and child failures", async () => {
+		const assertFailureKind = async (script: string, kind: WorkflowScriptError["errorKind"], launch: (key: string) => Promise<WorkflowScriptChildResult> = async (key) => ({ key, ok: true, output: "ok", artifactPaths: [] })) => {
+			await assert.rejects(
+				runWorkflowScript({
+					script,
+					timeoutMs: 2_000,
+					launch,
+					async status(key) { return { key, ok: true, output: "ok", artifactPaths: [] }; },
+				}),
+				(error: unknown) => error instanceof WorkflowScriptError && error.errorKind === kind,
+			);
+		};
+
+		await assertFailureKind("return (", "validation");
+		await assertFailureKind(`throw new Error("manual failure");`, "script");
+		await assertFailureKind(`JSON.parse("not json");`, "script");
+		await assertFailureKind(`return { value: 1n };`, "return-serialization");
+		await assertFailureKind(
+			`return runs.run("writer", { agent: "worker", task: "write" });`,
+			"child",
+			async (key) => ({ key, ok: false, output: "child failed", error: "child failed", artifactPaths: [] }),
+		);
+	});
+
+	it("preserves an unawaited child failure kind and classifies runtime setup failures", async () => {
+		await assert.rejects(
+			runWorkflowScript({
+				script: `runs.run("writer", { agent: "worker", task: "write" }); await new Promise(() => {});`,
+				timeoutMs: 2_000,
+				async launch(key) { return { key, ok: false, output: "child failed", error: "child failed", artifactPaths: [] }; },
+				async status(key) { return { key, ok: true, output: "ok", artifactPaths: [] }; },
+			}),
+			(error: unknown) => error instanceof WorkflowScriptError && error.errorKind === "child",
+		);
+		await assert.rejects(
+			runWorkflowScript({
+				script: `runs.host("ci", { kind: "command", command: "npm test", timeoutMs: 1000 }); await new Promise(() => {});`,
+				timeoutMs: 2_000,
+				async host() { throw new Error("host boundary failed"); },
+				async launch(key) { return { key, ok: true, output: "ok", artifactPaths: [] }; },
+				async status(key) { return { key, ok: true, output: "ok", artifactPaths: [] }; },
+			}),
+			(error: unknown) => error instanceof WorkflowScriptError && error.errorKind === "script",
+		);
+
+		const unavailableCwd = path.join(os.tmpdir(), `missing-workflow-cwd-${process.pid}-${Date.now()}`);
+		await assert.rejects(
+			runWorkflowScript({
+				script: `return "unreachable";`,
+				processCwd: unavailableCwd,
+				async launch(key) { return { key, ok: true, output: "ok", artifactPaths: [] }; },
+				async status(key) { return { key, ok: true, output: "ok", artifactPaths: [] }; },
+			}),
+			(error: unknown) => error instanceof WorkflowScriptError && error.errorKind === "runtime" && error.partial.children.length === 0,
+		);
+
+		const controller = new AbortController();
+		controller.abort(new Error("stopped by user"));
+		await assert.rejects(
+			runWorkflowScript({
+				script: `return "unreachable";`,
+				signal: controller.signal,
+				async launch(key) { return { key, ok: true, output: "ok", artifactPaths: [] }; },
+				async status(key) { return { key, ok: true, output: "ok", artifactPaths: [] }; },
+			}),
+			(error: unknown) => error instanceof WorkflowScriptError && error.message === "stopped by user" && error.errorKind === undefined,
+		);
+
+		await assert.rejects(
+			runWorkflowScript({
+				script: " ",
+				async launch(key) { return { key, ok: true, output: "ok", artifactPaths: [] }; },
+				async status(key) { return { key, ok: true, output: "ok", artifactPaths: [] }; },
+			}),
+			(error: unknown) => error instanceof WorkflowScriptError && error.errorKind === "validation",
 		);
 	});
 
@@ -1772,6 +2355,45 @@ describe("scripted workflow runtime", () => {
 		});
 
 		assert.deepEqual(result.value, [{ key: "review", output: "completed", values: [null] }]);
+	});
+
+	it("normalizes undefined in emitted values the same way as returned values", async () => {
+		const script = `const value = { kept: 1, missing: undefined, list: [1, undefined] }; emit(value); emit(undefined); return value;`;
+		const result = await runWorkflowScript({
+			script,
+			timeoutMs: 2_000,
+			async launch() { throw new Error("must not launch children"); },
+			async status(key) { return { key, ok: true, output: "ok", artifactPaths: [] }; },
+		});
+
+		assert.deepEqual(result.emits, [result.value, null]);
+		assert.deepEqual(result.value, { kept: 1, list: [1, null] });
+		await assert.rejects(
+			runWorkflowScript({
+				script: `emit({ callback: () => 1 });`,
+				timeoutMs: 2_000,
+				async launch() { throw new Error("must not launch children"); },
+				async status(key) { return { key, ok: true, output: "ok", artifactPaths: [] }; },
+			}),
+			(error: unknown) => error instanceof WorkflowScriptError && error.errorKind === "script" && error.message.includes("emit.callback must be a JSON value; received function."),
+		);
+	});
+
+	it("reports workflow script error lines relative to the script", async () => {
+		const run = (script: string) => runWorkflowScript({
+			script,
+			timeoutMs: 2_000,
+			async launch() { throw new Error("must not launch children"); },
+			async status(key) { return { key, ok: true, output: "ok", artifactPaths: [] }; },
+		});
+		await assert.rejects(
+			run(["const first = 1;", "const second = 2;", `throw new Error("third line");`].join("\n")),
+			(error: unknown) => error instanceof WorkflowScriptError && error.errorKind === "script" && error.message.match(/workflow-script\.js:(\d+):/)?.[1] === "3",
+		);
+		await assert.rejects(
+			run(["const first = 1;", "return (;"].join("\n")),
+			(error: unknown) => error instanceof WorkflowScriptError && error.errorKind === "validation" && /SyntaxError: Unexpected token \(2:\d+\)/.test(error.message),
+		);
 	});
 
 	it("reports completed child references when return serialization fails", async () => {
@@ -2102,6 +2724,9 @@ describe("scripted workflow runtime", () => {
 
 	it("steers a still-running sibling after Promise.race and awaits both children", async () => {
 		let resolveSlow!: (result: { key: string; ok: true; output: string; artifactPaths: never[] }) => void;
+		// The host can take a runs.steer call before it has started the launch it follows, so steer waits for it.
+		let slowLaunched!: () => void;
+		const slowStarted = new Promise<void>((resolve) => { slowLaunched = resolve; });
 		const result = await runWorkflowScript({
 			script: `
 				const fast = runs.run("fast", { agent: "worker", task: "fast" });
@@ -2113,13 +2738,14 @@ describe("scripted workflow runtime", () => {
 			`,
 			launch(key) {
 				if (key === "fast") return Promise.resolve({ key, ok: true, output: "fast", artifactPaths: [] });
-				return new Promise((resolve) => { resolveSlow = resolve; });
+				return new Promise((resolve) => { resolveSlow = resolve; slowLaunched(); });
 			},
 			async status(key) { return { key, ok: true, output: "ok", artifactPaths: [] }; },
 			async steer(key, message, options) {
 				assert.equal(key, "slow");
 				assert.equal(message, "Focus on tests.");
 				assert.deepEqual(options, { mode: "auto", index: 0, ackTimeoutMs: 100 });
+				await slowStarted;
 				resolveSlow({ key, ok: true, output: "slow", artifactPaths: [] });
 				return { key, state: "delivered", requestId: "request-1", deliveryStatus: "delivered", targets: [{ index: 0, state: "delivered" }] };
 			},
@@ -2136,6 +2762,9 @@ describe("scripted workflow runtime", () => {
 	it("uses Promise.race to roll through child completions and steer the remaining work", async () => {
 		let resolveBeta!: (result: { key: string; ok: true; output: string; artifactPaths: never[] }) => void;
 		let resolveGamma!: (result: { key: string; ok: true; output: string; artifactPaths: never[] }) => void;
+		let launched!: () => void;
+		let pendingLaunches = 2;
+		const betaAndGammaStarted = new Promise<void>((resolve) => { launched = () => { if (--pendingLaunches === 0) resolve(); }; });
 		const result = await runWorkflowScript({
 			script: `
 				let pending = [
@@ -2154,14 +2783,15 @@ describe("scripted workflow runtime", () => {
 			`,
 			launch(key) {
 				if (key === "alpha") return Promise.resolve({ key, ok: true, output: "alpha done", artifactPaths: [] });
-				if (key === "beta") return new Promise((resolve) => { resolveBeta = resolve; });
-				return new Promise((resolve) => { resolveGamma = resolve; });
+				if (key === "beta") return new Promise((resolve) => { resolveBeta = resolve; launched(); });
+				return new Promise((resolve) => { resolveGamma = resolve; launched(); });
 			},
 			async status(key) { return { key, ok: true, output: "ok", artifactPaths: [] }; },
 			async steer(key, message, options) {
 				assert.equal(key, "gamma");
 				assert.equal(message, "Challenge the first result: alpha done");
 				assert.deepEqual(options, { mode: "auto", ackTimeoutMs: 100 });
+				await betaAndGammaStarted;
 				resolveGamma({ key, ok: true, output: "gamma done", artifactPaths: [] });
 				setTimeout(() => resolveBeta({ key: "beta", ok: true, output: "beta done", artifactPaths: [] }), 5);
 				return { key, state: "delivered", requestId: "request-rolling", deliveryStatus: "delivered", targets: [{ index: 0, state: "delivered" }] };
@@ -2217,7 +2847,8 @@ describe("scripted workflow runtime", () => {
 		let childAborted = false;
 		await assert.rejects(
 			runWorkflowScript({
-				script: `runs.run("bg", { agent: "worker", task: "fire and forget" }); return "done";`,
+				// The status round trip ensures the host has started the launch; a launch still queued at completion is never started.
+				script: `runs.run("bg", { agent: "worker", task: "fire and forget" }); await runs.status("probe"); return "done";`,
 				timeoutMs: 2_000,
 				launch(_key, _params, signal) {
 					return new Promise((_resolve, reject) => signal.addEventListener("abort", () => {
@@ -2304,6 +2935,16 @@ describe("scripted workflow runtime", () => {
 		assert.deepEqual(result.children.map((child) => child.key), ["bad"]);
 	});
 
+	it("names the (key, params) form when runs.run gets an object", async () => {
+		const result = await runWorkflowScript({
+			script: `try { await runs.run({ key: "plan", agent: "worker", task: "x" }); } catch (e) { return e.message; }`,
+			async launch(key) { return { key, ok: true, output: "", artifactPaths: [] }; },
+			async status(key) { return { key, ok: true, output: "", artifactPaths: [] }; },
+		});
+		assert.match(String(result.value), /got an object as the first argument\. Use runs\.run\("plan", \{ agent, task \}\)/);
+		assert.deepEqual(result.children, []);
+	});
+
 	it("rejects an unawaited runs.lanes launch", async () => {
 		await assert.rejects(
 			runWorkflowScript({
@@ -2359,6 +3000,24 @@ describe("scripted workflow runtime", () => {
 					&& error.message.includes("does not support nested async functions")
 					&& error.partial.children.length === 0,
 			);
+		}
+	});
+
+	it("survives garbage collection of finished workers for portable workflow parity", async () => {
+		const bun = (globalThis as { Bun?: { gc(force: boolean): void } }).Bun;
+		for (let run = 0; run < 3; run++) {
+			const result = await runWorkflowScript({
+				script: `const child = await runs.run("gc", { agent: "worker", task: "run" }); return child.output;`,
+				timeoutMs: 5_000,
+				async launch(key) { return { key, ok: true, output: `done ${key}`, artifactPaths: [] }; },
+				async status(key) { return { key, ok: true, output: "ok", artifactPaths: [] }; },
+			});
+			assert.equal(result.value, "done gc");
+		}
+		// Bun's Worker finalizer revokes the filename whenever an eval option was passed; collecting must not throw.
+		for (let pass = 0; pass < 5; pass++) {
+			bun?.gc(true);
+			await new Promise((resolve) => setTimeout(resolve, 50));
 		}
 	});
 
@@ -2696,7 +3355,6 @@ describe("scripted workflow runtime", () => {
 
 	it("rejects non-JSON-safe emitted values without persisting them", async () => {
 		const invalidScripts = [
-			`emit(undefined);`,
 			`emit(NaN);`,
 			`emit(Infinity);`,
 			`emit(new Map([["a", 1]]));`,
@@ -2866,14 +3524,15 @@ describe("scripted workflow runtime", () => {
 	});
 
 	it("ignores a queued child launch message after workflow abort", async () => {
-		const originalOn = Worker.prototype.on;
+		const workerPrototype = (process.versions.bun ? Worker.prototype : WorkflowScriptProcess.prototype) as unknown as { on: typeof Worker.prototype.on };
+		const originalOn = workerPrototype.on;
 		const controller = new AbortController();
 		let launchCount = 0;
 		let deliverCapturedRunMessage: (() => void) | undefined;
 		let markRunMessageCaptured!: () => void;
 		const runMessageCaptured = new Promise<void>((resolve) => { markRunMessageCaptured = resolve; });
 
-		(Worker.prototype as unknown as { on: typeof Worker.prototype.on }).on = function (event: string | symbol, listener: (...args: unknown[]) => void) {
+		workerPrototype.on = function (event: string | symbol, listener: (...args: unknown[]) => void) {
 			if (event !== "message") return originalOn.call(this, event, listener);
 			const wrapped = (message: Record<string, unknown>) => {
 				if (message.type === "call" && message.method === "run") {
@@ -2898,13 +3557,13 @@ describe("scripted workflow runtime", () => {
 			});
 
 			await runMessageCaptured;
-			controller.abort(new Error("Workflow stopped by user."));
-			await assert.rejects(workflow, (error: unknown) => error instanceof WorkflowScriptError && error.message === "Workflow stopped by user.");
+			controller.abort(new Error("Workflow stopped."));
+			await assert.rejects(workflow, (error: unknown) => error instanceof WorkflowScriptError && error.message === "Workflow stopped.");
 			deliverCapturedRunMessage?.();
 			await new Promise((resolve) => queueMicrotask(resolve));
 			assert.equal(launchCount, 0);
 		} finally {
-			Worker.prototype.on = originalOn;
+			workerPrototype.on = originalOn;
 		}
 	});
 
@@ -2919,7 +3578,7 @@ describe("scripted workflow runtime", () => {
 				signal: controller.signal,
 				onTrace(trace) {
 					const started = trace.some((entry) => entry.operation === "run" && entry.key === "slow" && entry.state === "started");
-					if (started && !controller.signal.aborted) controller.abort(new Error("Workflow stopped by user."));
+					if (started && !controller.signal.aborted) controller.abort(new Error("Workflow stopped."));
 				},
 				admit() {
 					admitCount += 1;
@@ -2931,7 +3590,7 @@ describe("scripted workflow runtime", () => {
 				async status(key) { return { key, ok: true, output: "ok", artifactPaths: [] }; },
 			}),
 			(error: unknown) => error instanceof WorkflowScriptError
-				&& error.message === "Workflow stopped by user."
+				&& error.message === "Workflow stopped."
 				&& error.partial.trace.some((entry) => entry.operation === "run" && entry.key === "slow" && entry.state === "stopped")
 				&& !error.partial.trace.some((entry) => entry.operation === "run" && entry.key === "slow" && entry.state === "failed"),
 		);
@@ -2964,10 +3623,10 @@ describe("scripted workflow runtime", () => {
 		});
 
 		await admissionStarted;
-		controller.abort(new Error("Workflow stopped by user."));
+		controller.abort(new Error("Workflow stopped."));
 		assert.equal(admissionSignal?.aborted, true);
 		await assert.rejects(workflow, (error: unknown) => error instanceof WorkflowScriptError
-			&& error.message === "Workflow stopped by user."
+			&& error.message === "Workflow stopped."
 			&& error.partial.trace.some((entry) => entry.operation === "run" && entry.key === "slow" && entry.state === "stopped")
 			&& !error.partial.trace.some((entry) => entry.operation === "run" && entry.key === "slow" && entry.state === "failed"));
 		resolveAdmission();
@@ -3011,7 +3670,7 @@ describe("scripted workflow runtime", () => {
 	});
 
 	it("drops a child response that settles after the workflow aborts", async () => {
-		const workerPrototype = Worker.prototype as unknown as { postMessage(value: unknown, ...args: unknown[]): void };
+		const workerPrototype = (process.versions.bun ? Worker.prototype : WorkflowScriptProcess.prototype) as unknown as { postMessage(value: unknown, ...args: unknown[]): void };
 		const originalPostMessage = workerPrototype.postMessage;
 		const controller = new AbortController();
 		let workflowSettled = false;
@@ -3035,10 +3694,10 @@ describe("scripted workflow runtime", () => {
 				async status(key) { return { key, ok: true, output: "ok", artifactPaths: [] }; },
 			});
 			await launchStarted;
-			controller.abort(new Error("Workflow stopped by user."));
+			controller.abort(new Error("Workflow stopped."));
 			await assert.rejects(workflow, (error: unknown) => error instanceof WorkflowScriptError
-				&& error.message === "Workflow stopped by user."
-				&& error.partial.trace.some((entry) => entry.operation === "run" && entry.key === "slow" && entry.state === "stopped" && entry.error === "Workflow stopped by user.")
+				&& error.message === "Workflow stopped."
+				&& error.partial.trace.some((entry) => entry.operation === "run" && entry.key === "slow" && entry.state === "stopped" && entry.error === "Workflow stopped.")
 				&& !error.partial.trace.some((entry) => entry.operation === "run" && entry.key === "slow" && entry.state === "failed"));
 			workflowSettled = true;
 			resolveLaunch({ key: "slow", ok: true, output: "done", artifactPaths: [], results: [] });
@@ -3059,7 +3718,7 @@ describe("scripted workflow runtime", () => {
 				signal: controller.signal,
 				onTrace(trace) {
 					const started = trace.some((entry) => entry.operation === "status" && entry.key === "probe" && entry.state === "started");
-					if (started && !controller.signal.aborted) controller.abort(new Error("Workflow stopped by user."));
+					if (started && !controller.signal.aborted) controller.abort(new Error("Workflow stopped."));
 				},
 				async launch(key) { return { key, ok: true, output: "ok", artifactPaths: [] }; },
 				async status(key) {
@@ -3068,7 +3727,7 @@ describe("scripted workflow runtime", () => {
 				},
 			}),
 			(error: unknown) => error instanceof WorkflowScriptError
-				&& error.message === "Workflow stopped by user."
+				&& error.message === "Workflow stopped."
 				&& error.partial.trace.some((entry) => entry.operation === "status" && entry.key === "probe" && entry.state === "started")
 				&& !error.partial.trace.some((entry) => entry.operation === "status" && entry.key === "probe" && entry.state === "completed"),
 		);
@@ -3095,9 +3754,9 @@ describe("scripted workflow runtime", () => {
 		});
 
 		await statusStarted;
-		controller.abort(new Error("Workflow stopped by user."));
+		controller.abort(new Error("Workflow stopped."));
 		await assert.rejects(workflow, (error: unknown) => error instanceof WorkflowScriptError
-			&& error.message === "Workflow stopped by user."
+			&& error.message === "Workflow stopped."
 			&& error.partial.trace.some((entry) => entry.operation === "status" && entry.key === "probe" && entry.state === "started")
 			&& !error.partial.trace.some((entry) => entry.operation === "status" && entry.key === "probe" && entry.state === "completed"));
 		const finalTraceLength = traceLengths.at(-1);
@@ -3107,10 +3766,10 @@ describe("scripted workflow runtime", () => {
 	});
 
 	it("keeps every child alive when a host trace callback throws", async () => {
-		// Regression: hosts persist a status journal from onTrace, and onTrace is called
-		// from inside the run-promise handlers. A failed status write used to reject the
-		// child promise, so one locked status.json marked a finished child failed and
-		// aborted its still-running siblings through Promise.all inside runs.all.
+		// Hosts persist a status journal from onTrace, and onTrace is called
+		// from inside the run-promise handlers. If a failed status write rejected the child
+		// promise, one locked status.json would mark a finished child failed and abort its
+		// still-running siblings through Promise.all inside runs.all.
 		let thrown = 0;
 		const abortedWhileRunning: string[] = [];
 		const result = await runWorkflowScript({
@@ -3299,6 +3958,22 @@ describe("scripted workflow runtime", () => {
 		}
 	});
 
+	it("runs workflows when the host has frozen Promise.prototype.then in every realm", () => {
+		const preload = path.resolve("test/fixtures/frozen-promise-then-preload.cjs");
+		const fixture = path.resolve("test/fixtures/frozen-promise-then-workflow.ts");
+		const result = spawnSync(process.execPath, ["--experimental-strip-types", "--no-warnings", "--require", preload, fixture], { encoding: "utf-8" });
+		assert.equal(result.status, 0, result.stderr);
+		assert.deepEqual(JSON.parse(result.stdout), { ok: true, value: { output: "pong" } });
+	});
+
+	it("runs Promise.all and other Promise statics when the host freezes Promise", () => {
+		const preload = path.resolve("test/fixtures/frozen-promise-statics-preload.cjs");
+		const fixture = path.resolve("test/fixtures/frozen-promise-statics-workflow.ts");
+		const result = spawnSync(process.execPath, ["--experimental-strip-types", "--no-warnings", "--require", preload, fixture], { encoding: "utf-8" });
+		assert.equal(result.status, 0, result.stderr);
+		assert.deepEqual(JSON.parse(result.stdout), { ok: true, value: { outputs: ["pong", "pong", "pong"], d: "ready" } });
+	});
+
 	it("rejects an unavailable recovery target without falling back from a stale cwd", {
 		skip: process.platform === "win32" ? "requires deleting a live process cwd, which Windows forbids" : undefined,
 	}, async () => {
@@ -3350,7 +4025,7 @@ describe("scripted workflow runtime", () => {
 			const result = await nextChildMessage(child);
 			assert.equal(result.ok, true, String(result.error ?? stderr));
 			assert.equal(result.chdirCalls, 0, "healthy launch must never invoke process.chdir");
-			assert.deepEqual(result.workerInitCwds, [expectedCallerCwd], "Worker init hooks must only observe the caller cwd");
+			assert.deepEqual(result.workerInitCwds, [expectedCallerCwd], "Workflow executor init hooks must only observe the caller cwd");
 		} finally {
 			await stopChild(child);
 			fs.rmSync(root, { recursive: true, force: true });
@@ -3401,5 +4076,119 @@ describe("scripted workflow runtime", () => {
 		} finally {
 			fs.rmSync(root, { recursive: true, force: true });
 		}
+	});
+});
+
+describe("scripted workflow drain", () => {
+	const drainedError = (error: unknown): error is WorkflowScriptError => error instanceof WorkflowScriptError && error.message === "drained";
+	const drainable = (options: Omit<Parameters<typeof runWorkflowScript>[0], "signal" | "registerDrain" | "status">) => {
+		const controller = new AbortController();
+		let registered: ((onDrained: () => void) => number) | undefined;
+		const workflow = runWorkflowScript({
+			...options,
+			signal: controller.signal,
+			registerDrain: (fn) => { if (fn) registered = fn; },
+			async status(key) { return { key, ok: true, output: "ok", artifactPaths: [] }; },
+		});
+		return { workflow, drain: (onDrained = () => {}) => registered!(() => { onDrained(); controller.abort(new Error("drained")); }) };
+	};
+
+	it("lets the started child finish and launches nothing after a drain", async () => {
+		let releaseA!: () => void;
+		let aStarted!: () => void;
+		const aRunning = new Promise<void>((resolve) => { aStarted = resolve; });
+		const launched: string[] = [];
+		let drainedCalls = 0;
+		const { workflow, drain } = drainable({
+			script: `for (const key of ["a", "b", "c"]) await runs.run(key, { agent: "worker", task: key });`,
+			async launch(key) {
+				launched.push(key);
+				aStarted();
+				await new Promise<void>((resolve) => { releaseA = resolve; });
+				return { key, ok: true, output: `${key} done`, artifactPaths: [] };
+			},
+		});
+		await aRunning;
+		assert.equal(drain(() => { drainedCalls += 1; }), 1);
+		assert.equal(drainedCalls, 0);
+		releaseA();
+		await assert.rejects(workflow, (error: unknown) => drainedError(error)
+			&& error.partial.children.length === 1
+			&& error.partial.children[0]!.ok
+			&& error.partial.children[0]!.output === "a done");
+		assert.deepEqual(launched, ["a"]);
+		assert.equal(drainedCalls, 1);
+	});
+
+	it("stops a child queued behind the concurrency limit at once", async () => {
+		let releaseA!: () => void;
+		let aStarted!: () => void;
+		const aRunning = new Promise<void>((resolve) => { aStarted = resolve; });
+		const launched: string[] = [];
+		let trace: Array<{ key: string; state: string }> = [];
+		let bQueued!: () => void;
+		const bWaiting = new Promise<void>((resolve) => { bQueued = resolve; });
+		const { workflow, drain } = drainable({
+			script: `return await runs.all([{ key: "a", agent: "worker", task: "a" }, { key: "b", agent: "worker", task: "b" }]);`,
+			globalConcurrencyLimit: 1,
+			onTrace: (entries) => {
+				trace = entries.map((entry) => ({ key: entry.key, state: entry.state }));
+				if (trace.some((entry) => entry.key === "b" && entry.state === "started")) bQueued();
+			},
+			async launch(key) {
+				launched.push(key);
+				aStarted();
+				await new Promise<void>((resolve) => { releaseA = resolve; });
+				return { key, ok: true, output: `${key} done`, artifactPaths: [] };
+			},
+		});
+		await Promise.all([aRunning, bWaiting]);
+		assert.equal(drain(), 1);
+		assert.ok(trace.some((entry) => entry.key === "b" && entry.state === "stopped"));
+		releaseA();
+		await assert.rejects(workflow, (error: unknown) => drainedError(error)
+			&& error.partial.children.some((child) => child.key === "a" && child.ok)
+			&& error.partial.children.some((child) => child.key === "b" && child.stopped === true));
+		assert.deepEqual(launched, ["a"]);
+	});
+
+	it("keeps a started child running when the script would throw on a refused call during the drain", async () => {
+		const release = new Map<string, () => void>();
+		const started = new Map<string, () => void>();
+		const up = (key: string) => new Promise<void>((resolve) => started.set(key, resolve));
+		const bothUp = Promise.all([up("slow"), up("fast")]);
+		const { workflow, drain } = drainable({
+			script: `const slow = runs.run("slow", { agent: "worker", task: "slow" }); await runs.run("fast", { agent: "worker", task: "fast" }); await runs.host("lint", { kind: "command", command: "true", timeoutMs: 1000 }); await slow;`,
+			async host(key) { return { key, kind: "command" as const, ok: true, state: "passed" as const, exitCode: 0, stdout: "", stderr: "", outputPath: "out.log", durationMs: 1 }; },
+			async launch(key, _params, signal) {
+				started.get(key)!();
+				await new Promise<void>((resolve) => { release.set(key, resolve); signal.addEventListener("abort", () => resolve()); });
+				return { key, ok: !signal.aborted, output: `${key} ${signal.aborted ? "killed" : "done"}`, artifactPaths: [] };
+			},
+		});
+		await bothUp;
+		drain();
+		release.get("fast")!();
+		// Without the drain holding answers, the refused runs.host throws here and aborts "slow".
+		await Promise.race([workflow.catch(() => undefined), new Promise((resolve) => setTimeout(resolve, 200))]);
+		release.get("slow")!();
+		await assert.rejects(workflow, (error: unknown) => drainedError(error)
+			&& error.partial.children.find((child) => child.key === "slow")?.output === "slow done");
+	});
+
+	it("ends at once when no child has started", async () => {
+		let launches = 0;
+		const { workflow, drain } = drainable({
+			script: `await runs.run("a", { agent: "worker", task: "a" });`,
+			async launch(key) {
+				launches += 1;
+				return { key, ok: true, output: "unexpected", artifactPaths: [] };
+			},
+		});
+		let drained = false;
+		assert.equal(drain(() => { drained = true; }), 0);
+		assert.equal(drained, true);
+		await assert.rejects(workflow, drainedError);
+		assert.equal(launches, 0);
 	});
 });

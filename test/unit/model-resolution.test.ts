@@ -11,6 +11,7 @@ import {
 	resolveModelSelection,
 	resolveSubagentModelOverride,
 } from "../../src/runs/shared/model-resolution.ts";
+import { TRUNCATED_RESPONSE_ERROR } from "../../src/shared/utils.ts";
 import { resolveModelScopesForAgent } from "../../src/runs/shared/model-scope.ts";
 
 const models = [
@@ -60,10 +61,52 @@ describe("single model resolution", () => {
 		assert.equal(resolveEffectiveSubagentModel("missing", "gpt-5-mini", undefined, models, undefined, { source: "inherited" }), "missing");
 	});
 
+	it("lists up to five exact registry ids for an unknown or ambiguous model", () => {
+		assert.throws(() => resolveModelSelection("gpt-5-mni:high", models), /Unknown subagent model 'gpt-5-mni:high'.*Closest registry models: openai\/gpt-5-mini:high\./);
+		assert.throws(() => resolveModelSelection("shared", models), /Unknown subagent model 'shared'.*Closest registry models: anthropic\/shared, openai\/shared\./);
+		const crowded = ["a", "b", "c", "d", "e", "f", "g"].map((provider) => ({ provider, id: "same", fullId: `${provider}/same` }));
+		assert.throws(() => resolveModelSelection("same", crowded), (error: Error) => /Closest registry models: a\/same, b\/same, c\/same, d\/same, e\/same\.$/.test(error.message));
+		assert.throws(() => resolveModelSelection("missing", models), (error: Error) => !error.message.includes("Closest registry models"));
+	});
+
 	it("normalizes registry spelling without switching a qualified provider", () => {
 		assert.equal(normalizeModelSegment("GPT_5--MINI"), "gpt-5-mini");
 		assert.equal(fuzzyResolveModel("GPT_5_MINI", models), "openai/gpt-5-mini");
 		assert.equal(resolveModelCandidate("openai/claude-sonnet-4", models), "openai/claude-sonnet-4");
+	});
+
+	it("never resolves a provider the user is not signed in to under another provider", () => {
+		// Pi knows anthropic but has no auth for it; OpenRouter re-lists the same model as `anthropic/...`.
+		const registry = [
+			{ provider: "llama-cpp", id: "qwen", fullId: "llama-cpp/qwen" },
+			{ provider: "openrouter", id: "anthropic/claude-opus-4.8", fullId: "openrouter/anthropic/claude-opus-4.8" },
+		];
+		const knownProviders = () => ["anthropic", "llama-cpp", "openrouter"];
+		const parent = { provider: "llama-cpp", id: "qwen" };
+		for (const requested of ["anthropic/claude-opus-4-8", "anthropic/claude-opus-4.8"]) {
+			assert.throws(
+				() => resolveSubagentModelOverride(requested, parent, registry, undefined, { source: "explicit", knownProviders }),
+				new RegExp(`Unknown subagent model '${requested.replace(/[./]/g, "\\$&")}'.*Did you mean 'openrouter/anthropic/claude-opus-4\\.8'`),
+			);
+			assert.throws(() => resolveModelSelection(requested, registry, undefined, { knownProviders }), /Unknown subagent model/);
+		}
+		assert.equal(resolveSubagentModelOverride("openrouter/anthropic/claude-opus-4.8", parent, registry, undefined, { source: "explicit", knownProviders }), "openrouter/anthropic/claude-opus-4.8");
+		assert.equal(resolveModelCandidate("org/model-v1", models, undefined, () => ["openai", "anthropic", "huggingface"]), "huggingface/org/model-v1");
+	});
+
+	it("resolves ids that already carry their provider prefix within that provider", () => {
+		const registry = [
+			{ provider: "openrouter", id: "openrouter/auto-beta", fullId: "openrouter/openrouter/auto-beta" },
+			{ provider: "openrouter", id: "auto", fullId: "openrouter/auto" },
+			{ provider: "other", id: "openrouter/free", fullId: "other/openrouter/free" },
+		];
+		assert.equal(resolveModelSelection("openrouter/auto-beta", registry).model, "openrouter/openrouter/auto-beta");
+		assert.equal(resolveModelSelection("OpenRouter/Auto_Beta", registry).model, "openrouter/openrouter/auto-beta");
+		assert.equal(resolveModelSelection("openrouter/auto", registry).model, "openrouter/auto");
+		assert.throws(() => resolveModelSelection("openrouter/free", registry), /Unknown subagent model 'openrouter\/free'/);
+		// An ordinary id that already resolved keeps winning over a provider-prefixed one.
+		const collision = [...registry, { provider: "openrouter", id: "auto_beta", fullId: "openrouter/auto_beta" }];
+		assert.equal(resolveModelSelection("OpenRouter/Auto-Beta", collision).model, "openrouter/auto_beta");
 	});
 
 	it("fuzzy matches case, separators, dates, and owner/name ids", () => {
@@ -112,6 +155,15 @@ describe("model response identity", () => {
 			"anthropic/claude-sonnet-4": ["gateway-model"],
 		}) ?? "", /model_verification_failed/);
 	});
+
+	it("verifies a virtual-model child against its exact selection, not the dispatched model", () => {
+		assert.equal(formatSubagentModelVerificationError("openai/gpt-5-mini:high", "anthropic/claude-sonnet-4", models, undefined, "openai/gpt-5-mini"), undefined);
+		const virtualMismatch = formatSubagentModelVerificationError("openai/gpt-5-mini", "gpt-5-mini", models, undefined, "other-router/gpt-5-mini") ?? "";
+		assert.match(virtualMismatch, /model_verification_failed: native Pi child selected virtual model 'other-router\/gpt-5-mini'/);
+		assert.doesNotMatch(virtualMismatch, /declare the exact mapping/);
+		assert.match(formatSubagentModelVerificationError("openai/gpt-5-mini", "gpt-5-mini", models, undefined, "gpt-5-mini") ?? "", /model_verification_failed/);
+		assert.match(formatSubagentModelVerificationError("openai/gpt-5-mini", "anthropic/claude-sonnet-4", models) ?? "", /model_verification_failed/);
+	});
 });
 
 describe("context overflow classification", () => {
@@ -124,6 +176,7 @@ describe("context overflow classification", () => {
 	it("does not classify tool failures, provider failures, or empty input as overflow", () => {
 		assert.equal(isContextOverflow("bash failed (exit 1): input too long"), false);
 		assert.equal(isContextOverflow("429 rate limit exceeded"), false);
+		assert.equal(isContextOverflow(TRUNCATED_RESPONSE_ERROR), false);
 		assert.equal(isContextOverflow(undefined), false);
 	});
 });

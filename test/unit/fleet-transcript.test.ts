@@ -4,7 +4,8 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { describe, it } from "node:test";
 import { visibleWidth, type MarkdownTheme } from "@earendil-works/pi-tui";
-import { readFleetTranscript, renderFleetTranscript } from "../../src/tui/fleet-transcript.ts";
+import { renderFleetTranscript } from "../../src/tui/fleet-transcript.ts";
+import { readFleetTranscript } from "../../src/shared/fleet-transcript-reader.ts";
 
 const theme = {
 	fg: (_name: string, text: string) => text,
@@ -80,6 +81,26 @@ describe("Fleet inspector structured transcript", () => {
 			assert.ok(rendered.some((line) => line.includes("Permission denied")));
 			assert.ok(rendered.some((line) => line.includes("Supervisor")));
 			assert.ok(!rendered.some((line) => line.includes("large injected task")));
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("qualifies the assistant model line with the provider carried on the record", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-fleet-transcript-model-provider-"));
+		try {
+			const transcriptPath = writeTranscript(root, [
+				{ recordType: "message", role: "assistant", model: "claude-haiku-4-5", text: "qualified", message: { role: "assistant", provider: "anthropic", model: "claude-haiku-4-5" }, ts: 1 },
+				{ recordType: "message", role: "assistant", model: "gpt-5-mini", text: "unqualified", ts: 2 },
+				{ recordType: "message", role: "assistant", model: "openrouter/auto-beta", text: "provider-local id with a slash", message: { role: "assistant", provider: "openrouter", model: "openrouter/auto-beta" }, ts: 3 },
+			]);
+			const transcript = readFleetTranscript(transcriptPath, { trustedRoots: [root] });
+			const assistantEvents = transcript.events.filter((event) => event.kind === "assistant");
+			assert.equal(assistantEvents[0]?.model, "anthropic/claude-haiku-4-5");
+			assert.equal(assistantEvents[1]?.model, "gpt-5-mini");
+			assert.equal(assistantEvents[2]?.model, "openrouter/openrouter/auto-beta");
+			const rendered = renderFleetTranscript(transcript, 60, theme as never, markdownTheme);
+			assert.ok(rendered.some((line) => line.includes("Assistant") && line.includes("anthropic/claude-haiku-4-5")));
 		} finally {
 			fs.rmSync(root, { recursive: true, force: true });
 		}

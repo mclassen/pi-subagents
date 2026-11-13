@@ -1,8 +1,8 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { spawnSync } from "node:child_process";
-import { WINDOWS_HIDDEN_PROCESS_OPTIONS, windowsSystemExecutable } from "../../shared/windows-launch-safety.ts";
+import { spawn, spawnSync } from "node:child_process";
+import { WINDOWS_HIDDEN_PROCESS_OPTIONS, windowsSystemDirectory, windowsSystemExecutable } from "../../shared/windows-launch-safety.ts";
 
 export interface WindowsProcessSnapshot { pid: number; parentPid: number; creationDate: string }
 export interface RetainedWindowsProcess { handle: string; creationDate: string; exited: boolean }
@@ -101,11 +101,9 @@ interface NativeResult {
 	diagnostic?: string;
 }
 
-function invoke(input: object): NativeResult {
-	try {
-		const payload = JSON.stringify(input);
-		const assembly = assemblyPath().replaceAll("'", "''");
-		const command = `
+function helperCommand(): string {
+	const assembly = assemblyPath().replaceAll("'", "''");
+	return `
 $ErrorActionPreference = 'Stop'
 if (-not (Test-Path -LiteralPath '${assembly}')) {
 Add-Type -OutputAssembly '${assembly}' -TypeDefinition @'
@@ -204,9 +202,18 @@ try {
  throw $failure
 } finally { [void][OwnedProcessNative]::CloseHandle($owner) }
 `;
+}
+
+const HELPER_ARGS = (command: string) => ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command];
+const helperTimeout = (input: object) => 5000 + ("verifyMs" in input ? Number((input as { verifyMs?: unknown }).verifyMs) : 0);
+
+function invoke(input: object): NativeResult {
+	try {
+		const payload = JSON.stringify(input);
+		const command = helperCommand();
 		const result = spawnSync(windowsSystemExecutable("WindowsPowerShell", "v1.0", "powershell.exe"),
-			["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command],
-			{ encoding: "utf8", input: payload, timeout: 5000 + ("verifyMs" in input ? Number(input.verifyMs) : 0), ...WINDOWS_HIDDEN_PROCESS_OPTIONS });
+			HELPER_ARGS(command),
+			{ encoding: "utf8", input: payload, timeout: helperTimeout(input), ...WINDOWS_HIDDEN_PROCESS_OPTIONS, cwd: windowsSystemDirectory() });
 		if (result.error || result.status !== 0) return { diagnostic: result.error?.message ?? (result.stderr.trim() || `Windows identity helper exited with ${result.status}`) };
 		try { return JSON.parse(result.stdout.trim()); }
 		catch { return { diagnostic: "Invalid Windows identity helper response." }; }
@@ -215,12 +222,49 @@ try {
 	}
 }
 
+/** Same helper protocol as invoke(), without blocking the event loop (PowerShell takes ~0.5-1 s to start). */
+function invokeAsync(input: object): Promise<NativeResult> {
+	return new Promise((resolve) => {
+		let settled = false;
+		const finish = (result: NativeResult) => { if (!settled) { settled = true; resolve(result); } };
+		try {
+			const child = spawn(windowsSystemExecutable("WindowsPowerShell", "v1.0", "powershell.exe"), HELPER_ARGS(helperCommand()), {
+				...WINDOWS_HIDDEN_PROCESS_OPTIONS, cwd: windowsSystemDirectory(), stdio: ["pipe", "pipe", "pipe"],
+			});
+			let stdout = "";
+			let stderr = "";
+			child.stdout.setEncoding("utf8").on("data", (chunk: string) => { stdout += chunk; });
+			child.stderr.setEncoding("utf8").on("data", (chunk: string) => { stderr += chunk; });
+			const timer = setTimeout(() => { child.kill(); finish({ diagnostic: "Windows identity helper timed out." }); }, helperTimeout(input));
+			child.once("error", (error) => { clearTimeout(timer); finish({ diagnostic: `Windows identity helper setup/launch failed: ${error.message}` }); });
+			child.once("close", (status) => {
+				clearTimeout(timer);
+				if (status !== 0) return finish({ diagnostic: stderr.trim() || `Windows identity helper exited with ${status}` });
+				try { finish(JSON.parse(stdout.trim())); }
+				catch { finish({ diagnostic: "Invalid Windows identity helper response." }); }
+			});
+			child.stdin.end(JSON.stringify(input));
+		} catch (error) {
+			finish({ diagnostic: `Windows identity helper setup/launch failed: ${error instanceof Error ? error.message : String(error)}` });
+		}
+	});
+}
+
 function entries(retained: ReadonlyMap<number, RetainedWindowsProcess>) {
 	return [...retained].map(([pid, proof]) => ({ pid, ...proof }));
 }
 
 export function observeWindowsProcesses(retained: Map<number, RetainedWindowsProcess>, root?: number): WindowsProcessSnapshot[] | { diagnostic: string } {
 	const result = invoke({ action: "observe", retained: entries(retained), root, verifyMs: 0 });
+	if (result.diagnostic) return { diagnostic: result.diagnostic };
+	if (!Array.isArray(result.processes) || !Array.isArray(result.retained)) return { diagnostic: "Incomplete Windows identity helper response." };
+	for (const item of result.retained) retained.set(item.pid, { handle: item.handle, creationDate: item.creationDate, exited: item.exited });
+	return result.processes;
+}
+
+/** Non-blocking observe for periodic monitoring; callers must not overlap it with other helper calls. */
+export async function observeWindowsProcessesAsync(retained: Map<number, RetainedWindowsProcess>, root?: number): Promise<WindowsProcessSnapshot[] | { diagnostic: string }> {
+	const result = await invokeAsync({ action: "observe", retained: entries(retained), root, verifyMs: 0 });
 	if (result.diagnostic) return { diagnostic: result.diagnostic };
 	if (!Array.isArray(result.processes) || !Array.isArray(result.retained)) return { diagnostic: "Incomplete Windows identity helper response." };
 	for (const item of result.retained) retained.set(item.pid, { handle: item.handle, creationDate: item.creationDate, exited: item.exited });

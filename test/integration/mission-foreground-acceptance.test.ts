@@ -61,7 +61,8 @@ for (const kind of ["disabled", "implicit", "verified"] as const) {
 			assert.ok(execute);
 			for (const handler of handlers.get("session_start") ?? []) await handler({ reason: "startup" }, ctx);
 			let callId = 0;
-			const call = (params: Record<string, unknown>) => execute!(String(++callId), params, new AbortController().signal, undefined, ctx!);
+			// The public tool takes an inline script as options.script.
+			const call = ({ workflowScript, ...params }: Record<string, unknown>) => execute!(String(++callId), workflowScript === undefined ? params : { ...params, options: { script: workflowScript } }, new AbortController().signal, undefined, ctx!);
 			const created = await call({ action: "mission.create", mission: { title: `Synthetic foreground ${kind}`, goal: true, maxIterations: 4 } });
 			assert.notEqual(created.isError, true, JSON.stringify(created));
 			const id = created.details.missionId!;
@@ -80,7 +81,8 @@ for (const kind of ["disabled", "implicit", "verified"] as const) {
 			assert.equal(inventory.inventoryComplete, true);
 			assert.equal(inventory.children.length, 1);
 			assert.equal(rows.length, 1);
-			assert.equal(rows[0]?.runId, undefined);
+			// Upstream exposes the foreground child's run id on its row; it must be the inventory child.
+			if (rows[0]?.runId !== undefined) assert.equal(rows[0].runId, inventory.children[0]?.runId);
 			assert.equal(rows[0]?.workflowKey, "only-child");
 			assert.equal(inventory.children[0]?.childId, "only-child");
 			assert.ok(inventory.children[0]?.runId);
@@ -124,6 +126,8 @@ for (const kind of ["disabled", "implicit", "verified"] as const) {
 			assert.deepEqual(closed.goal, before.goal);
 			assert.deepEqual(closed.runs, observed.runs);
 			assert.ok(mock.sessions.length > 0 && mock.sessions.every((session) => session.disposed && session.settled));
+			// Background session-start work (the watchdog git baseline) may still be finishing; wait, bounded.
+			for (const deadline = Date.now() + 10_000; !processes.every((item) => item.closed) && Date.now() < deadline;) await new Promise((resolve) => setTimeout(resolve, 50));
 			assert.ok(processes.every((item) => item.closed));
 			passed = true;
 		} finally {

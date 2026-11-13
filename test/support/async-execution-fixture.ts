@@ -1,11 +1,4 @@
-/**
- * Integration tests for async (background) agent execution.
- *
- * Tests the async support utilities: jiti availability check,
- * status file reading/caching.
- *
- * Requires pi packages to be importable. Skips gracefully if unavailable.
- */
+/** Requires pi packages to be importable. Skips gracefully if unavailable. */
 
 import { after, afterEach, before, beforeEach } from "node:test";
 import assert from "node:assert/strict";
@@ -147,11 +140,11 @@ interface MockPiCallRecord {
 	effectiveArgs?: string[];
 	systemPrompts?: Array<{ mode?: string; path?: string; text?: string; error?: string }>;
 	requiredChildTools?: string[];
+	launch?: { tools?: string[]; builtinMcpTools?: Array<{ name: string; selector: string }>; ambientExtensions?: boolean; processEnv?: Record<string, string> };
 	/** The `ChildRuntimeConfig` the scripted child session was launched with. */
 	runtime?: Record<string, unknown>;
 }
 
-/** Recorded child runtime config of the mock call at `index`, once it exists. */
 async function waitForMockPiRuntime(mockPi: MockPi, index: number, timeoutMs = 30_000): Promise<Record<string, unknown>> {
 	const deadline = Date.now() + timeoutMs;
 	for (;;) {
@@ -218,7 +211,7 @@ function childWatchdogStatus(runId: string, phase: "idle" | "reviewing" | "stale
 	};
 }
 
-function mockAssistantMessage(text: string, stopReason: "stop" | "tool_use" = "stop") {
+function mockAssistantMessage(text: string, stopReason: "stop" | "tool_use" | "length" = "stop") {
 	return {
 		type: "message_end",
 		message: {

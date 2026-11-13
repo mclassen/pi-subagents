@@ -1,16 +1,19 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { Message, Usage as PiUsage } from "@earendil-works/pi-ai";
+import type { AssistantMessage, Message, StopReason, Usage as PiUsage } from "@earendil-works/pi-ai";
 import { previewDisplayText, sanitizeDisplayText, truncateDisplayText } from "./display-text.ts";
 import { formatToolCall } from "./formatters.ts";
 import type { AgentProgress, AsyncStatus, Details, DisplayItem, ErrorInfo, NestedRunSummary, SingleResult, ToolCallSummary, Usage } from "./types.ts";
 import { validateAsyncStatusLaneMetadata } from "../runs/shared/lane-metadata.ts";
+import { ERROR_REPLY_TEXT_SEPARATOR } from "../runs/shared/model-resolution.ts";
 
 const DEFAULT_CONFIG_DIR_NAME = ".pi";
 const PI_CODING_AGENT_PACKAGE_NAME = "@earendil-works/pi-coding-agent";
 export const PI_CODING_AGENT_PACKAGE_ROOT_ENV = "PI_SUBAGENTS_PI_CODING_AGENT_PACKAGE_ROOT";
 export const PROMPT_REDACTED = "[prompt redacted]";
+export const SUBAGENT_STOPPED_MESSAGE = "Subagent stopped.";
+export const SUBAGENT_TIMED_OUT_MESSAGE = "Subagent timed out.";
 
 export function resolveWatchPath(
 	watchPath: string,
@@ -131,9 +134,6 @@ function isNotFoundError(error: unknown): boolean {
 		&& (error as NodeJS.ErrnoException).code === "ENOENT";
 }
 
-/**
- * Read async job status from disk (with mtime-based caching)
- */
 export function readStatus(asyncDir: string): AsyncStatus | null {
 	if (Buffer.byteLength(path.basename(asyncDir), "utf-8") > 255) {
 		return null;
@@ -246,6 +246,22 @@ function stripPiTurnTimingFooter(text: string): string {
 	return text.replace(PI_TURN_TIMING_FOOTER, "");
 }
 
+const PROVIDER_STOP_TEXT_MAX = 500;
+
+/**
+ * The error to report for an assistant message. When the provider ended the turn with an error stop
+ * (`rawStopReason` is set, e.g. `content_filter`), the reply text rides along with the bare stop code: a
+ * policy refusal usually puts its explanation there. The text may also be the model's own partial reply,
+ * so it is labelled as reply text, not as the provider's message.
+ */
+export function assistantMessageError(message: { errorMessage?: string; rawStopReason?: string; content?: unknown }): string | undefined {
+	const error = message.errorMessage;
+	if (!error || typeof message.rawStopReason !== "string") return error;
+	const text = extractTextFromContent(message.content).trim();
+	if (!text || error.includes(text)) return error;
+	return `${error}${ERROR_REPLY_TEXT_SEPARATOR}${text.length > PROVIDER_STOP_TEXT_MAX ? `${text.slice(0, PROVIDER_STOP_TEXT_MAX)}…` : text}`;
+}
+
 export function getFinalOutput(messages: Message[]): string {
 	const validTextParts: string[] = [];
 	for (let i = messages.length - 1; i >= 0; i--) {
@@ -285,9 +301,12 @@ export function getSingleResultOutput(result: Pick<SingleResult, "finalOutput" |
 	return result.finalOutput ?? getFinalOutput(result.messages ?? []);
 }
 
-/**
- * Extract display items (text and tool calls) from messages
- */
+export const TRUNCATED_RESPONSE_ERROR = "Response was truncated: the model reached its maximum output length.";
+
+export function getTerminalAssistantStopReason(messages: Message[]): StopReason | undefined {
+	return messages.findLast((message): message is AssistantMessage => message.role === "assistant")?.stopReason;
+}
+
 export function getDisplayItems(messages: Message[] | undefined): DisplayItem[] {
 	if (!messages || messages.length === 0) return [];
 	const items: DisplayItem[] = [];
@@ -322,12 +341,14 @@ function compactCompletedProgress(progress: AgentProgress): AgentProgress {
 	};
 }
 
-function extractToolCallSummaries(messages: Message[] | undefined): ToolCallSummary[] {
-	if (!messages?.length) return [];
+/** Summaries of the latest `limit` tool calls, in chronological order; older calls are never read. */
+function extractToolCallSummaries(messages: Message[] | undefined, limit = Infinity): ToolCallSummary[] {
 	const summaries: ToolCallSummary[] = [];
-	for (const msg of messages) {
+	for (let i = (messages?.length ?? 0) - 1; i >= 0 && summaries.length < limit; i--) {
+		const msg = messages![i]!;
 		if (msg.role !== "assistant") continue;
-		for (const part of msg.content) {
+		for (let j = msg.content.length - 1; j >= 0 && summaries.length < limit; j--) {
+			const part = msg.content[j]!;
 			if (part.type !== "toolCall") continue;
 			const args = typeof part.arguments === "object" && part.arguments !== null && !Array.isArray(part.arguments)
 				? part.arguments
@@ -338,7 +359,7 @@ function extractToolCallSummaries(messages: Message[] | undefined): ToolCallSumm
 			});
 		}
 	}
-	return summaries;
+	return summaries.reverse();
 }
 
 export function sumResultsUsage(results: SingleResult[]): Usage {
@@ -378,7 +399,6 @@ function addNestedCost(total: NonNullable<Details["totalCost"]>, children: Neste
 	}
 }
 
-/** Sum input tokens, output tokens, and cost across a set of SingleResults. */
 export function sumResultsCost(results: SingleResult[]): NonNullable<Details["totalCost"]> {
 	const total = { inputTokens: 0, outputTokens: 0, costUsd: 0 };
 	for (const result of results) {
@@ -429,7 +449,6 @@ export const MAX_STREAMED_RECENT_TOOLS = 32;
 export const MAX_STREAMED_TOOL_CALLS = 64;
 export const MAX_STREAMED_OUTPUT_LINE_CHARS = 2000;
 
-/** Keep only the most recent tool-history entries in a streamed snapshot. */
 export function boundStreamedRecentTools(recentTools: AgentProgress["recentTools"]): AgentProgress["recentTools"] {
 	return recentTools.slice(-MAX_STREAMED_RECENT_TOOLS).map((tool) => ({ ...tool }));
 }
@@ -449,7 +468,7 @@ export function boundStreamedRecentOutput(recentOutput: string[]): string[] {
  * derives one from `messages`; bounded to the most recent calls.
  */
 export function boundStreamedToolCalls(result: Pick<SingleResult, "toolCalls" | "messages">): ToolCallSummary[] | undefined {
-	const summaries = result.toolCalls?.length ? result.toolCalls : extractToolCallSummaries(result.messages);
+	const summaries = result.toolCalls?.length ? result.toolCalls : extractToolCallSummaries(result.messages, MAX_STREAMED_TOOL_CALLS);
 	if (!summaries.length) return undefined;
 	return summaries.slice(-MAX_STREAMED_TOOL_CALLS).map((summary) => ({ ...summary }));
 }
@@ -524,9 +543,6 @@ export function detectSubagentError(messages: Message[]): ErrorInfo {
 	return { hasError: false };
 }
 
-/**
- * Extract a preview of tool arguments for display
- */
 export function extractToolArgsPreview(args: Record<string, unknown>): string {
 	const stringifyPreviewValue = (value: unknown): string | undefined => {
 		if (typeof value === "string" && value.trim().length > 0) return sanitizeDisplayText(value);
@@ -572,28 +588,20 @@ export function extractToolArgsPreview(args: Record<string, unknown>): string {
 	return "";
 }
 
-/**
- * Extract text content from various message content formats
- */
 export function extractTextFromContent(content: unknown): string {
 	if (!content) return "";
-	// Handle string content directly
 	if (typeof content === "string") return content;
-	// Handle array content
 	if (!Array.isArray(content)) return "";
 	const texts: string[] = [];
 	for (const part of content) {
 		if (part && typeof part === "object") {
-			// Handle { type: "text", text: "..." }
 			if ("type" in part && part.type === "text" && "text" in part) {
 				texts.push(String(part.text));
 			}
-			// Handle { type: "tool_result", content: "..." }
 			else if ("type" in part && part.type === "tool_result" && "content" in part) {
 				const inner = extractTextFromContent(part.content);
 				if (inner) texts.push(inner);
 			}
-			// Handle { text: "..." } without type
 			else if ("text" in part) {
 				texts.push(String(part.text));
 			}
@@ -601,9 +609,5 @@ export function extractTextFromContent(content: unknown): string {
 	}
 	return texts.join("\n");
 }
-
-// ============================================================================
-// Concurrency Utilities
-// ============================================================================
 
 export { mapConcurrent } from "../runs/shared/parallel-utils.ts";

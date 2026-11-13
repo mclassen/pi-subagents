@@ -8,3 +8,8 @@ export const WINDOWS_HIDDEN_PROCESS_OPTIONS = Object.freeze({ windowsHide: true,
 export function windowsSystemExecutable(...segments: string[]): string {
 	return path.join(process.env.SystemRoot ?? "C:\\Windows", "System32", ...segments);
 }
+
+/** Helper processes start here, so they never hold a workspace directory open (Windows rmdir fails with EBUSY). */
+export function windowsSystemDirectory(): string {
+	return path.join(process.env.SystemRoot ?? "C:\\Windows", "System32");
+}

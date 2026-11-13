@@ -66,6 +66,8 @@ function createRuntime(child = false, saved = false) {
 		},
 		async end(stopReason: string, pendingMessages = false) {
 			ctx.hasPendingMessages = () => pendingMessages;
+			// A real turn starts before it ends; agent_start releases the previous wake reservation.
+			for (const handler of handlers.get("agent_start") ?? []) await handler({ type: "agent_start" }, ctx);
 			for (const handler of handlers.get("agent_end") ?? []) await handler({ messages: [{ role: "assistant", stopReason }] }, ctx);
 		},
 		async settle() {
@@ -77,7 +79,13 @@ function createRuntime(child = false, saved = false) {
 			else process.env.PI_CODING_AGENT_DIR = originalAgentDir;
 			if (originalChildFlag === undefined) delete process.env[SUBAGENT_CHILD_ENV];
 			else process.env[SUBAGENT_CHILD_ENV] = originalChildFlag;
-			fs.rmSync(root, { recursive: true, force: true });
+			// Windows: the non-blocking watchdog git baseline capture can still hold the project
+			// directory; the per-process isolated temp root is discarded anyway.
+			try {
+				fs.rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+			} catch (error) {
+				if (process.platform !== "win32" || (error as NodeJS.ErrnoException).code !== "EBUSY") throw error;
+			}
 		},
 	};
 }

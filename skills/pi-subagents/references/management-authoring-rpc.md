@@ -70,11 +70,11 @@ subagent({ action: "delete", agent: "code-analysis.my-agent" })
 ```typescript
 // Copy a bundled builtin/package agent to user scope as an editable custom file.
 subagent({ action: "eject", agent: "reviewer" })
-subagent({ action: "eject", agent: "reviewer", agentScope: "project" })
+subagent({ action: "eject", agent: "reviewer", options: { agentScope: "project" } })
 
 // Hide an agent from runtime discovery without deleting it (reversible).
 subagent({ action: "disable", agent: "reviewer" })
-subagent({ action: "enable", agent: "reviewer", agentScope: "project" })
+subagent({ action: "enable", agent: "reviewer", options: { agentScope: "project" } })
 
 // Delete the scope's custom agent file and/or settings override, restoring the bundled default.
 subagent({ action: "reset", agent: "reviewer" })

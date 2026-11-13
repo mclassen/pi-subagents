@@ -4,7 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { describe, it } from "node:test";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { buildAsyncRunnerSteps, DEFAULT_ASYNC_TIMEOUT_MS, emitProcessTerminalEvent, formatAsyncStartedMessage, resolveAsyncRunnerLogPaths } from "../../src/runs/background/async-execution.ts";
+import { buildAsyncRunnerSteps, assertClaudeCodeOverrideIsLocal, DEFAULT_ASYNC_TIMEOUT_MS, emitProcessTerminalEvent, formatAsyncStartedMessage, resolveAsyncRunnerLogPaths } from "../../src/runs/background/async-execution.ts";
 import type { AgentConfig } from "../../src/agents/agents.ts";
 import { SUBAGENT_PROCESS_TERMINAL_EVENT } from "../../src/shared/types.ts";
 import { registerRequiredChildExtensions } from "../../src/api/required-child-extensions.ts";
@@ -30,7 +30,7 @@ const ctx = {
 };
 
 describe("async runner execution", () => {
-	it("propagates static parallel machine placement before agent pins and rejects group worktrees", { skip: process.platform === "win32" ? "Herdr saved-machine launches are unsupported on Windows" : undefined }, (t) => {
+	it("propagates static parallel machine placement before agent pins, rejects group worktrees, and tells a placed child to return its output", { skip: process.platform === "win32" ? "Herdr saved-machine launches are unsupported on Windows" : undefined }, (t) => {
 		const bin = fs.mkdtempSync(path.join(os.tmpdir(), "herdr-bin-"));
 		const herdr = path.join(bin, "herdr");
 		fs.writeFileSync(herdr, "#!/bin/sh\necho '[{\"id\":\"machine-1\",\"label\":\"workmac\",\"target\":\"host.example\",\"enabled\":true}]'\n", "utf-8");
@@ -64,6 +64,41 @@ describe("async runner execution", () => {
 		});
 		assert.ok("error" in rejected);
 		assert.match(rejected.error, /managed worktrees are local git operations/u);
+
+		const placed = buildAsyncRunnerSteps("herdr-output", {
+			chain: [{ agent: "worker", task: "Inspect", machine: "workmac", cwd: "/remote/repo", output: "/parent/report.md" }],
+			agents: [{ ...agent("worker"), tools: ["read", "write"] }],
+			ctx,
+			asyncDir: path.join(bin, "async"),
+			maxSubagentDepth: 1,
+		});
+		assert.ok("steps" in placed, "error" in placed ? placed.error : undefined);
+		const step = placed.steps[0];
+		assert.ok(step && "task" in step);
+		assert.match(step.task, /Return the complete artifact in your final response\./u);
+		assert.doesNotMatch(step.task, /Write your findings to/u);
+	});
+
+	it("resolves machine 'local' to the parent's Rex session at the async step call site", { skip: process.platform === "win32" ? "Rex placement is POSIX-only" : undefined }, (t) => {
+		const bin = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "rex-bin-")));
+		fs.writeFileSync(path.join(bin, "rex"), "#!/bin/sh\ncase \"$*\" in *\" session inspect session:parent-1 \"*) echo '{\"session_id\":\"session:parent-1\"}';; *) exit 9;; esac\n", { mode: 0o755 });
+		const names = ["REX_BIN_DIR", "REX_SESSION", "REX_SERVER", "HERDR_BIN"] as const, previous = names.map((name) => process.env[name]);
+		Object.assign(process.env, { REX_BIN_DIR: bin, REX_SESSION: "session:parent-1", REX_SERVER: "unix:///tmp/parent-rex.sock", HERDR_BIN: path.join(bin, "no-herdr") });
+		t.after(() => {
+			names.forEach((name, index) => { const value = previous[index]; if (value === undefined) delete process.env[name]; else process.env[name] = value; });
+			fs.rmSync(bin, { recursive: true, force: true });
+		});
+		const built = buildAsyncRunnerSteps("local-machine", {
+			chain: [{ agent: "worker", task: "Inspect", machine: "local" }],
+			agents: [agent("worker")],
+			ctx: { ...ctx, cwd: bin },
+			asyncDir: path.join(bin, "async"),
+			maxSubagentDepth: 1,
+		});
+		assert.ok("steps" in built, "error" in built ? built.error : undefined);
+		const step = built.steps[0];
+		assert.ok(step && "machine" in step);
+		assert.deepEqual(step.machine, { provider: "rex", id: "local", session: "session:parent-1", server: "unix:///tmp/parent-rex.sock", cwd: bin });
 	});
 
 	it("uses supplied discovery context for missing async agents", () => {
@@ -129,16 +164,17 @@ describe("async runner execution", () => {
 
 	it("formats interactive yield and headless auto-drain guidance separately", () => {
 		const interactive = formatAsyncStartedMessage("Async: worker [interactive]", true);
-		assert.match(interactive, /interactive session[\s\S]*return control/i);
-		assert.match(interactive, /native completion notification/i);
-		assert.match(interactive, /does not need a wait call/i);
-		assert.match(interactive, /provider, detached, or other background work that lacks a native completion notification/i);
+		assert.match(interactive, /^Async: worker \[interactive\]\n/);
+		assert.match(interactive, /Return control now: native completion wakes you, so do not sleep, poll, or call bg_wait for it\./);
+		assert.match(interactive, /subagent\(\{ action: "status", id: "\.\.\." \}\)/);
+		assert.ok(interactive.length <= 400, `interactive receipt is ${interactive.length} chars`);
 		assert.doesNotMatch(interactive, /bg_wait\(\{ id:/i);
 		assert.doesNotMatch(interactive, /auto-drains current-session background work/i);
 
 		const headless = formatAsyncStartedMessage("Async: worker [headless]", false);
 		assert.match(headless, /non-interactive run.*auto-drains current-session subagent work at agent_end/i);
-		assert.match(headless, /Use bg_wait only.*provider, detached, or other background-work results.*no native completion notification/i);
+		assert.match(headless, /use bg_wait only for results this turn needs from work without native notification/i);
+		assert.equal(headless.split("\n").length, 3);
 		assert.doesNotMatch(headless, /nonBlocking: true/);
 		assert.doesNotMatch(headless, /By default, return control to the user/i);
 	});
@@ -264,6 +300,35 @@ describe("async runner execution", () => {
 			maxSubagentDepth: 2,
 		});
 		assert.deepEqual(rejected, { error: "Agent 'external' uses runner.type='external-cli' and does not support: model override." });
+	});
+
+	it("rejects an external runner step when the host required extensions are mandatory for all runners", (t) => {
+		const external = agent("external");
+		external.runner = { type: "external-cli", command: process.execPath, args: ["fake.mjs"] };
+		const registration = registerRequiredChildExtensions({ sessionId: ctx.currentSessionId, extensions: [{ id: "host-policy", path: import.meta.filename }], requireForAllRunners: true });
+		t.after(registration.dispose);
+		const rejected = buildAsyncRunnerSteps("external-mandatory", {
+			chain: [{ agent: "external", task: "review" }],
+			agents: [external],
+			ctx,
+			asyncDir: path.join(process.cwd(), ".tmp-external-mandatory"),
+			maxSubagentDepth: 2,
+		});
+		assert.ok("error" in rejected);
+		assert.match(rejected.error, /requires child extensions \(host-policy\) for every runner/u);
+	});
+
+	it("refuses a pinned Claude Code model on a saved machine instead of dropping the flags", () => {
+		assert.throws(
+			() => assertClaudeCodeOverrideIsLocal("cc", "workmac", { args: ["--model", "opus"], model: "opus" }),
+			/Agent 'cc' requested machine 'workmac', but a Claude Code model or thinking level cannot be honored on a saved machine/u,
+		);
+		assert.throws(
+			() => assertClaudeCodeOverrideIsLocal("cc", "workmac", { args: ["--effort", "low"] }),
+			/cannot be honored on a saved machine/u,
+		);
+		assert.doesNotThrow(() => assertClaudeCodeOverrideIsLocal("cc", undefined, { args: ["--model", "opus"], model: "opus" }));
+		assert.doesNotThrow(() => assertClaudeCodeOverrideIsLocal("cc", "workmac", undefined));
 	});
 
 	it("uses config default when no step, run, or agent budget exists", () => {

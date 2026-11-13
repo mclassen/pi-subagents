@@ -6,18 +6,22 @@ import * as path from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
 import registerFanoutChildSubagentExtension from "../../src/extension/fanout-child.ts";
 import { createSubagentExecutor, readNestedRecoveryDescriptor } from "../../src/runs/foreground/subagent-executor.ts";
-import { createNestedRoute, findNestedControlResult, nestedResultsPath, projectNestedEvents, readNestedControlRequests, readNestedControlResults, snapshotNestedEventFiles, writeNestedControlRequest, writeNestedControlResult, writeNestedEvent } from "../../src/runs/shared/nested-events.ts";
+import { createNestedRoute, findNestedControlResult, nestedResultsPath, nestedRunNotActiveMessage, nestedRunScope, projectNestedEvents, readNestedControlRequests, readNestedControlResults, snapshotNestedEventFiles, writeNestedControlRequest, writeNestedControlResult, writeNestedEvent } from "../../src/runs/shared/nested-events.ts";
 import type { ChildRuntimeConfig } from "../../src/runs/shared/child-runtime-config.ts";
 import { ASYNC_DIR, RESULTS_DIR, TEMP_ROOT_DIR, type SubagentState } from "../../src/shared/types.ts";
 import { createRunFanoutBudget } from "../../src/runs/shared/run-fanout-budget.ts";
 import { getArtifactPaths, getArtifactsDir } from "../../src/shared/artifacts.ts";
-import { EXTERNAL_JOB_PROVIDER_REGISTRY_KEY, registerExternalJobProvider } from "../../src/api/external-job-provider.ts";
+import { EXTERNAL_JOB_PROVIDER_REGISTRY_KEY, ExternalJobProviderError, registerExternalJobProvider } from "../../src/api/external-job-provider.ts";
 import { makeAgent } from "../support/helpers.ts";
 import { externalJobPromptDigest, runExternalJob } from "../../src/runs/shared/external-job-runner.ts";
-import { serviceExternalJobBridgeRequests } from "../../src/runs/shared/external-job-bridge.ts";
+import { requestExternalJobOperation, serviceExternalJobBridgeRequests } from "../../src/runs/shared/external-job-bridge.ts";
 import { isActiveAsyncState } from "../../src/runs/background/active-run-index.ts";
 import { readProcessTerminal } from "../../src/runs/background/process-terminal.ts";
 import { readStatus } from "../../src/shared/utils.ts";
+import { interruptRequestPath } from "../../src/runs/background/control-channel.ts";
+import { recordSessionReplacement } from "../../src/shared/session-succession.ts";
+import { recoveryDescriptorPath } from "../../src/runs/shared/run-launch-folder.ts";
+import { writeFileCreatingDir } from "../support/helpers.ts";
 
 const routeRoots: string[] = [];
 const fanoutListenerCleanupKey = "__piSubagentFanoutChildNestedControlInboxCleanups";
@@ -168,6 +172,53 @@ describe("nested control routing", () => {
 		}
 	});
 
+	for (const missingRoute of [true, false]) it(missingRoute
+		? "interrupts an authorized nested async child when its owner has no foreground route"
+		: "preserves an owner refusal instead of interrupting its nested async child", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-nested-async-interrupt-"));
+		const runId = `nested-background-${randomUUID()}`;
+		const asyncDir = path.join(TEMP_ROOT_DIR, "nested-subagent-runs", "root-control", runId);
+		try {
+			const route = createNestedRun(runId, "running", { mode: "single", asyncDir, pid: process.pid });
+			fs.mkdirSync(asyncDir, { recursive: true });
+			fs.writeFileSync(path.join(asyncDir, "status.json"), JSON.stringify({
+				runId, state: "running", mode: "single", pid: process.pid, lastUpdate: Date.now(),
+				steps: [{ agent: "worker", status: "running" }],
+			}));
+			const executor = createExecutor(stateWithNestedRoute(route));
+			const pending = executor.execute("interrupt", { action: "interrupt", id: runId }, new AbortController().signal, undefined, ctx(root));
+			await waitFor(() => readNestedControlRequests(route).length > 0);
+			const request = readNestedControlRequests(route)[0]!;
+			writeNestedControlResult(route, { ts: Date.now(), requestId: request.requestId, targetRunId: runId,
+				ok: false, message: missingRoute ? nestedRunNotActiveMessage(runId) : "Owner refuses this interrupt." });
+			const result = await pending;
+			assert.equal(result.isError, missingRoute ? undefined : true);
+			assert.equal(fs.existsSync(interruptRequestPath(asyncDir)), missingRoute);
+			assert.match(text(result), missingRoute ? /Interrupt requested for nested async run/ : /Owner refuses this interrupt/);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+			fs.rmSync(asyncDir, { recursive: true, force: true });
+		}
+	});
+
+	it("reports the owner's missing-route answer for a nested foreground run that has no async inbox", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-nested-foreground-interrupt-"));
+		const runId = `nested-foreground-${randomUUID()}`;
+		try {
+			const route = createNestedRun(runId);
+			const executor = createExecutor(stateWithNestedRoute(route));
+			const pending = executor.execute("interrupt", { action: "interrupt", id: runId }, new AbortController().signal, undefined, ctx(root));
+			await waitFor(() => readNestedControlRequests(route).length > 0);
+			const request = readNestedControlRequests(route)[0]!;
+			writeNestedControlResult(route, { ts: Date.now(), requestId: request.requestId, targetRunId: runId, ok: false, message: nestedRunNotActiveMessage(runId) });
+			const result = await pending;
+			assert.equal(result.isError, true);
+			assert.equal(text(result), nestedRunNotActiveMessage(runId));
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
 	it("renders nested children in foreground status output", async () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-nested-foreground-status-"));
 		try {
@@ -301,18 +352,6 @@ describe("nested control routing", () => {
 		}
 	});
 
-	it("does not let bare interrupt target hidden nested descendants", async () => {
-		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-nested-bare-interrupt-"));
-		try {
-			createNestedRun("nested-only");
-			const result = await createExecutor().execute("interrupt", { action: "interrupt" }, new AbortController().signal, undefined, ctx(root));
-			assert.equal(result.isError, true);
-			assert.match(text(result), /No interrupt-capable run found/);
-		} finally {
-			fs.rmSync(root, { recursive: true, force: true });
-		}
-	});
-
 	it("times out owner-gone nested control and ignores late results", async () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-nested-timeout-"));
 		try {
@@ -432,10 +471,14 @@ describe("nested control routing", () => {
 				share: false,
 				extensionBindings: { "shepherd.dispatch/1": { role: "coder" } },
 			};
-			fs.writeFileSync(path.join(root, "recovery-descriptor.json"), JSON.stringify(descriptor));
-			assert.deepEqual(readNestedRecoveryDescriptor(root, "nested-bound", "worker")?.extensionBindings, descriptor.extensionBindings);
-			assert.throws(() => readNestedRecoveryDescriptor(root, "other-run", "worker"), /different source run/);
-			assert.throws(() => readNestedRecoveryDescriptor(root, "nested-bound", "reviewer"), /different agent/);
+			const rootRunId = `binding-root-${path.basename(root)}`;
+			const nestedRoot = nestedRunScope(rootRunId).asyncDirRoot;
+			writeFileCreatingDir(recoveryDescriptorPath(nestedRoot, "nested-bound"), JSON.stringify(descriptor));
+			writeFileCreatingDir(recoveryDescriptorPath(nestedRoot, "other-run"), JSON.stringify(descriptor));
+			assert.deepEqual(readNestedRecoveryDescriptor(rootRunId, "nested-bound", "worker")?.extensionBindings, descriptor.extensionBindings);
+			assert.throws(() => readNestedRecoveryDescriptor(rootRunId, "other-run", "worker"), /different source run/);
+			assert.throws(() => readNestedRecoveryDescriptor(rootRunId, "nested-bound", "reviewer"), /different agent/);
+			fs.rmSync(nestedRoot, { recursive: true, force: true });
 		} finally {
 			fs.rmSync(root, { recursive: true, force: true });
 		}
@@ -479,6 +522,53 @@ describe("nested control routing", () => {
 		}
 	});
 
+	it("shows the transcript of an async run inherited from a session this process replaced", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-inherited-transcript-"));
+		const runId = `inherited-transcript-${randomUUID()}`;
+		try {
+			const successorSessionFile = path.join(root, "successor.jsonl");
+			const replacedSessionFile = path.join(root, "replaced.jsonl");
+			recordSessionReplacement(successorSessionFile, replacedSessionFile);
+			const sessionFile = path.join(root, "replaced", runId, "run-0", "session.jsonl");
+			fs.mkdirSync(path.dirname(sessionFile), { recursive: true });
+			fs.writeFileSync(sessionFile, `${JSON.stringify({ message: { role: "assistant", content: "INHERITED_SESSION_LINE" } })}\n`);
+			fs.mkdirSync(path.join(ASYNC_DIR, runId), { recursive: true });
+			fs.writeFileSync(path.join(ASYNC_DIR, runId, "status.json"), JSON.stringify({ runId, sessionId: replacedSessionFile, mode: "single", state: "complete", startedAt: 100, lastUpdate: 200, steps: [{ agent: "worker", status: "complete", sessionFile }] }));
+			const state = createState();
+			state.currentSessionId = successorSessionFile;
+
+			const result = await createExecutor(state).execute("transcript", { action: "status", id: runId, index: 0, view: "transcript" }, new AbortController().signal, undefined, ctx(root, successorSessionFile));
+
+			assert.match(text(result), /INHERITED_SESSION_LINE/);
+		} finally {
+			fs.rmSync(path.join(ASYNC_DIR, runId), { recursive: true, force: true });
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("trusts nested session files under the root of a session this process replaced, and no other session's", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-nested-terminal-inherited-"));
+		try {
+			const successorSessionFile = path.join(root, "successor.jsonl");
+			recordSessionReplacement(successorSessionFile, path.join(root, "replaced.jsonl"));
+			const resume = (owner: string) => {
+				const runId = `nested-${owner}-resume`;
+				const sessionFile = path.join(root, owner, runId, "run-0", "session.jsonl");
+				fs.mkdirSync(path.dirname(sessionFile), { recursive: true });
+				fs.writeFileSync(sessionFile, "");
+				const route = createNestedRun(runId, "complete", { sessionFile });
+				return createExecutor(stateWithNestedRoute(route), [{ name: "worker", description: "Worker", prompt: "Do work" }])
+					.execute("resume", { action: "resume", id: runId, message: "continue" }, new AbortController().signal, undefined, ctx(root, successorSessionFile));
+			};
+
+			// Past the trust check, revival stops at the missing recovery descriptor.
+			assert.match(text(await resume("replaced")), /missing its required recovery identity/);
+			assert.match(text(await resume("unrelated")), /outside trusted nested session roots/);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
 	it("rejects terminal nested resume session files from sibling run directories", async () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-nested-terminal-sibling-"));
 		try {
@@ -497,6 +587,98 @@ describe("nested control routing", () => {
 		} finally {
 			fs.rmSync(root, { recursive: true, force: true });
 		}
+	});
+
+	describe("resume of a run that a resume replaced", () => {
+		const accepted = /missing its required recovery identity/;
+		const refused = /not under that nested run's session directory/;
+		type RunSpec = { id: string; sessionFile: string; revivedFrom?: string; state?: "running" | "complete" | "stopped" };
+		const sessionFileIn = (root: string, ...dirs: string[]) => {
+			const sessionFile = path.join(root, ...dirs, "run-0", "session.jsonl");
+			fs.mkdirSync(path.dirname(sessionFile), { recursive: true });
+			fs.writeFileSync(sessionFile, "");
+			return sessionFile;
+		};
+		const addRun = (route: ReturnType<typeof createNestedRoute>, run: RunSpec) => {
+			const state = run.state ?? "complete";
+			writeNestedEvent(route, {
+				type: state === "running" ? "subagent.nested.updated" : "subagent.nested.completed",
+				ts: 100,
+				parentRunId: route.rootRunId,
+				parentStepIndex: 0,
+				child: { id: run.id, parentRunId: route.rootRunId, parentStepIndex: 0, depth: 1, path: [{ runId: route.rootRunId, stepIndex: 0 }], state, agent: "worker", ownerState: state === "running" ? "live" : "gone", sessionFile: run.sessionFile, ...(run.revivedFrom ? { revivedFrom: run.revivedFrom } : {}) },
+			});
+		};
+		const resume = async (root: string, target: string, runs: RunSpec[], outOfScope: RunSpec[] = []) => {
+			const parentSessionFile = path.join(root, "parent.jsonl");
+			fs.writeFileSync(parentSessionFile, "");
+			const route = createNestedRoute("root-control");
+			routeRoots.push(path.dirname(route.eventSink));
+			for (const run of runs) addRun(route, run);
+			const other = createNestedRoute("root-other");
+			routeRoots.push(path.dirname(other.eventSink));
+			for (const run of outOfScope) addRun(other, run);
+			const result = await createExecutor(stateWithNestedRoute(route), [{ name: "worker", description: "Worker", prompt: "Do work" }])
+				.execute("resume", { action: "resume", id: target, message: "continue" }, new AbortController().signal, undefined, ctx(root, parentSessionFile));
+			return text(result);
+		};
+		const withRoot = async (body: (root: string) => Promise<void>) => {
+			const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-nested-revived-"));
+			try {
+				await body(root);
+			} finally {
+				fs.rmSync(root, { recursive: true, force: true });
+			}
+		};
+
+		it("accepts the session its in-scope source owns, through a chain of up to 8 replacements", () => withRoot(async (root) => {
+			const sessionFile = sessionFileIn(root, "parent", "source");
+			assert.match(await resume(root, "replacement", [
+				{ id: "source", sessionFile },
+				{ id: "replacement", sessionFile, revivedFrom: "source" },
+			]), accepted);
+			const chain = (hops: number): RunSpec[] => [
+				{ id: "source", sessionFile },
+				...Array.from({ length: hops }, (_, index) => ({ id: `r${index + 1}`, sessionFile, revivedFrom: index === 0 ? "source" : `r${index}` })),
+			];
+			assert.match(await resume(root, "r2", chain(2)), accepted);
+			assert.match(await resume(root, "r8", chain(8)), accepted);
+			assert.match(await resume(root, "r9", chain(9)), refused);
+		}));
+
+		it("refuses when the source is missing, out of scope, live, stopped, owns another file, or forms a cycle", () => withRoot(async (root) => {
+			const sessionFile = sessionFileIn(root, "parent", "source");
+			const replacement = { id: "replacement", sessionFile, revivedFrom: "source" };
+			assert.match(await resume(root, "replacement", [replacement]), refused);
+			assert.match(await resume(root, "replacement", [replacement], [{ id: "source", sessionFile }]), refused);
+			assert.match(await resume(root, "replacement", [{ id: "source", sessionFile, state: "running" }, replacement]), refused);
+			assert.match(await resume(root, "replacement", [{ id: "source", sessionFile, state: "stopped" }, replacement]), refused);
+			assert.match(await resume(root, "replacement", [{ id: "source", sessionFile: sessionFileIn(root, "parent", "source", "other") }, { ...replacement, sessionFile: sessionFileIn(root, "parent", "sibling") }]), refused);
+			const shared = sessionFileIn(root, "parent", "neither");
+			assert.match(await resume(root, "a", [{ id: "a", sessionFile: shared, revivedFrom: "b" }, { id: "b", sessionFile: shared, revivedFrom: "a" }]), refused);
+		}));
+
+		it("refuses when the source's own session file fails its checks", () => withRoot(async (root) => {
+			const siblingFile = sessionFileIn(root, "parent", "sibling");
+			assert.match(await resume(root, "replacement", [{ id: "source", sessionFile: siblingFile }, { id: "replacement", sessionFile: siblingFile, revivedFrom: "source" }]), refused);
+		}));
+
+		it("refuses when the source's own session file is a symlink", (context) => withRoot(async (root) => {
+			const siblingFile = sessionFileIn(root, "parent", "sibling");
+			const link = path.join(root, "parent", "source", "run-0", "session.jsonl");
+			fs.mkdirSync(path.dirname(link), { recursive: true });
+			try {
+				fs.symlinkSync(siblingFile, link);
+			} catch (error) {
+				const code = (error as NodeJS.ErrnoException).code;
+				if (code === "EPERM" || code === "EACCES") {
+					context.skip("file symlink creation is unavailable");
+					return;
+				}
+				throw error;
+			}
+			assert.match(await resume(root, "replacement", [{ id: "source", sessionFile: link }, { id: "replacement", sessionFile: siblingFile, revivedFrom: "source" }]), refused);
+		}));
 	});
 
 	it("emits a failed completed nested event when foreground execution throws after start", async () => {
@@ -523,17 +705,21 @@ describe("nested control routing", () => {
 		}
 	});
 
-	it("services the external-job bridge of an async run that the fanout child launched", async () => {
+	it("services only the current session's external-job bridge in a fanout child", async () => {
 		const route = createNestedRoute("root-external-job");
 		routeRoots.push(path.dirname(route.eventSink));
 		const asyncDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-nested-external-job-"));
 		routeRoots.push(asyncDir);
-		const writeStatus = (state: string) => fs.writeFileSync(path.join(asyncDir, "status.json"), JSON.stringify({ state, steps: [{ runner: { type: "external-job" } }] }));
-		writeStatus("running");
+		const foreignDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-nested-foreign-job-"));
+		routeRoots.push(foreignDir);
+		const writeStatus = (dir: string, state: string) => fs.writeFileSync(path.join(dir, "status.json"), JSON.stringify({ state, steps: [{ runner: { type: "external-job" } }] }));
+		writeStatus(asyncDir, "running");
+		writeStatus(foreignDir, "running");
+		const statusCalls: string[] = [];
 		registerExternalJobProvider({
 			name: "surf-oracle",
 			start: () => ({ providerJobId: "job-1", state: "completed" }),
-			status: () => ({ providerJobId: "job-1", state: "completed" }),
+			status: (providerJobId) => { statusCalls.push(providerJobId); return { providerJobId, state: "completed" }; },
 			reattach: () => ({ providerJobId: "job-1", state: "completed" }),
 			result: () => ({ providerJobId: "job-1", state: "completed", output: "advisor result" }),
 		});
@@ -546,17 +732,33 @@ describe("nested control routing", () => {
 			getSessionName() { return "child"; },
 		} as any;
 		let stop: (() => void) | undefined;
+		let cancelForeign = false;
+		let foreignRequest: ReturnType<typeof requestExternalJobOperation> | undefined;
 		try {
-			registerFanoutChildSubagentExtension(pi, fanoutChildRuntime(route, "root-external-job"));
-			listeners.get("subagent:async-started")?.({ id: "run-1", asyncDir });
+			const runtime = fanoutChildRuntime(route, "root-external-job");
+			runtime.runtimeState = createState();
+			runtime.runtimeState.currentSessionId = "session";
+			registerFanoutChildSubagentExtension(pi, runtime);
+			foreignRequest = requestExternalJobOperation(foreignDir, { operation: "status", provider: "surf-oracle", providerJobId: "foreign-job" }, 30_000,
+				() => cancelForeign ? new ExternalJobProviderError("Foreign request canceled", { code: "canceled" }) : undefined);
+			void foreignRequest.catch(() => {});
+			listeners.get("subagent:async-started")?.({ id: "foreign-run", asyncDir: foreignDir, sessionId: "other-session" });
+			const pending = requestExternalJobOperation(asyncDir, { operation: "status", provider: "surf-oracle", providerJobId: "owner-job" }, 30_000);
+			listeners.get("subagent:async-started")?.({ id: "run-1", asyncDir, sessionId: "session" });
+			assert.deepEqual(await pending, { providerJobId: "owner-job", state: "completed" });
+			assert.deepEqual(statusCalls, ["owner-job"], "foreign session must not service provider requests");
+			cancelForeign = true;
+			await assert.rejects(foreignRequest, { code: "canceled" });
 			let output: string | undefined;
 			void runExternalJob({ provider: "surf-oracle", options: {}, cwd: asyncDir, prompt: "prompt text", asyncDir, stepIndex: 0, runId: "run-1", agent: "gpt-pro", registerStop: (handler) => { stop = handler; } })
 				.then((result) => { output = result.output; });
 			await waitFor(() => output !== undefined, 5_000);
 			assert.equal(output, "advisor result");
 		} finally {
+			cancelForeign = true;
+			await foreignRequest?.catch(() => {});
 			stop?.();
-			writeStatus("complete");
+			writeStatus(asyncDir, "complete");
 			lifecycle.get("session_shutdown")?.();
 			delete (globalThis as Record<PropertyKey, unknown>)[Symbol.for(EXTERNAL_JOB_PROVIDER_REGISTRY_KEY)];
 		}
@@ -741,7 +943,6 @@ interface NestedRunOptions {
 	summary?: Record<string, unknown>;
 }
 
-/** Writes a terminal nested run of the fanout child under `route`, with its own run directory. */
 function writeNestedRun(route: ReturnType<typeof createNestedRoute>, runId: string, options: NestedRunOptions = {}): string {
 	// A follow-up runner starts in the source run's cwd, so record one that per-test teardown never removes.
 	const cwd = os.tmpdir();
@@ -786,7 +987,6 @@ describe("nested external-job follow-up", () => {
 		});
 	}
 
-	/** Resumes `runId` from the fanout child that launched it, or from the root session with `from: "root"`. */
 	function resume(params: Record<string, unknown> = {}, from: "child" | "root" = "child") {
 		const executor = from === "child"
 			? createExecutor(createState(), AGENTS, false, undefined, fanoutChildRuntime(route))

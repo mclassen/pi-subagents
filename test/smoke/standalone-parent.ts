@@ -7,6 +7,7 @@ import registerSubagents from "../../index.js";
 import { requestAsyncInterrupt, requestAsyncSteer, requestAsyncStop } from "../../src/runs/background/control-channel.js";
 import { verifyRevival } from "./standalone-revival.ts";
 import { verifySharedRun } from "./standalone-shared.ts";
+import { recoveryDescriptorPath } from "../../src/runs/shared/run-launch-folder.js";
 
 function waitForFile(file: string, predicate: (text: string) => boolean): Promise<void> {
 	return new Promise((resolve) => {
@@ -34,6 +35,8 @@ export default function registerSmoke(pi: ExtensionAPI) {
 				target.sendMessage(args[0], { ...args[1], triggerTurn: false });
 				if (args[0].customType === "subagent-notify") { notifications++; notify(args[0]); }
 			};
+			// Drop user messages too, so nothing starts a parent turn.
+			if (key === "sendUserMessage") return () => {};
 			return Reflect.get(target, key);
 		},
 	});
@@ -51,13 +54,15 @@ export default function registerSmoke(pi: ExtensionAPI) {
 			assert.deepEqual(parseFrontmatterList(profile.frontmatter.tools), expectedDeclaredTools);
 			const workflow = ["workflow", "targeted-controls", "child-timeout"].includes(mode);
 			const expectedState = mode === "interrupt" ? "paused" : mode === "stop" ? "stopped" : mode.endsWith("-timeout") || mode === "child-stop" || mode === "sdk-init-failure" ? "failed" : "complete";
-			const request = mode === "workflow" ? {
-				workflowScript: `const first = await runs.run("first", { agent: "binary-smoke", task: "Return FIRST." }); const siblings = await runs.all([{ key: "left", agent: "binary-smoke", task: "Return LEFT." }, { key: "right", agent: "binary-smoke", task: "Return RIGHT." }]); return { first, siblings };`,
-			} : mode === "targeted-controls" ? {
-				workflowScript: `const left = runs.run("left", { agent: "binary-smoke", task: "Return LEFT." }); const right = runs.run("right", { agent: "binary-smoke", task: "Return RIGHT." }); let interrupted; try { interrupted = await right; } catch (error) { interrupted = String(error); } return { left: await left, right: interrupted };`,
-			} : mode === "child-timeout" ? {
-				workflowScript: `return await runs.run("child-deadline", { agent: "binary-smoke", task: "Wait for cancellation.", timeoutMs: 8000 });`,
-			} : { agent: "binary-smoke", task: "Return the scripted response." };
+			const workflowScript = mode === "workflow"
+				? `const first = await runs.run("first", { agent: "binary-smoke", task: "Return FIRST." }); const siblings = await runs.all([{ key: "left", agent: "binary-smoke", task: "Return LEFT." }, { key: "right", agent: "binary-smoke", task: "Return RIGHT." }]); return { first, siblings };`
+				: mode === "targeted-controls"
+					? `const left = runs.run("left", { agent: "binary-smoke", task: "Return LEFT." }); const right = runs.run("right", { agent: "binary-smoke", task: "Return RIGHT." }); let interrupted; try { interrupted = await right; } catch (error) { interrupted = String(error); } return { left: await left, right: interrupted };`
+					: mode === "child-timeout"
+						? `return await runs.run("child-deadline", { agent: "binary-smoke", task: "Wait for cancellation.", timeoutMs: 8000 });`
+						: undefined;
+			if (workflowScript !== undefined) fs.writeFileSync("/stage/work/smoke-workflow.js", workflowScript);
+			const request = workflowScript !== undefined ? { workflow: "/stage/work/smoke-workflow.js" } : { agent: "binary-smoke", task: "Return the scripted response." };
 			fs.writeFileSync("/stage/parent-initialized", String(process.pid));
 			if (mode === "shared-run" || mode === "parallel-stop") {
 				await verifySharedRun(host, ctx, mode, waitForFile, notification);
@@ -68,9 +73,8 @@ export default function registerSmoke(pi: ExtensionAPI) {
 			const startupFailure = mode === "persistence-failure" || mode === "authorization-failure";
 			if (startupFailure) assert.equal(JSON.parse(fs.readFileSync("/stage/startup-hook-ready.json", "utf8")).pid, process.pid);
 			const launching = tool.execute("standalone-smoke", {
-				...request, context: "fresh", async: true,
-				model: "standalone-smoke/local", acceptance: false, timeoutMs: mode === "run-timeout" ? 8000 : 20000, output: false,
-				...(mode === "tool-timeout" ? { toolTimeoutMs: 1000 } : {}),
+				...request, async: true, model: "standalone-smoke/local", output: false,
+				options: { context: "fresh", acceptance: false, timeoutMs: mode === "run-timeout" ? 8000 : 20000, ...(mode === "tool-timeout" ? { toolTimeoutMs: 1000 } : {}) },
 			}, new AbortController().signal, undefined, ctx);
 			if (mode === "missing-bootstrap") {
 				assert.ok(fs.existsSync("/stage/withheld-binary-bootstrap.js"));
@@ -153,7 +157,7 @@ export default function registerSmoke(pi: ExtensionAPI) {
 				assert.equal(status.sessionId, ctx.sessionManager.getSessionId());
 				assert.equal(status.completionOwnerId, parentStatus.completionOwnerId);
 				assert.equal(status.steps[0].model, "standalone-smoke/local");
-				const descriptor = JSON.parse(fs.readFileSync(`${runDir}/recovery-descriptor.json`, "utf8"));
+				const descriptor = JSON.parse(fs.readFileSync(recoveryDescriptorPath(path.dirname(runDir), path.basename(runDir)), "utf8"));
 				assert.deepEqual(descriptor.tools, expectedDeclaredTools);
 				const observed = fs.readFileSync("/stage/bootstrap-observer.jsonl", "utf8").trim().split("\n").map((line) => JSON.parse(line)).filter((event) => event.pid === status.pid);
 				assert.deepEqual(observed.map((event) => event.event), mode === "sdk-init-failure" ? ["observer-ready"] : ["observer-ready", "session-start"]);

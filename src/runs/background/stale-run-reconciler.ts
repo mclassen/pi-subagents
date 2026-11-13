@@ -4,6 +4,7 @@ import { writeAtomicJson } from "../../shared/atomic-json.ts";
 import { resultFilePath, resultPayloadPathForSessionRun, writeAsyncResultFile } from "./result-files.ts";
 import { updateActiveRunIndex } from "./active-run-index.ts";
 import { readProcessTerminal } from "./process-terminal.ts";
+import { OWNING_SESSION_COMPLETION_OWNER } from "../../shared/completion-owner.ts";
 import { readStatus } from "../../shared/utils.ts";
 import { DIRS, type AsyncParallelGroupStatus, type AsyncStatus, type NestedRunSummary, type SubagentRunMode } from "../../shared/types.ts";
 import { resolveEffectiveThinking } from "../../shared/model-info.ts";
@@ -11,6 +12,10 @@ import { normalizeParallelGroups } from "./parallel-groups.ts";
 import { nestedSummaryFromAsyncStatus, projectNestedEvents, resolveNestedAsyncDir, writeNestedEvent, type NestedRoute } from "../shared/nested-events.ts";
 import { assertWorkflowGraphHostSteps } from "../shared/host-step-status.ts";
 import type { RawDrainStatusObserver } from "../shared/readonly-drain-observation.ts";
+import { currentPidNamespaceScope } from "./pid-namespace.ts";
+import { currentBootId } from "./boot-id.ts";
+import { WORKFLOW_STOP_CAUSE_OWNER_EXITED } from "../../workflows/workflow-stop-cause.ts";
+import { isTerminalAsyncState } from "./workflow-terminal-proof.ts";
 
 export type PidLiveness = "alive" | "dead" | "unknown";
 
@@ -37,6 +42,13 @@ interface ReconcileAsyncRunOptions {
 	startedRun?: StartedRunMetadata;
 	missingStatusGraceMs?: number;
 	staleAlivePidMs?: number;
+	pidNamespaceScope?: () => string | undefined;
+	bootId?: () => string | undefined;
+	/**
+	 * This process's completion owner, for an owner-exited workflow repair to adopt so the session that
+	 * reopened it delivers its notice. Only callers whose session owns the run pass it.
+	 */
+	adoptCompletionOwnerId?: string;
 }
 
 interface ReconcileAsyncRunResult {
@@ -211,6 +223,7 @@ function buildStartedStatus(asyncDir: string, startedRun: StartedRunMetadata, no
 		mode: startedRun.mode ?? "single",
 		state: "running",
 		pid: startedRun.pid,
+		pidNamespaceScope: currentPidNamespaceScope(),
 		startedAt,
 		lastUpdate: now,
 		currentStep: 0,
@@ -225,9 +238,44 @@ function buildStartedStatus(asyncDir: string, startedRun: StartedRunMetadata, no
 	};
 }
 
-function buildFailedRepair(status: AsyncStatus, asyncDir: string, now: number, reason?: string): { status: AsyncStatus; result: Record<string, unknown>; message: string } {
+/**
+ * A dead workflow owner does not say how its detached children ended. A detached child this
+ * workflow owns that already wrote its own terminal status keeps that outcome instead of
+ * inheriting the owner failure.
+ */
+function settledWorkflowChildStatus(asyncDir: string, workflowRunId: string, step: NonNullable<AsyncStatus["steps"]>[number], now: number): NonNullable<AsyncStatus["steps"]>[number] | undefined {
+	const childRunId = step.runId;
+	if (step.async !== true || step.parentWorkflowRunId !== workflowRunId || !childRunId || childRunId === workflowRunId
+		|| childRunId !== path.basename(childRunId) || childRunId === "." || childRunId === "..") return undefined;
+	const child = readStatus(path.join(path.dirname(asyncDir), childRunId));
+	if (!child || child.runId !== childRunId || child.parentWorkflowRunId !== workflowRunId || !isTerminalAsyncState(child.state)) return undefined;
+	if (step.workflowKey !== undefined && child.workflowKey !== step.workflowKey) return undefined;
+	const state = child.state;
+	const childStep = child.steps?.[0];
+	const endedAt = child.endedAt ?? step.endedAt ?? now;
+	const settled: NonNullable<AsyncStatus["steps"]>[number] = {
+		...step,
+		status: state,
+		activityState: undefined,
+		endedAt,
+		durationMs: step.startedAt !== undefined ? Math.max(0, endedAt - step.startedAt) : step.durationMs,
+		exitCode: childStep?.exitCode ?? (state === "complete" ? 0 : 1),
+		error: state === "complete" ? undefined : childStep?.error ?? child.error ?? step.error,
+		stopped: state === "stopped" ? true : step.stopped,
+	};
+	if (settled.error === undefined) delete settled.error;
+	if (settled.stopped === undefined) delete settled.stopped;
+	return settled;
+}
+
+function buildFailedRepair(status: AsyncStatus, asyncDir: string, now: number, reason?: string, ownerExited = false, adoptCompletionOwnerId?: string): { status: AsyncStatus; result: Record<string, unknown>; message: string } {
 	const runId = status.runId || path.basename(asyncDir);
 	const pid = typeof status.pid === "number" ? status.pid : "unknown";
+	// A dead workflow host is the Pi process itself; its journal keeps the finished children for a relaunch.
+	const exitedWorkflow = ownerExited && status.mode === "workflow" ? status.workflow : undefined;
+	// Its owner process is dead, so nothing else can deliver its notice: an owning session that repairs it
+	// adopts it, and a repair elsewhere leaves it to whichever session owns the run.
+	const completionOwnerId = exitedWorkflow ? adoptCompletionOwnerId || OWNING_SESSION_COMPLETION_OWNER : status.completionOwnerId;
 	const terminal = readProcessTerminal(asyncDir, { runId }) ?? status.processTerminal;
 	const runnerExit = terminal?.state === "observed" || terminal?.state === "unknown"
 		? terminal.instances?.find((instance) => instance.kind === "runner" && instance.processInstanceId === terminal.runnerProcessInstanceId)
@@ -235,21 +283,33 @@ function buildFailedRepair(status: AsyncStatus, asyncDir: string, now: number, r
 	const exitText = runnerExit?.kind === "runner"
 		? `exited with code ${runnerExit.exitCode ?? "none"}${runnerExit.signal ? ` (signal ${runnerExit.signal})` : ""}`
 		: "exited or disappeared";
-	const baseMessage = reason ?? `Async runner process ${pid} ${exitText} before writing a result. Marked run failed by stale-run reconciliation.`;
+	const baseMessage = reason ?? (exitedWorkflow
+		? `The Pi process (PID ${pid}) that ran workflow ${runId} exited before the workflow finished. Marked run failed by stale-run reconciliation. Its finished children are kept.`
+		: `Async runner process ${pid} ${exitText} before writing a result. Marked run failed by stale-run reconciliation.`);
 	const diagnostics = readRunnerStartupDiagnostics(asyncDir);
 	const message = diagnostics ? `${baseMessage}\n\nRunner stderr tail:\n${diagnostics}` : baseMessage;
 	const steps = status.steps?.length ? status.steps : [{ agent: "subagent", status: "running" as const }];
-	const repairedSteps = steps.map((step) => step.status === "running" || step.status === "pending"
-		? {
+	const repairedSteps = steps.map((step) => {
+		if (step.status !== "running" && step.status !== "pending") return step;
+		let settled: ReturnType<typeof settledWorkflowChildStatus>;
+		let childReadError: string | undefined;
+		try {
+			settled = settledWorkflowChildStatus(asyncDir, runId, step, now);
+		} catch (error) {
+			// An unreadable child status must not block repairing the dead owner.
+			childReadError = error instanceof Error ? error.message : String(error);
+		}
+		if (settled) return settled;
+		return {
 			...step,
 			status: "failed" as const,
 			activityState: undefined,
 			endedAt: step.endedAt ?? now,
 			durationMs: step.startedAt !== undefined && step.durationMs === undefined ? Math.max(0, now - step.startedAt) : step.durationMs,
 			exitCode: step.exitCode ?? 1,
-			error: step.error ?? message,
-		}
-		: step);
+			error: step.error ?? (childReadError ? `${message} (child status unreadable: ${childReadError})` : message),
+		};
+	});
 	const repairedStatus: AsyncStatus = {
 		...status,
 		state: "failed",
@@ -260,6 +320,9 @@ function buildFailedRepair(status: AsyncStatus, asyncDir: string, now: number, r
 		lastUpdate: now,
 		endedAt: now,
 		steps: repairedSteps,
+		// Read from the pre-repair status: the repair time would make an old crash look new.
+		...(exitedWorkflow ? { workflow: { ...exitedWorkflow, stopCause: WORKFLOW_STOP_CAUSE_OWNER_EXITED, ownerExitedAt: status.lastUpdate ?? status.startedAt } } : {}),
+		...(completionOwnerId ? { completionOwnerId } : {}),
 	};
 	const resultAgent = repairedSteps[status.currentStep ?? 0]?.agent ?? repairedSteps[0]?.agent ?? "subagent";
 	return {
@@ -269,7 +332,11 @@ function buildFailedRepair(status: AsyncStatus, asyncDir: string, now: number, r
 			id: runId,
 			agent: resultAgent,
 			mode: status.mode,
-			...(status.completionOwnerId ? { completionOwnerId: status.completionOwnerId } : {}),
+			...(exitedWorkflow ? { workflow: { stopCause: WORKFLOW_STOP_CAUSE_OWNER_EXITED } } : {}),
+			...(completionOwnerId ? { completionOwnerId } : {}),
+			...(status.completionOwnerProcess ? { completionOwnerProcess: status.completionOwnerProcess } : {}),
+			...(status.parentWorkflowRunId ? { parentWorkflowRunId: status.parentWorkflowRunId } : {}),
+			...(status.workflowKey ? { workflowKey: status.workflowKey } : {}),
 			success: false,
 			state: "failed",
 			summary: message,
@@ -294,8 +361,8 @@ function buildFailedRepair(status: AsyncStatus, asyncDir: string, now: number, r
 	};
 }
 
-function writeFailedRepair(asyncDir: string, status: AsyncStatus, resultPath: string, now: number, reason?: string): ReconcileAsyncRunResult {
-	const repair = buildFailedRepair(status, asyncDir, now, reason);
+function writeFailedRepair(asyncDir: string, status: AsyncStatus, resultPath: string, now: number, reason?: string, ownerExited = false, adoptCompletionOwnerId?: string): ReconcileAsyncRunResult {
+	const repair = buildFailedRepair(status, asyncDir, now, reason, ownerExited, adoptCompletionOwnerId);
 	if (repair.result.sessionId) writeAsyncResultFile(resultPath, repair.result);
 	writeAtomicJson(path.join(asyncDir, "status.json"), repair.status);
 	updateActiveRunIndex(asyncDir, repair.status.state, repair.status.toolCallId);
@@ -354,9 +421,18 @@ export function reconcileNestedAsyncDescendants(route: NestedRoute, options: Rec
 	}
 }
 
-export function checkPidLiveness(pid: number, kill: KillFn = process.kill): PidLiveness {
+export function checkPidLiveness(pid: number, kill: KillFn = process.kill, probeZombie = false): PidLiveness {
 	try {
 		kill(pid, 0);
+		if (probeZombie && process.platform === "linux") {
+			try {
+				const stat = fs.readFileSync(`/proc/${pid}/stat`, "utf-8");
+				const closeParen = stat.lastIndexOf(") ");
+				if (closeParen >= 0 && stat[closeParen + 2] === "Z") return "dead";
+			} catch {
+				// Fall back to kill(pid, 0) when procfs is unavailable or unreadable.
+			}
+		}
 		return "alive";
 	} catch (error) {
 		const code = typeof error === "object" && error !== null && "code" in error
@@ -366,6 +442,46 @@ export function checkPidLiveness(pid: number, kill: KillFn = process.kill): PidL
 		if (code === "EPERM") return "unknown";
 		return "unknown";
 	}
+}
+
+export interface RecordedPid {
+	pid: number;
+	pidNamespaceScope?: string;
+	bootId?: string;
+}
+
+export function isRecordedPid(value: unknown): value is RecordedPid {
+	if (!value || typeof value !== "object") return false;
+	const { pid, pidNamespaceScope, bootId } = value as Record<string, unknown>;
+	return typeof pid === "number" && Number.isSafeInteger(pid) && pid > 0
+		&& (pidNamespaceScope === undefined || typeof pidNamespaceScope === "string")
+		&& (bootId === undefined || typeof bootId === "string");
+}
+
+export interface RecordedPidObservation {
+	observedScope: string | undefined;
+	observedBootId: string | undefined;
+	kill?: KillFn;
+	/** Replaces the default `checkPidLiveness` probe. */
+	probe?: (pid: number) => PidLiveness;
+}
+
+/**
+ * Liveness of a pid saved in a status file. A pid saved under another boot is dead without a
+ * probe, but only when both sides are in the same pid namespace or neither records one: a
+ * macOS host reading a Linux container's runs must not compare their boot ids.
+ */
+export function checkRecordedPidLiveness(recorded: RecordedPid, observation: RecordedPidObservation = { observedScope: currentPidNamespaceScope(), observedBootId: currentBootId() }): PidLiveness {
+	const { observedScope, observedBootId } = observation;
+	if (recorded.pidNamespaceScope === observedScope && recorded.bootId && observedBootId && recorded.bootId !== observedBootId) return "dead";
+	// An observer without a scope (macOS/Windows host sharing a container's temp root) cannot match a recorded one.
+	const scopeMismatch = recorded.pidNamespaceScope !== undefined && recorded.pidNamespaceScope !== observedScope;
+	// A local zombie is evidence about this pid only when its namespace is known to match.
+	const scopeVerified = recorded.pidNamespaceScope !== undefined && recorded.pidNamespaceScope === observedScope;
+	const liveness = observation.probe
+		? observation.probe(recorded.pid)
+		: checkPidLiveness(recorded.pid, observation.kill, scopeVerified);
+	return liveness === "dead" && scopeMismatch ? "unknown" : liveness;
 }
 
 export function reconcileAsyncRun(asyncDir: string, options: ReconcileAsyncRunOptions = {}, observeStatus?: RawDrainStatusObserver): ReconcileAsyncRunResult {
@@ -431,14 +547,19 @@ export function reconcileAsyncRun(asyncDir: string, options: ReconcileAsyncRunOp
 		}
 	}
 
-	const liveness = checkPidLiveness(effectiveStatus.pid, options.kill);
+	const liveness = checkRecordedPidLiveness({ pid: effectiveStatus.pid, pidNamespaceScope: effectiveStatus.pidNamespaceScope, bootId: effectiveStatus.bootId }, {
+		kill: options.kill,
+		observedScope: options.pidNamespaceScope ? options.pidNamespaceScope() : currentPidNamespaceScope(),
+		observedBootId: options.bootId ? options.bootId() : currentBootId(),
+	});
 	if (liveness !== "dead") {
 		const staleAfterMs = options.staleAlivePidMs ?? 24 * 60 * 60 * 1000;
 		const lastUpdate = effectiveStatus.lastUpdate ?? effectiveStatus.startedAt;
 		if (now - lastUpdate <= staleAfterMs) return { status: status ?? null, repaired: false, resultPath };
-		const message = `Async runner process ${effectiveStatus.pid} still has a live PID, but status has not updated for ${now - lastUpdate}ms. Marked run failed by stale-run reconciliation because PID ownership cannot be verified.`;
+		const probe = liveness === "alive" ? "is still live" : "cannot be probed from this process";
+		const message = `Async runner PID ${effectiveStatus.pid} ${probe}; status has not updated for ${now - lastUpdate}ms, so stale-run reconciliation marked the run failed because PID ownership is unverified.`;
 		return writeFailedRepair(asyncDir, effectiveStatus, resultPath, now, message);
 	}
 
-	return writeFailedRepair(asyncDir, effectiveStatus, resultPath, now);
+	return writeFailedRepair(asyncDir, effectiveStatus, resultPath, now, undefined, true, options.adoptCompletionOwnerId);
 }

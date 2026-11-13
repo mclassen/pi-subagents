@@ -46,10 +46,10 @@ function makeState(sessionId: string | null, ctx: unknown): SubagentState {
 	};
 }
 
-function makeCtx(sessionId: string, sessionFile: string | null = null): { cwd: string; hasUI: boolean; sessionManager: { getSessionId: () => string; getSessionFile: () => string | null; getEntries: () => [] } } {
+function makeCtx(sessionId: string, sessionFile: string | null = null): { cwd: string; isIdle: () => boolean; hasUI: boolean; sessionManager: { getSessionId: () => string; getSessionFile: () => string | null; getEntries: () => [] } } {
 	return {
 		cwd: process.cwd(),
-		hasUI: false,
+		isIdle() { return false; }, hasUI: false,
 		sessionManager: {
 			getSessionId: () => sessionId,
 			getSessionFile: () => sessionFile,
@@ -60,8 +60,7 @@ function makeCtx(sessionId: string, sessionFile: string | null = null): { cwd: s
 
 /**
  * Write an ask directly to the channel the way a child's `contact_supervisor` call does, without
- * going through a live poller. This is the state the wave-11 incident was in: the request file was
- * on disk and no scan had happened yet.
+ * going through a live poller.
  */
 function writeRequest(input: { sessionId: string; runId: string; agent?: string; index?: number; message?: string; reason?: "need_decision" | "progress_update"; expiresAt?: number }): string {
 	const agent = input.agent ?? "worker";
@@ -103,6 +102,7 @@ function text(result: { content: Array<{ type: string; text?: string }> }): stri
 
 afterEach(() => {
 	for (const channel of createdChannels.splice(0)) fs.rmSync(channel, { recursive: true, force: true });
+	delete process.env.PI_INTERCOM_ASK_TIMEOUT_MS;
 });
 
 /** Deterministic session/model seam: real launch hooks and tools, with the host's tool allowlist. */
@@ -240,10 +240,12 @@ describe("supervisor ask registration", () => {
 				await runtime.emit("session_start");
 				assert.equal(polling.intervals.size, 0);
 				assert.equal(polling.scans.length, 0);
+				const workflowPath = path.join(root, "inspect.js");
+				fs.writeFileSync(workflowPath, "return runs.run('inspect', { agent: 'leaf', task: 'Inspect read-only and report progress.', async: false, output: false });");
 				for (const mode of ["foreground", "workflow"] as const) {
 					const params = mode === "foreground"
 						? { agent: "leaf", task: "Inspect read-only and report progress.", async: false, output: false }
-						: { workflowScript: "return runs.run('inspect', { agent: 'leaf', task: 'Inspect read-only and report progress.', async: false, output: false });", async: false };
+						: { workflow: workflowPath, async: false };
 					const result = await runtime.call("subagent", params);
 					assert.notEqual(result.isError, true, text(result));
 					assert.equal(leaves.at(-1)!.closed, true, "child starts and completes without a timer tick");
@@ -365,8 +367,10 @@ describe("supervisor ask registration", () => {
 							if (launch.runtime.agent === "coordinator") {
 								assert.ok(runtime.registered.has(NATIVE_SUPERVISOR_TOOL_NAME), "B needs a native downward provider");
 								assert.ok(runtime.active().includes(NATIVE_SUPERVISOR_TOOL_NAME), "B's requested supervisor tool must be callable");
+								const workflowPath = path.join(root, "inspect.js");
+								fs.writeFileSync(workflowPath, "return runs.run('inspect', { agent: 'leaf', task: 'Inspect the repository read-only and ask which option to report.', async: false });");
 								const receipt = await runtime.call("subagent", {
-									workflowScript: "return runs.run('inspect', { agent: 'leaf', task: 'Inspect the repository read-only and ask which option to report.', async: false });",
+									workflow: workflowPath,
 									async: true,
 								});
 								assert.notEqual(receipt.isError, true, text(receipt));
@@ -530,7 +534,7 @@ describe("supervisor ask registration", () => {
 			const requestId = writeRequest({ sessionId: runtime.owner, runId });
 			const status = JSON.stringify({ runId, sessionId: runtime.sessionFile, state: "running", mode: "single", pid: process.pid, startedAt: Date.now(), steps: [{ agent: "worker", status: "running" }] });
 			fs.writeFileSync(path.join(root, "status.json"), status);
-			await assert.rejects(runtime.call("subagent", { action: "steer", dir: root, message: "After the decision, inspect docs." }), (error: Error) => {
+			await assert.rejects(runtime.call("subagent", { action: "steer", options: { dir: root }, message: "After the decision, inspect docs." }), (error: Error) => {
 				assert.ok(error.message.includes(`"replyTo":"${requestId}"`), error.message);
 				assert.match(error.message, /not delivered or queued/);
 				return true;
@@ -751,7 +755,7 @@ describe("supervisor ask registration", () => {
 				let stale = false;
 				const ctx = {
 					cwd: root,
-					get hasUI() { if (stale) throw new Error("This extension ctx is stale after session replacement or reload."); return false; },
+					isIdle() { return false; }, get hasUI() { if (stale) throw new Error("This extension ctx is stale after session replacement or reload."); return false; },
 					ui: { setWidget() {}, requestRender() {}, onTerminalInput() { return () => {}; }, notify() {}, theme: { fg(_name, text) { return text; }, bold(text) { return text; } } },
 					sessionManager: {
 						getSessionId() { if (stale) throw new Error("stale session manager"); return owner; },
@@ -792,8 +796,9 @@ describe("supervisor ask registration", () => {
 				assert.match(JSON.stringify(await runtime.tool.execute("reply", { action: "reply", replyTo: next, message: "Approved" })), new RegExp(next));
 			} finally {
 				await runtime?.shutdown();
-				for (const dir of channels) fs.rmSync(dir, { recursive: true, force: true });
-				fs.rmSync(root, { recursive: true, force: true });
+				// No process or watcher of this script holds these; Windows can briefly hold a just-written file.
+				for (const dir of channels) fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+				fs.rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 			}
 		`;
 		const env = { ...process.env };
@@ -813,7 +818,12 @@ describe("supervisor ask registration", () => {
 			const first = writeRequest({ sessionId, runId });
 			const tool = tools.get(NATIVE_SUPERVISOR_TOOL_NAME)!;
 			await assert.rejects(tool.execute("wrong", { action: "reply", to: "different-agent", message: "Approved" }), /No pending supervisor request matches/);
-			await assert.rejects(tool.execute("unknown", { action: "reply", replyTo: "unknown", message: "Approved" }), /No pending supervisor request found/);
+			// A reply to a request that is gone names the one that can still be answered.
+			await assert.rejects(tool.execute("unknown", { action: "reply", replyTo: "unknown", message: "Approved" }), (error: Error) => {
+				assert.match(error.message, /No pending supervisor request found for replyTo 'unknown'\. It was answered, expired or withdrawn\. Pending now:/);
+				assert.match(error.message, new RegExp(`- ${first}: worker \\[${runId}#0\\]`));
+				return true;
+			});
 			assert.equal(channel.pending.has(first), true);
 			const second = writeRequest({ sessionId, runId });
 			await assert.rejects(tool.execute("ambiguous", { action: "reply", message: "Approved" }), /Multiple pending supervisor requests/);
@@ -838,8 +848,9 @@ describe("supervisor ask registration", () => {
 		try {
 			channel.start();
 			const tool = tools.get(NATIVE_SUPERVISOR_TOOL_NAME)!;
-			const expired = writeRequest({ sessionId, runId, expiresAt: Date.now() - 1 });
-			await assert.rejects(tool.execute("expired", { action: "reply", replyTo: expired, message: "Too late" }), /No pending supervisor request found/);
+			const expiredAt = Date.now() - 1;
+			const expired = writeRequest({ sessionId, runId, expiresAt: expiredAt });
+			await assert.rejects(tool.execute("expired", { action: "reply", replyTo: expired, message: "Too late" }), new RegExp(`Supervisor request '${expired}' .* expired at ${new Date(expiredAt).toISOString()}: .*No pending supervisor requests\\.`));
 			const missing = writeRequest({ sessionId, runId });
 			const resolved = writeRequest({ sessionId, runId });
 			await tool.execute("pending", { action: "pending" });
@@ -848,12 +859,19 @@ describe("supervisor ask registration", () => {
 			fs.rmSync(path.join(dir, "requests", `${missing}.json`));
 			const replyFile = path.join(dir, "replies", `${resolved}.json`);
 			fs.writeFileSync(replyFile, JSON.stringify({ message: "Already answered" }));
-			for (const replyTo of [missing, resolved]) {
-				await assert.rejects(tool.execute("stale", { action: "reply", replyTo, message: "Must not overwrite" }), /No pending supervisor request found/);
-			}
+			await assert.rejects(tool.execute("stale", { action: "reply", replyTo: missing, message: "Must not overwrite" }), new RegExp(`Supervisor request '${missing}' .* was withdrawn by the child before its ask deadline \\(noticed at `));
+			await assert.rejects(tool.execute("stale", { action: "reply", replyTo: resolved, message: "Must not overwrite" }), new RegExp(`Supervisor request '${resolved}' .* was already answered \\(noticed at `));
 			assert.equal(channel.pending.size, 0);
 			assert.deepEqual(fs.readdirSync(path.join(dir, "replies")), [`${resolved}.json`]);
 			assert.equal(JSON.parse(fs.readFileSync(replyFile, "utf8")).message, "Already answered");
+			// A child whose ask times out deletes its own request file; past the deadline, that is not reported as a withdrawal.
+			const deadline = Date.now() + 100;
+			const timedOut = writeRequest({ sessionId, runId, expiresAt: deadline });
+			await tool.execute("pending", { action: "pending" });
+			assert.equal(channel.pending.has(timedOut), true);
+			await new Promise((resolve) => setTimeout(resolve, 150));
+			fs.rmSync(path.join(dir, "requests", `${timedOut}.json`));
+			await assert.rejects(tool.execute("late", { action: "reply", replyTo: timedOut, message: "Too late" }), new RegExp(`Supervisor request '${timedOut}' .* ended around its ask deadline at ${new Date(deadline).toISOString()}: either no reply arrived .* or its run was stopped just before then`));
 		} finally { channel.dispose(); }
 	});
 
@@ -882,9 +900,8 @@ describe("supervisor ask registration", () => {
 		} finally { channel.dispose(); }
 	});
 
-	// D1: `refreshPendingRequests` only re-evaluates asks already in `pending`; it never reads the
-	// filesystem. With no watcher installed and the demand-gated poller stopped, an ask written by
-	// a child was unfindable by ANY number of `action:"pending"` calls.
+	// `refreshPendingRequests` only re-evaluates asks already in `pending`; it never reads the
+	// filesystem.
 	it("discovers an ask written while nothing was polling", async () => {
 		const sessionId = `session-${randomUUID()}`;
 		const runId = `run-${randomUUID()}`;
@@ -1007,6 +1024,61 @@ describe("supervisor ask registration", () => {
 			await tool.execute("after-acceptance", { action: "pending" });
 			assert.equal(attempts, 0);
 			assert.equal(channel.pending.size, 0);
+		} finally { channel.dispose(); }
+	});
+
+	it("moves a queued ask's deadline forward until its notice reaches the parent model", async () => {
+		process.env.PI_INTERCOM_ASK_TIMEOUT_MS = "1000";
+		const sessionId = `session-${randomUUID()}`;
+		const runId = `run-${randomUUID()}`;
+		const handlers = new Map<string, Set<(event: unknown) => void>>();
+		const pi = {
+			...makePi({ tools: new Map() }),
+			on(name: string, handler: (event: unknown) => void) {
+				const set = handlers.get(name) ?? new Set();
+				handlers.set(name, set.add(handler));
+				return () => { set.delete(handler); };
+			},
+		};
+		const emit = (name: string, event: unknown) => { for (const handler of handlers.get(name) ?? []) handler(event); };
+		let appended = false;
+		const channel = createNativeSupervisorChannel(pi as never, makeState(sessionId, makeCtx(sessionId)), {
+			platform: "darwin",
+			parentWake: { sendMessage: () => appended },
+		});
+		const expiresAt = (requestId: string) => JSON.parse(fs.readFileSync(path.join(resolveSupervisorChannelDir(runId, "worker", 0), "requests", `${requestId}.json`), "utf-8")).expiresAt as number;
+		try {
+			channel.start();
+			const queued = writeRequest({ sessionId, runId, expiresAt: Date.now() + 100 });
+			channel.hasPendingRequests();
+			channel.hasPendingRequests();
+			assert.ok(expiresAt(queued) > Date.now() + 500, "a notice Pi queued behind a busy run must not let the ask expire unread");
+			await new Promise((resolve) => setTimeout(resolve, 200));
+			assert.equal(channel.hasPendingRequests(), true);
+			assert.equal(channel.pending.has(queued), true, "the parent keeps the ask past its original deadline");
+
+			emit("message_start", { message: { role: "custom", customType: "subagent_supervisor_request", details: { requestId: queued } } });
+			assert.equal(handlers.get("message_start")?.size ?? 0, 0, "delivery ends the extension and its subscription");
+			const delivered = expiresAt(queued);
+			await new Promise((resolve) => setTimeout(resolve, 600));
+			channel.hasPendingRequests();
+			assert.equal(expiresAt(queued), delivered, "a delivered ask keeps its deadline");
+
+			// 500 ms: long enough not to expire (and be removed) on a slow runner, shorter than the 1000 ms extension.
+			const dropped = writeRequest({ sessionId, runId, expiresAt: Date.now() + 500 });
+			channel.hasPendingRequests();
+			emit("agent_settled", {});
+			const settled = expiresAt(dropped);
+			channel.hasPendingRequests();
+			assert.equal(expiresAt(dropped), settled, "a notice still queued when the run settles was dropped and is not extended");
+
+			appended = true;
+			const visibleDeadline = Date.now() + 500;
+			const visible = writeRequest({ sessionId, runId, expiresAt: visibleDeadline });
+			channel.hasPendingRequests();
+			channel.hasPendingRequests();
+			assert.equal(expiresAt(visible), visibleDeadline, "an ask appended to an idle parent is visible already and keeps its deadline");
+			assert.equal(handlers.get("message_start")?.size ?? 0, 0);
 		} finally { channel.dispose(); }
 	});
 

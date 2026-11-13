@@ -8,6 +8,7 @@ import { updateActiveRunIndex } from "../../src/runs/background/active-run-index
 import { summarizeAsyncStatus } from "../../src/runs/background/async-status.ts";
 import { formatAsyncResultTranscript, formatAsyncRunTranscript } from "../../src/runs/background/fleet-view.ts";
 import { inspectSubagentStatus } from "../../src/runs/background/run-status.ts";
+import { resolveExternalCliRunnerStatus } from "../../src/runs/shared/external-cli-contract.ts";
 import { createNestedRoute, writeNestedEvent } from "../../src/runs/shared/nested-events.ts";
 import { claimRunFanoutBatch, createRunFanoutBudget, writeRunFanoutBudgetDescriptor } from "../../src/runs/shared/run-fanout-budget.ts";
 import { TEMP_ROOT_DIR, type AsyncStatus, type SubagentState } from "../../src/shared/types.ts";
@@ -351,7 +352,7 @@ describe("async run status inspection", () => {
 
 			const text = textContent(result);
 			assert.equal(result.isError, undefined);
-			assert.match(text, /Follow-up: subagent\(\{ action: "resume", id: "run-external-follow-up", index: 0, message: "\.\.\." \}\)/);
+			assert.match(text, /Follow-up: subagent\(\{ action: "resume", id: "run-external-follow-up", message: "\.\.\.", options: \{ index: 0 \} \}\)/);
 			assert.match(text, /Resume: use the external-job follow-up hint above\./);
 		} finally {
 			fs.rmSync(root, { recursive: true, force: true });
@@ -383,6 +384,21 @@ describe("async run status inspection", () => {
 			assert.equal(result.isError, undefined);
 			assert.match(text, /Adapter: external-cli v1 \(one-shot-stdin\)/);
 			assert.match(text, /Unsupported resume: The one-shot stdin adapter has no durable external session identity/);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("labels external-cli safety as the adapter profile, not a measurement", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-run-status-safety-"));
+		try {
+			const asyncRoot = path.join(root, "runs");
+			const runner = resolveExternalCliRunnerStatus({ adapter: "claude-code-writer", command: "claude" });
+			fs.mkdirSync(path.join(asyncRoot, "run-safety"), { recursive: true });
+			fs.writeFileSync(path.join(asyncRoot, "run-safety", "status.json"), JSON.stringify({ runId: "run-safety", mode: "single", state: "complete", startedAt: 100, lastUpdate: 200, steps: [{ agent: "writer", status: "complete", runner }] }), "utf-8");
+
+			const status = textContent(inspectSubagentStatus({ id: "run-safety" }, { asyncDirRoot: asyncRoot, resultsDir: path.join(root, "results") }));
+			assert.match(status, /\n  Safety \(adapter profile, not measured\): access=workspace-write, .*tools=Read,Write,Edit,Glob,Grep, mcp=empty-strict/);
 		} finally {
 			fs.rmSync(root, { recursive: true, force: true });
 		}
@@ -430,10 +446,9 @@ describe("async run status inspection", () => {
 			assert.match(text, /Error: top-level async status error/);
 			assert.match(text, /Progress: 2 agents running · 0\/3 done/);
 			assert.match(text, new RegExp(`Output: ${runOutputPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
-			assert.match(text, /Agent 1\/3: reviewer: Inspect the first result running \(gpt-5\.5 · thinking high\)/);
-			assert.match(text, /Agent 2\/3: reviewer running \(claude-haiku-4-5 · thinking low\)/);
+			assert.match(text, /Agent 1\/3: reviewer: Inspect the first result running \(openai-codex\/gpt-5\.5 · thinking high\)/);
+			assert.match(text, /Agent 2\/3: reviewer running \(anthropic\/claude-haiku-4-5 · thinking low\)/);
 			assert.match(text, /Agent 3\/3: reviewer pending/);
-			assert.doesNotMatch(text, /openai-codex\/gpt-5\.5/);
 			assert.match(text, new RegExp(`  Output: ${firstStepOutputPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
 			assert.match(text, new RegExp(`  Output: ${secondStepOutputPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
 			assert.doesNotMatch(text, /Step 1: reviewer/);
@@ -871,8 +886,8 @@ describe("async run status inspection", () => {
 			assert.match(text, /0\. worker: Inspect fleet \| running/);
 			assert.match(text, /external-cli · 150ms/);
 			assert.match(text, /run-fleet \| running .*\| parallel \| 1 agent running · 0\/2 done/);
-			assert.match(text, /transcript: subagent\(\{ action: "status", id: "run-fleet", view: "transcript" \}\)/);
-			assert.match(text, /transcript: subagent\(\{ action: "status", id: "run-fleet", index: 0, view: "transcript" \}\)/);
+			assert.match(text, /transcript: subagent\(\{ action: "status", id: "run-fleet", options: \{ view: "transcript" \} \}\)/);
+			assert.match(text, /transcript: subagent\(\{ action: "status", id: "run-fleet", options: \{ index: 0, view: "transcript" \} \}\)/);
 		} finally {
 			fs.rmSync(root, { recursive: true, force: true });
 		}
@@ -995,6 +1010,32 @@ describe("async run status inspection", () => {
 			assert.equal(result.isError, undefined);
 			assert.match(text, /run-current/);
 			assert.doesNotMatch(text, /run-other/);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("offers resume only to the session that launched the run", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-run-status-resume-owner-"));
+		try {
+			const asyncRoot = path.join(root, "runs");
+			const resultsDir = path.join(root, "results");
+			const sessionFile = path.join(root, "session.jsonl");
+			fs.mkdirSync(path.join(asyncRoot, "run-status"), { recursive: true });
+			fs.mkdirSync(resultsDir, { recursive: true });
+			fs.writeFileSync(sessionFile, "", "utf-8");
+			fs.writeFileSync(path.join(asyncRoot, "run-status", "status.json"), JSON.stringify({
+				runId: "run-status", sessionId: "session-owner", mode: "single", state: "complete", startedAt: 100, lastUpdate: 200, endedAt: 200, sessionFile,
+				steps: [{ agent: "worker", status: "complete", startedAt: 100, sessionFile }],
+			}), "utf-8");
+			fs.writeFileSync(path.join(resultsDir, "run-result.json"), JSON.stringify({ id: "run-result", sessionId: "session-owner", agent: "worker", success: true, state: "complete", sessionFile, results: [{ agent: "worker", success: true, sessionFile }] }), "utf-8");
+			for (const id of ["run-status", "run-result"]) {
+				const inspect = (currentSessionId: string) => textContent(inspectSubagentStatus({ id }, { asyncDirRoot: asyncRoot, resultsDir, state: { currentSessionId, asyncJobs: new Map(), foregroundControls: new Map() } as unknown as SubagentState }));
+				assert.match(inspect("session-owner"), new RegExp(`Revive: subagent\\(\\{ action: "resume", id: "${id}"`), id);
+				const successor = inspect("session-successor");
+				assert.doesNotMatch(successor, /Revive/, id);
+				assert.match(successor, /Resume: unavailable; only the session that launched this run can resume it\./, id);
+			}
 		} finally {
 			fs.rmSync(root, { recursive: true, force: true });
 		}
@@ -1442,7 +1483,7 @@ describe("async run status inspection", () => {
 			});
 
 			const text = textContent(result);
-			assert.match(text, /Revive child: subagent\(\{ action: "resume", id: "run-multi", index: 0, message: "\.\.\." \}\)/);
+			assert.match(text, /Revive child: subagent\(\{ action: "resume", id: "run-multi", message: "\.\.\.", options: \{ index: 0 \} \}\)/);
 			assert.doesNotMatch(text, /unsupported for multi-child/);
 		} finally {
 			fs.rmSync(root, { recursive: true, force: true });
@@ -1484,8 +1525,8 @@ describe("async run status inspection", () => {
 
 			const result = inspectSubagentStatus({ id: "workflow-parent" }, { asyncDirRoot: asyncRoot, resultsDir: path.join(root, "results") });
 			const text = textContent(result);
-			assert.match(text, /Workflow child review: reviewer failed \(gpt-5\.5 · thinking high\)/);
-			assert.match(text, /Workflow child write: worker paused \(claude-sonnet-5 · thinking low\)/);
+			assert.match(text, /Workflow child review: reviewer failed \(openai-codex\/gpt-5\.5 · thinking high\)/);
+			assert.match(text, /Workflow child write: worker paused \(anthropic\/claude-sonnet-5 · thinking low\)/);
 			assert.match(text, /Revive workflow child 'review': subagent\(\{ action: "resume", id: "child-review", message: "\.\.\." \}\)/);
 			assert.match(text, /Revive workflow child 'write': subagent\(\{ action: "resume", id: "child-write", message: "\.\.\." \}\)/);
 			assert.doesNotMatch(text, /id: "workflow-parent", index:/);
@@ -1590,7 +1631,7 @@ describe("async run status inspection", () => {
 			const result = inspectSubagentStatus({ id: "run-result-index" }, { asyncDirRoot: asyncRoot, resultsDir });
 
 			const text = textContent(result);
-			assert.match(text, /Revive child: subagent\(\{ action: "resume", id: "run-result-index", index: 1, message: "\.\.\." \}\)/);
+			assert.match(text, /Revive child: subagent\(\{ action: "resume", id: "run-result-index", message: "\.\.\.", options: \{ index: 1 \} \}\)/);
 		} finally {
 			fs.rmSync(root, { recursive: true, force: true });
 		}
@@ -1828,7 +1869,7 @@ describe("async run status inspection", () => {
 				state: "stopped",
 				stopped: true,
 				sessionFile,
-				summary: "Subagent stopped by user.",
+				summary: "Subagent stopped.",
 			}, null, 2), "utf-8");
 
 			const result = inspectSubagentStatus({ id: "run-stopped-result" }, {
@@ -1923,6 +1964,34 @@ describe("async run status inspection", () => {
 			assert.match(text, /changed tracked files: input\.md/);
 			assert.match(text, /Structured output: \{"payload":\{"ok":true\}\}/);
 			assert.match(text, /Structured output path: \/runs\/structured-output\/output\.json/);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("shows the head of a long completed result summary and the file that holds all of it", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-run-status-result-head-"));
+		try {
+			const asyncRoot = path.join(root, "runs");
+			const resultsDir = path.join(root, "results");
+			fs.mkdirSync(path.join(asyncRoot, "run-long-result"), { recursive: true });
+			fs.mkdirSync(resultsDir, { recursive: true });
+			const output = Array.from({ length: 200 }, (_, index) => `result line ${index} ${"x".repeat(40)}`).join("\n");
+			const artifact = path.join(root, "worker_output.md");
+			fs.writeFileSync(artifact, output);
+			fs.writeFileSync(path.join(resultsDir, "run-long-result.json"), JSON.stringify({
+				id: "run-long-result",
+				agent: "worker",
+				success: true,
+				state: "complete",
+				summary: `worker:\n${output}`,
+				results: [{ agent: "worker", success: true, output, artifactPaths: { outputPath: artifact } }],
+			}), "utf-8");
+
+			const text = textContent(inspectSubagentStatus({ id: "run-long-result" }, { asyncDirRoot: asyncRoot, resultsDir }));
+			assert.ok(text.includes(output.slice(0, 1_500)));
+			assert.ok(!text.includes("result line 199"));
+			assert.match(text, /Full output: .*worker_output\.md \(\d+\.\d KB, 200 lines\)\. Read it if needed\./);
 		} finally {
 			fs.rmSync(root, { recursive: true, force: true });
 		}

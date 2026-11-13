@@ -6,21 +6,42 @@ on:
   pull_request:
     branches: [main]
 
+# A new push to a PR branch supersedes its running checks. Other runs get a unique group,
+# because a shared group would queue main runs and drop all but the newest pending one.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: true
+
+# Every job here reads the checkout and nothing else: no repository write, comment or release.
+permissions:
+  contents: read
+
 jobs:
   test:
     name: test (${{ matrix.label }})
     strategy:
       matrix:
+        # Windows keeps two files at a time per runner (#2207); shards add parallelism across runners instead.
         include:
           - os: ubuntu-latest
-            label: ubuntu
-            testArgs: ""
+            label: ubuntu-1
+            testArgs: --test-shard=1/2
+            typecheck: true
+          - os: ubuntu-latest
+            label: ubuntu-2
+            testArgs: --test-shard=2/2
           - os: windows-latest
             label: windows-1
-            testArgs: --test-concurrency=2 --test-shard=1/2
+            testArgs: --test-concurrency=2 --test-shard=1/4
           - os: windows-latest
             label: windows-2
-            testArgs: --test-concurrency=2 --test-shard=2/2
+            testArgs: --test-concurrency=2 --test-shard=2/4
+          - os: windows-latest
+            label: windows-3
+            testArgs: --test-concurrency=2 --test-shard=3/4
+          - os: windows-latest
+            label: windows-4
+            testArgs: --test-concurrency=2 --test-shard=4/4
       fail-fast: false
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
@@ -32,7 +53,11 @@ jobs:
       - name: Install devDependencies
         run: npm ci --ignore-scripts
       - name: Typecheck
+        if: matrix.typecheck
         run: npm run typecheck
+      - name: Native tool activation schema budgets
+        if: matrix.typecheck
+        run: npm run test:smoke:tool-activation
       - name: Unit tests
         run: node --experimental-strip-types --import ./test/support/isolated-temp-root.mjs --test ${{ matrix.testArgs }} test/unit/*.test.ts
       - name: Integration tests
@@ -48,6 +73,42 @@ jobs:
           path: ${{ runner.temp }}/1906-terminal-evidence/shared-cwd-terminal.json
           if-no-files-found: ignore
 
+  calendar-timezones:
+    runs-on: macos-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - run: npm ci --ignore-scripts
+      - name: Calendar local-time and scheduler regressions
+        run: node --experimental-strip-types --import ./test/support/isolated-temp-root.mjs --test test/unit/calendar-schedule.test.ts test/unit/scheduled-runs.test.ts
+
+  worktree-cleanup-recovery:
+    runs-on: macos-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - run: npm ci --ignore-scripts
+      - name: Worktree cleanup and lock recovery regressions
+        run: node --experimental-strip-types --import ./test/support/isolated-temp-root.mjs --test test/unit/worktree-cleanup-plan.test.ts test/unit/worktree-lock.test.ts test/unit/parallel-handoff.test.ts
+
+  schedule-claim-contention:
+    runs-on: macos-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - run: npm ci --ignore-scripts
+      - name: Focused regressions
+        run: node --experimental-strip-types --import ./test/support/isolated-temp-root.mjs --test test/unit/schedule-claim-preservation.test.ts
+
   native-nested-wait:
     strategy:
       matrix:
@@ -62,12 +123,33 @@ jobs:
           node-version: 24
       - run: npm ci --ignore-scripts
       - name: Install native Pi SDK
-        run: npm install --prefix "${{ runner.temp }}/native-host" --no-package-lock --ignore-scripts @earendil-works/pi-coding-agent@0.86.1
+        run: npm install --prefix "${{ runner.temp }}/native-host" --no-package-lock --ignore-scripts @earendil-works/pi-coding-agent@1.2.0
       - name: Native nested result consumption
         env:
           PI_SUBAGENTS_NATIVE_PI_ROOT: ${{ runner.temp }}/native-host/node_modules/@earendil-works/pi-coding-agent
           NODE_DISABLE_COMPILE_CACHE: '1'
         run: node --experimental-strip-types --import ./test/support/isolated-temp-root.mjs --import ./test/support/native-peer-loader.mjs --test test/integration/nested-async-wait.test.ts
+
+  native-mcp-readiness:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+      fail-fast: false
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - run: npm ci --ignore-scripts
+      - name: Install native Pi SDK
+        run: npm install --prefix "${{ runner.temp }}/native-host" --no-package-lock --ignore-scripts @earendil-works/pi-coding-agent@1.2.0
+      - name: Native MCP connection readiness and cancellation
+        env:
+          PI_SUBAGENTS_NATIVE_PI_ROOT: ${{ runner.temp }}/native-host/node_modules/@earendil-works/pi-coding-agent
+          NODE_DISABLE_COMPILE_CACHE: '1'
+        run: node --experimental-strip-types --import ./test/support/isolated-temp-root.mjs --import ./test/support/native-peer-loader.mjs --test test/integration/builtin-mcp-readiness.test.ts
 
   bun-workflow-script:
     runs-on: ubuntu-latest
@@ -85,7 +167,7 @@ jobs:
       - name: WorkflowScript Bun parity tests
         run: >-
           bun test test/unit/scripted-workflow.test.ts
-          --test-name-pattern "portable workflow parity|regex literals|template expressions|portable plain helper|nested plain helper|unawaited child launch|unawaited runs.all|directly returned runs.run|docs-style awaited|awaited native Promise|Promise.resolve|Promise.all|then chain|new Promise wrapper"
+          --test-name-pattern "portable workflow parity|regex literals|template expressions|portable plain helper|nested plain helper|unawaited child launch|unawaited runs.all|directly returned runs.run|docs-style awaited|awaited native Promise|Promise.resolve|Promise.all|then chain|new Promise wrapper|string compilation|worker-realm value|rejects import|redefined locked global|stack-limit errors|built-in constructors"
 
   runner-loader-capability:
     strategy:
@@ -108,24 +190,27 @@ jobs:
   clean-install:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        pi-version: ["1.2.0"]
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
         with:
           node-version: 22.19.0
       - run: npm ci --ignore-scripts
-      - name: Real Pi 0.86.1 background child smoke
-        run: node --experimental-strip-types test/smoke/clean-install.mjs "${{ runner.temp }}/clean-install-smoke" 0.86.1
+      - name: Real Pi ${{ matrix.pi-version }} background child smoke
+        run: node --experimental-strip-types test/smoke/clean-install.mjs "${{ runner.temp }}/clean-install-smoke-${{ matrix.pi-version }}" ${{ matrix.pi-version }}
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: clean-install-smoke-logs
+          name: clean-install-smoke-logs-${{ matrix.pi-version }}
           path: |
-            ${{ runner.temp }}/clean-install-smoke/*.log
-            ${{ runner.temp }}/clean-install-smoke/aliases.json
-            ${{ runner.temp }}/clean-install-smoke/host/package-lock.json
-            ${{ runner.temp }}/clean-install-smoke/extension/package-lock.json
-
+            ${{ runner.temp }}/clean-install-smoke-${{ matrix.pi-version }}/*.log
+            ${{ runner.temp }}/clean-install-smoke-${{ matrix.pi-version }}/aliases.json
+            ${{ runner.temp }}/clean-install-smoke-${{ matrix.pi-version }}/host/package-lock.json
+            ${{ runner.temp }}/clean-install-smoke-${{ matrix.pi-version }}/extension/package-lock.json
   official-standalone:
     # The official Linux x64 release only; 22.04 permits bubblewrap namespaces.
     runs-on: ubuntu-22.04
@@ -139,30 +224,38 @@ jobs:
         run: |
           node -e 'const a = require("node:assert/strict"); a.equal(process.platform, "linux"); a.equal(process.arch, "x64");'
           npm ci --ignore-scripts
-          # Bubblewrap needs only Ubuntu indexes, not the runner's third-party repositories.
-          printf '%s\n' 'deb http://archive.ubuntu.com/ubuntu jammy main universe' 'deb http://archive.ubuntu.com/ubuntu jammy-updates main universe' 'deb http://security.ubuntu.com/ubuntu jammy-security main universe' > "$RUNNER_TEMP/ubuntu.sources.list"
-          sudo apt-get -o Dir::Etc::sourcelist="$RUNNER_TEMP/ubuntu.sources.list" -o Dir::Etc::sourceparts=- update
-          sudo apt-get -o Dir::Etc::sourcelist="$RUNNER_TEMP/ubuntu.sources.list" -o Dir::Etc::sourceparts=- install -y bubblewrap
+          # Bubblewrap needs only the runner's Ubuntu mirror (sources.list), not its third-party repositories (sources.list.d).
+          sudo apt-get -o Dir::Etc::sourceparts=- update
+          sudo apt-get -o Dir::Etc::sourceparts=- install -y bubblewrap
+      - name: Read the pinned official release
+        id: release
+        run: echo "sha=$(node -p 'require("./test/smoke/standalone-release.json").archiveSha256')" >> "$GITHUB_OUTPUT"
+      # GitHub release downloads from runners return 504 for long stretches; the archive is checksum-pinned, so reuse it.
+      - uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/pi-official-archive
+          key: pi-official-${{ steps.release.outputs.sha }}
       - name: Provision the checksum-pinned official binary
         shell: bash
         run: |
           set -euo pipefail
           url="$(node -p 'require("./test/smoke/standalone-release.json").url')"
           sha="$(node -p 'require("./test/smoke/standalone-release.json").archiveSha256')"
-          mkdir -p "$RUNNER_TEMP/pi-official"
-          curl --fail --location --retry 3 "$url" --output "$RUNNER_TEMP/pi-official/release.tar.gz"
-          printf '%s  %s\n' "$sha" "$RUNNER_TEMP/pi-official/release.tar.gz" | sha256sum --check -
-          tar -xzf "$RUNNER_TEMP/pi-official/release.tar.gz" -C "$RUNNER_TEMP/pi-official"
+          archive="$RUNNER_TEMP/pi-official-archive/release.tar.gz"
+          mkdir -p "$RUNNER_TEMP/pi-official" "$RUNNER_TEMP/pi-official-archive"
+          test -f "$archive" || curl --fail --location --retry 3 "$url" --output "$archive"
+          printf '%s  %s\n' "$sha" "$archive" | sha256sum --check -
+          tar -xzf "$archive" -C "$RUNNER_TEMP/pi-official"
       - name: Complete isolated official binary matrix
         run: node test/smoke/standalone-matrix.mjs "$RUNNER_TEMP/pi-official/pi/pi" "$RUNNER_TEMP/standalone-matrix"
       - name: Provision npm host for public launch regression
-        run: node test/smoke/clean-install.mjs "$RUNNER_TEMP/npm-background-sdk" 0.86.1
+        run: node test/smoke/clean-install.mjs "$RUNNER_TEMP/npm-background-sdk" 1.2.0
       - name: Isolated real npm public launch
         run: node test/smoke/npm-background.mjs "$RUNNER_TEMP/npm-background-sdk" "$RUNNER_TEMP/npm-background"
       - name: Require completed Linux smoke receipts
         run: |
           node -e 'const a = require("node:assert/strict"); const r = require(process.env.RUNNER_TEMP + "/standalone-matrix/matrix.json"); a.equal(r.complete, true); a.equal(r.cases.length, 18); a.ok(r.cases.every(c => c.exitCode === 0 && !c.error));'
-          node -e 'const a = require("node:assert/strict"); const r = require(process.env.RUNNER_TEMP + "/npm-background/npm-launch.json"); a.equal(r.publicLaunch, true); a.equal(r.runtime, "Node"); a.equal(r.version, "0.86.1"); a.equal(r.network, "unshared");'
+          node -e 'const a = require("node:assert/strict"); const r = require(process.env.RUNNER_TEMP + "/npm-background/npm-launch.json"); a.equal(r.publicLaunch, true); a.equal(r.runtime, "Node"); a.equal(r.version, "1.2.0"); a.equal(r.network, "unshared");'
       - name: Collect bounded lifecycle evidence
         id: evidence
         if: always()

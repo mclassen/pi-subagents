@@ -17,6 +17,7 @@ import {
 	type MissionUpdateInput,
 } from "./types.ts";
 import { missionStatePath } from "./workflow-state.ts";
+import { finishedMissionStatus, missionAcceptanceStatus, readMissionBinding } from "./lifecycle.ts";
 import {
 	createMission,
 	createSessionGoal,
@@ -243,6 +244,7 @@ const STOPPED_GOAL_RUN_STATUSES = new Set(["stopped", "cancelled", "rejected"]);
 
 function refreshLinkedRunStatus(location: MissionStoreLocation, record: MissionRecord, ownerSessionId?: string): { record: MissionRecord; warnings: string[] } {
 	const warnings: string[] = [];
+	const runAcceptance: Array<{ runId: string; status: string | undefined }> = [];
 	const updates = record.runs.flatMap((run) => {
 		if (!run.asyncDir) return [];
 		const statusPath = path.join(run.asyncDir, "status.json");
@@ -263,6 +265,7 @@ function refreshLinkedRunStatus(location: MissionStoreLocation, record: MissionR
 			warnings.push(`Linked run status '${statusPath}' is missing state`);
 			return [];
 		}
+		runAcceptance.push({ runId: run.runId, status: missionAcceptanceStatus((status as { steps?: unknown }).steps) });
 		if (state === run.status) return [];
 		return [{
 			...run,
@@ -295,7 +298,8 @@ function refreshLinkedRunStatus(location: MissionStoreLocation, record: MissionR
 					: states.some((state) => state === "stopped" || state === "rejected" || state === "cancelled")
 						? "cancelled"
 						: states.length > 0 && states.every((state) => state === "complete" || state === "completed")
-							? "completed"
+							// A run without a binding counts as auto-created.
+							? finishedMissionStatus(record, !merged.some((run) => run.asyncDir && readMissionBinding(run.asyncDir)?.autoCreated === false), runAcceptance)
 							: record.status;
 	if (updates.length === 0 && status === record.status) return { record, warnings };
 	return { record: updateMission(location, record.id, { status, addRuns: updates, expectedGoalOwnerSessionId: ownerSessionId }), warnings };
@@ -325,7 +329,8 @@ function formatMission(record: MissionRecord): string {
 			const identity = child.runId ? `${child.key} (${child.runId})` : child.key;
 			const heartbeat = child.heartbeat ? `; heartbeat ${child.heartbeat.status ?? child.status}${child.heartbeat.phase ? `/${child.heartbeat.phase}` : ""} at ${child.heartbeat.updatedAt}` : "";
 			const recovery = child.sessionPath ? `; session ${child.sessionPath}` : child.artifactPaths.length ? `; artifacts ${child.artifactPaths.length}` : "";
-			lines.push(`  ${identity}: ${child.status}${child.agent ? ` — ${child.agent}` : ""}${child.phase ? ` [${child.phase}]` : ""}; updated ${child.updatedAt}${heartbeat}${recovery}`);
+			const acceptance = child.acceptanceStatus ? `; acceptance ${child.acceptanceStatus}` : "";
+			lines.push(`  ${identity}: ${child.status}${child.agent ? ` — ${child.agent}` : ""}${child.phase ? ` [${child.phase}]` : ""}${acceptance}; updated ${child.updatedAt}${heartbeat}${recovery}`);
 		}
 	}
 	if (record.decisions.length) {

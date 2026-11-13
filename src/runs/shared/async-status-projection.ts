@@ -1,5 +1,6 @@
 import { sanitizeDisplayText, truncateDisplayText } from "../../shared/display-text.ts";
 import { formatModelThinking } from "../../shared/formatters.ts";
+import { childThinkingLevel, splitKnownThinkingSuffix, type ThinkingLevel } from "../../shared/model-info.ts";
 import type { AsyncJobState, AsyncJobStep, HostStepFreshness, HostStepMonitorKind, HostStepNode, HostStepState, HostStepVerdict, NestedRunSummary, NestedStepSummary, SubagentRunMode, WorkflowGraphSnapshot, WorkflowPreflightLane, WorkflowPreflight } from "../../shared/types.ts";
 import { HOST_STEP_MAX_COUNT, HOST_STEP_MAX_DETAIL_CHARS, HOST_STEP_MAX_LABEL_CHARS, HOST_STEP_MAX_PROVIDER_CHARS, HOST_STEP_MAX_REASON_CHARS, HOST_STEP_MAX_REF_CHARS, HOST_STEP_MAX_ROLE_CHARS, HOST_STEP_MAX_TARGET_CHARS, hostStepReportName, parseHostStepNode, validHostStepNodes } from "./host-step-status.ts";
 import { workflowPreflightLaneForRuntimeKey } from "../../workflows/workflow-preflight.ts";
@@ -63,6 +64,12 @@ export interface AsyncStatusSnapshotNode {
 	updatedAt?: number;
 	endedAt?: number;
 	activity?: AsyncStatusSnapshotActivity;
+	progressText?: string;
+	progressUpdatedAt?: number;
+	/** Step nodes only: the agent the child runs as, and the model and thinking level it reports. */
+	agent?: string;
+	model?: string;
+	thinking?: ThinkingLevel;
 	hostStep?: AsyncStatusSnapshotHostStep;
 	children?: AsyncStatusSnapshotNode[];
 }
@@ -106,6 +113,8 @@ export interface AsyncStatusWorkflowRow {
 	kind?: HostStepMonitorKind;
 	context?: AsyncJobStep["context"];
 	modelThinking?: string;
+	/** Thinking level of the child a child row stands for. */
+	thinking?: ThinkingLevel;
 	activity?: string;
 	startedAt?: number;
 	endedAt?: number;
@@ -218,6 +227,19 @@ function activityFor(source: {
 	return Object.keys(activity).length ? activity : undefined;
 }
 
+/**
+ * The first source that reports a model wins; a lane's own child reports before its roster entry.
+ * A launch model can carry a thinking suffix (`provider/id:low`) until the child's first reply; the
+ * node reports the bare model and keeps the level in `thinking`.
+ */
+function setStepModel(node: AsyncStatusSnapshotNode, ctx: ProjectionContext, ...sources: Array<{ model?: string; thinking?: string } | undefined>): void {
+	const { baseModel, thinkingSuffix } = splitKnownThinkingSuffix(sources.find((source) => source?.model)?.model ?? "");
+	const model = publicOptionalText(baseModel, ctx.caps.maxStringLength);
+	if (model) node.model = model;
+	const thinking = childThinkingLevel(...sources, { thinking: thinkingSuffix.slice(1) });
+	if (thinking) node.thinking = thinking;
+}
+
 function appendBoundedChildren(children: AsyncStatusSnapshotNode[], source: readonly AsyncStatusSnapshotNode[], ctx: ProjectionContext): void {
 	const remaining = Math.max(0, ctx.caps.maxChildrenPerNode - children.length);
 	children.push(...source.slice(0, remaining));
@@ -239,6 +261,9 @@ function projectStep(step: AsyncJobStep | NestedStepSummary, index: number, dept
 	const updatedAt = endedAt ?? publicTime(step.lastActivityAt) ?? startedAt;
 	const activity = activityFor(step, ctx);
 	const { id, label } = stepIdentity(step, index, ctx);
+	const agent = publicOptionalText(step.agent, ctx.caps.maxStringLength);
+	const progressText = publicOptionalText(step.progressText, ctx.caps.maxStringLength);
+	const progressUpdatedAt = publicTime(step.progressUpdatedAt);
 	const node: AsyncStatusSnapshotNode = {
 		id,
 		kind: "step",
@@ -248,7 +273,11 @@ function projectStep(step: AsyncJobStep | NestedStepSummary, index: number, dept
 		...(updatedAt !== undefined ? { updatedAt } : {}),
 		...(terminalState(state) && endedAt !== undefined ? { endedAt } : {}),
 		...(activity ? { activity } : {}),
+		...(progressText ? { progressText } : {}),
+		...(progressUpdatedAt !== undefined ? { progressUpdatedAt } : {}),
 	};
+	if (agent) node.agent = agent;
+	setStepModel(node, ctx, step);
 	if (depth < ctx.caps.maxDepth && step.children?.length) {
 		const nested = step.children.map((child, childIndex) => projectNestedRun(child, childIndex, depth + 1, ctx));
 		const bounded: AsyncStatusSnapshotNode[] = [];
@@ -398,7 +427,14 @@ function projectMaterializedStep(step: AsyncJobStep, index: number, child: Async
 	const selfActivity = selfStep ? activityFor(selfStep, ctx) : undefined;
 	const activity = laneActivity || selfActivity || live.activity ? { ...laneActivity, ...selfActivity, ...live.activity } : undefined;
 	const node: AsyncStatusSnapshotNode = { ...live, id, kind: "step", label };
+	const progressText = publicOptionalText(selfStep?.progressText ?? step.progressText, ctx.caps.maxStringLength);
+	const progressUpdatedAt = publicTime(selfStep?.progressUpdatedAt ?? step.progressUpdatedAt);
+	if (progressText) node.progressText = progressText;
+	if (progressUpdatedAt !== undefined) node.progressUpdatedAt = progressUpdatedAt;
+	const agent = publicOptionalText(selfStep?.agent || step.agent, ctx.caps.maxStringLength);
+	if (agent) node.agent = agent;
 	if (activity) node.activity = activity;
+	setStepModel(node, ctx, selfStep, step);
 	return node;
 }
 
@@ -623,12 +659,14 @@ export function projectAsyncWorkflowRows(
 
 function projectLoadedWorkflowRow(step: AsyncJobStep, index: number, preflight?: WorkflowPreflightLane): AsyncStatusWorkflowRow {
 	const modelThinking = formatModelThinking(step.model, step.thinking) || undefined;
+	const thinking = childThinkingLevel(step);
 	const activity = workflowStepActivity(step);
 	return {
 		name: workflowStepName(step, index),
 		state: step.status,
 		...(step.context ? { context: step.context } : {}),
 		...(modelThinking ? { modelThinking } : {}),
+		...(thinking ? { thinking } : {}),
 		...(activity ? { activity } : {}),
 		...(step.startedAt !== undefined ? { startedAt: step.startedAt } : {}),
 		...(step.endedAt !== undefined ? { endedAt: step.endedAt } : {}),

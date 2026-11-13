@@ -1,4 +1,3 @@
-import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
@@ -6,15 +5,23 @@ import { describe, it } from "node:test";
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 
+function runScript(script: string): void {
+	const env = { ...process.env };
+	delete env.PI_SUBAGENT_CHILD;
+	execFileSync(process.execPath, ["--experimental-strip-types", "--import", "./test/support/register-loader.mjs", "--input-type=module", "--eval", script], { cwd: projectRoot, env, stdio: "pipe" });
+}
+
 describe("async compaction resume", () => {
-	it("only re-drives manual compaction while async work is active", () => {
+	it("only re-drives a manual compaction that interrupted the parent while async work is active", () => {
 		const script = String.raw`
 			import os from "node:os";
 			import path from "node:path";
 			import registerSubagentExtension from "./index.ts";
+			import { installCompactionInterruptionCapture } from "./src/shared/compaction-interruption.ts";
 			const handlers = new Map();
 			const events = { listeners: new Map(), on(name, handler) { this.listeners.set(name, handler); return () => this.listeners.delete(name); }, emit(name, payload) { this.listeners.get(name)?.(payload); } };
 			const sent = [];
+			const userMessages = [];
 			const widgets = [];
 			let renders = 0;
 			const pi = new Proxy({
@@ -22,8 +29,15 @@ describe("async compaction resume", () => {
 				on(name, handler) { handlers.set(name, [...(handlers.get(name) ?? []), handler]); },
 				registerTool() {}, registerCommand() {}, registerShortcut() {}, registerMessageRenderer() {},
 				sendMessage(message, options) { sent.push({ message, options }); }, getSessionName() { return undefined; },
+				sendUserMessage(text, options) { userMessages.push({ text, options }); },
 			}, { get(target, prop) { return prop in target ? target[prop] : () => undefined; } });
-			const ctx = { cwd: process.cwd(), hasUI: true, ui: { setWidget(key, value) { widgets.push([key, value]); }, requestRender() { renders++; }, onTerminalInput() { return () => {}; }, getEditorText() { return ""; }, notify() {}, theme: { fg(_name, text) { return text; }, bg(_name, text) { return text; }, bold(text) { return text; } } }, sessionManager: { getSessionId() { return "compact-session"; }, getSessionFile() { return null; }, getEntries() { return []; } }, modelRegistry: { getAvailable() { return []; } } };
+			let idle = false;
+			const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+			const ctx = { cwd: process.cwd(), isIdle() { return idle; }, hasUI: true, ui: { setWidget(key, value) { widgets.push([key, value]); }, requestRender() { renders++; }, onTerminalInput() { return () => {}; }, getEditorText() { return ""; }, notify() {}, theme: { fg(_name, text) { return text; }, bg(_name, text) { return text; }, bold(text) { return text; } } }, sessionManager: { getSessionId() { return "compact-session"; }, getSessionFile() { return null; }, getEntries() { return []; } }, modelRegistry: { getAvailable() { return []; } } };
+			// Emits session_compact through the real capture wrapper, as Pi's AgentSession.compact() does.
+			class Session { constructor(isStreaming) { this.isStreaming = isStreaming; this.sessionManager = ctx.sessionManager; } async compact() { for (const handler of handlers.get("session_compact")) await handler({ reason: "manual" }, ctx); } }
+			installCompactionInterruptionCapture(Session);
+			const manualCompact = (interrupting = true) => new Session(interrupting).compact();
 			registerSubagentExtension(pi);
 			for (const handler of handlers.get("session_start")) await handler({}, ctx);
 			sent.length = 0;
@@ -37,24 +51,36 @@ describe("async compaction resume", () => {
 			events.emit("subagent:async-complete", { id: "running", sessionId: "compact-session", agent: "worker", success: true, summary: "done" });
 			events.emit("subagent:async-started", { id: "running-2", pid: 2, sessionId: "compact-session", mode: "single", agent: "worker", asyncDir: path.join(os.tmpdir(), "pi-compaction-test-running-2") });
 			if (widgets.length !== 0 || renders !== 0) throw new Error("widgets repainted during compaction");
-			for (const handler of handlers.get("session_compact")) await handler({ reason: "threshold" });
+			for (const handler of handlers.get("session_compact")) await handler({ reason: "threshold" }, ctx);
 			if (widgets.length !== 0) throw new Error("widgets restored inside compaction hook");
-			for (const handler of handlers.get("agent_start")) await handler();
+			for (const handler of handlers.get("agent_start")) await handler({}, ctx);
 			const restored = widgets.filter(([_, value]) => value !== undefined).map(([key]) => key).sort();
 			if (JSON.stringify(restored) !== JSON.stringify(["subagent-async", "subagent-fleet-status"])) throw new Error(JSON.stringify(widgets));
 			if (sent.some((entry) => entry.message?.customType === "subagent-compaction-resume")) throw new Error("resumed after threshold compaction");
 
 			sent.length = 0;
+			idle = true;
+			await manualCompact(false);
+			await sleep(150);
+			if (sent.length !== 0) throw new Error("resumed an idle parent: " + JSON.stringify(sent));
+			idle = false;
+
 			widgets.length = 0;
 			for (const handler of handlers.get("session_before_compact")) await handler({ reason: "manual", signal: new AbortController().signal });
 			if (widgets.length !== 0) throw new Error("manual compaction changed widget state");
-			for (const handler of handlers.get("session_compact")) await handler({ reason: "manual" });
+			await manualCompact();
+			await sleep(150);
+			if (sent.length !== 0 || userMessages.length !== 0) throw new Error("woke the parent while it was still compacting: " + JSON.stringify({ sent, userMessages }));
+			idle = true;
+			await sleep(150);
 			if (sent.length !== 1 || sent[0].options?.triggerTurn !== true || sent[0].message?.customType !== "subagent-compaction-resume") throw new Error(JSON.stringify(sent));
+			if (userMessages.length !== 0) throw new Error("the resume notice starts the run itself: " + JSON.stringify(userMessages));
+			for (const handler of handlers.get("agent_start")) await handler({}, ctx);
+			idle = false;
 
 			sent.length = 0;
 			events.emit("subagent:async-complete", { id: "running-2", sessionId: "compact-session", agent: "worker", success: true, summary: "done" });
-			for (const handler of handlers.get("session_before_compact")) await handler({ reason: "manual", signal: new AbortController().signal });
-			for (const handler of handlers.get("session_compact")) await handler({ reason: "manual" });
+			await manualCompact();
 			for (const handler of handlers.get("agent_settled")) await handler();
 			if (sent.some((entry) => entry.message?.customType === "subagent-compaction-resume")) throw new Error("resumed without active work");
 
@@ -63,21 +89,61 @@ describe("async compaction resume", () => {
 			widgets.length = 0;
 			for (const handler of handlers.get("session_before_compact")) await handler({ reason: "overflow", signal: new AbortController().signal });
 			widgets.length = 0;
-			for (const handler of handlers.get("session_compact")) await handler({ reason: "overflow" });
+			for (const handler of handlers.get("session_compact")) await handler({ reason: "overflow" }, ctx);
 			if (sent.some((entry) => entry.message?.customType === "subagent-compaction-resume")) throw new Error("resumed after overflow compaction");
-			for (const handler of handlers.get("agent_start")) await handler();
+			for (const handler of handlers.get("agent_start")) await handler({}, ctx);
 
 			widgets.length = 0;
 			for (const handler of handlers.get("session_before_compact")) await handler({ reason: "overflow", signal: new AbortController().signal });
 			widgets.length = 0;
 			for (const handler of handlers.get("agent_settled")) await handler();
 			if (!widgets.some(([_, value]) => value !== undefined)) throw new Error("widgets did not recover after compaction failure");
+
+			sent.length = 0;
+			await manualCompact();
+			for (const handler of handlers.get("agent_start")) await handler({}, ctx);
+			idle = true;
+			await sleep(150);
+			if (sent.some((entry) => entry.message?.customType === "subagent-compaction-resume")) throw new Error("resumed after another run started");
+			idle = false;
+
+			await manualCompact();
+			for (const handler of handlers.get("session_shutdown")) await handler();
+			idle = true;
+			await sleep(150);
+			if (sent.some((entry) => entry.message?.customType === "subagent-compaction-resume")) throw new Error("resumed after session shutdown");
+		`;
+		runScript(script);
+	});
+
+	it("restores widgets when the same run continues after automatic compaction", () => {
+		// Pi compacts between tool cycles of a running agent loop and emits no agent_start afterwards.
+		const script = String.raw`
+			import os from "node:os";
+			import path from "node:path";
+			import registerSubagentExtension from "./index.ts";
+			const handlers = new Map();
+			const events = { listeners: new Map(), on(name, handler) { this.listeners.set(name, handler); return () => this.listeners.delete(name); }, emit(name, payload) { this.listeners.get(name)?.(payload); } };
+			const widgets = [];
+			const pi = new Proxy({
+				events,
+				on(name, handler) { handlers.set(name, [...(handlers.get(name) ?? []), handler]); },
+			}, { get(target, prop) { return prop in target ? target[prop] : () => undefined; } });
+			const ctx = { cwd: process.cwd(), isIdle() { return false; }, hasUI: true, ui: { setWidget(key, value) { widgets.push([key, value]); }, requestRender() {}, onTerminalInput() { return () => {}; }, getEditorText() { return ""; }, notify() {}, theme: { fg(_name, text) { return text; }, bg(_name, text) { return text; }, bold(text) { return text; } } }, sessionManager: { getSessionId() { return "mid-run-session"; }, getSessionFile() { return null; }, getEntries() { return []; } }, modelRegistry: { getAvailable() { return []; } } };
+			registerSubagentExtension(pi);
+			for (const handler of handlers.get("session_start")) await handler({}, ctx);
+			for (const handler of handlers.get("agent_start")) await handler({}, ctx);
+			events.emit("subagent:async-started", { id: "running", pid: 1, sessionId: "mid-run-session", mode: "single", agent: "worker", asyncDir: path.join(os.tmpdir(), "pi-compaction-test-mid-run") });
+			const restored = () => widgets.some(([key, value]) => key === "subagent-async" && value !== undefined);
+			for (const handler of handlers.get("session_before_compact")) await handler({ reason: "threshold", signal: new AbortController().signal });
+			widgets.length = 0;
+			for (const handler of handlers.get("session_compact")) await handler({ reason: "threshold" });
+			if (restored()) throw new Error("widgets restored inside compaction hook");
+			for (const handler of handlers.get("message_start")) await handler({ message: { role: "assistant", content: [] } });
+			if (!restored()) throw new Error("threshold compaction left the async widget withdrawn for the rest of the run");
 			for (const handler of handlers.get("session_shutdown")) await handler();
 		`;
-		const env = { ...process.env };
-		delete env.PI_SUBAGENT_CHILD;
-		execFileSync(process.execPath, ["--experimental-strip-types", "--import", "./test/support/register-loader.mjs", "--input-type=module", "--eval", script], { cwd: projectRoot, env, stdio: "pipe" });
-		assert.ok(true);
+		runScript(script);
 	});
 
 	it("ignores stale cached UI context during compaction lifecycle callbacks", () => {
@@ -93,20 +159,17 @@ describe("async compaction resume", () => {
 				sendMessage(message, options) { sent.push({ message, options }); }, getSessionName() { return undefined; },
 			}, { get(target, prop) { return prop in target ? target[prop] : () => undefined; } });
 			let stale = false;
-			const ctx = { cwd: process.cwd(), get hasUI() { if (stale) throw new Error("This extension ctx is stale after session replacement or reload."); return true; }, ui: { setWidget() {}, requestRender() {}, onTerminalInput() { return () => {}; }, getEditorText() { return ""; }, notify() {}, theme: { fg(_name, text) { return text; }, bg(_name, text) { return text; }, bold(text) { return text; } } }, sessionManager: { getSessionId() { return "stale-context-session"; }, getSessionFile() { return null; }, getEntries() { return []; } }, modelRegistry: { getAvailable() { return []; } } };
+			const ctx = { cwd: process.cwd(), isIdle() { return false; }, get hasUI() { if (stale) throw new Error("This extension ctx is stale after session replacement or reload."); return true; }, ui: { setWidget() {}, requestRender() {}, onTerminalInput() { return () => {}; }, getEditorText() { return ""; }, notify() {}, theme: { fg(_name, text) { return text; }, bg(_name, text) { return text; }, bold(text) { return text; } } }, sessionManager: { getSessionId() { return "stale-context-session"; }, getSessionFile() { return null; }, getEntries() { return []; } }, modelRegistry: { getAvailable() { return []; } } };
 			registerSubagentExtension(pi);
 			for (const handler of handlers.get("session_start")) await handler({}, ctx);
 			sent.length = 0;
 			events.emit("subagent:async-started", { id: "running", sessionId: "stale-context-session", mode: "single", agent: "worker", asyncDir: "/tmp/pi-stale-context-running" });
 			stale = true;
-			for (const handler of handlers.get("session_compact")) await handler({ reason: "manual" });
+			for (const handler of handlers.get("session_compact")) await handler({ reason: "manual" }, ctx);
 			if (sent.some((entry) => entry.message?.customType === "subagent-compaction-resume")) throw new Error("resumed with stale UI context");
 			for (const handler of handlers.get("session_before_compact")) await handler({ reason: "threshold", signal: new AbortController().signal });
 			for (const handler of handlers.get("session_shutdown")) await handler();
 		`;
-		const env = { ...process.env };
-		delete env.PI_SUBAGENT_CHILD;
-		execFileSync(process.execPath, ["--experimental-strip-types", "--import", "./test/support/register-loader.mjs", "--input-type=module", "--eval", script], { cwd: projectRoot, env, stdio: "pipe" });
-		assert.ok(true);
+		runScript(script);
 	});
 });

@@ -47,7 +47,8 @@ it("registered subagent tool preserves rejected goal evidence and recovers via a
 		// was inferred from the scripted child's claim or a manufactured ledger.
 		fs.writeFileSync(path.join(project, "verify.cjs"), `const fs = require('node:fs');\nconst pass = fs.existsSync('ready');\nfs.appendFileSync('verification.log', pass ? 'pass\\n' : 'fail\\n');\nprocess.exit(pass ? 0 : 7);\n`);
 		const command = `"${process.execPath}" verify.cjs`;
-		const acceptance = { level: "verified", criteria: ["Run the fixture gate"], verify: [{ id: "fixture-gate", command, timeoutMs: 10000 }] };
+		// Goal closure binds the runtime identity of the declared candidate (the gate script and its input).
+		const acceptance = { level: "verified", candidate: { files: ["verify.cjs", "ready"] }, criteria: ["Run the fixture gate"], verify: [{ id: "fixture-gate", command, timeoutMs: 10000 }] };
 		const report = "```acceptance-report\n" + JSON.stringify({
 			criteriaSatisfied: [{ id: "criterion-1", status: "satisfied", evidence: "Scripted child attestation; runtime gate is authoritative" }],
 			changedFiles: ["verify.cjs"], testsAddedOrUpdated: ["verify.cjs"],

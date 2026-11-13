@@ -1,9 +1,4 @@
 /**
- * Integration tests for single (sync) agent execution.
- *
- * Uses the local createMockPi() helper to simulate the pi CLI.
- * Tests the full spawn→parse→result pipeline in runSync without a real LLM.
- *
  * These tests require pi packages to be importable (they run inside a pi
  * environment or with pi packages installed). If unavailable, tests skip
  * gracefully.
@@ -175,7 +170,7 @@ function childWatchdogStatus(phase: "idle" | "reviewing" | "stale" | "failed", s
 	};
 }
 
-function mockAssistantMessage(text: string, stopReason: "stop" | "tool_use" = "stop") {
+function mockAssistantMessage(text: string, stopReason: "stop" | "tool_use" | "length" = "stop") {
 	return {
 		type: "message_end",
 		message: {
@@ -342,7 +337,7 @@ export function installSingleExecutionHooks() {
 		workflowControllers?: Map<string, AbortController>,
 		handleScheduledRunAction?: Parameters<typeof createSubagentExecutor>[0]["handleScheduledRunAction"],
 		piEvents = createEventBus(),
-		discoverAgentsForCwd?: (cwd: string) => typeof agents,
+		discoverAgentsForCwd?: (cwd: string, preferredModelProvider?: string) => typeof agents,
 		childRuntime?: ChildRuntimeConfig,
 		sendMessage?: (message: unknown, options: unknown) => void,
 	) {
@@ -363,7 +358,7 @@ export function installSingleExecutionHooks() {
 			tempArtifactsDir: tempDir,
 			getSubagentSessionRoot: () => path.join(tempDir, ".pi/subagents", "sessions"),
 			expandTilde: (value: string) => value,
-			discoverAgents: (cwd: string) => ({ agents: discoverAgentsForCwd ? discoverAgentsForCwd(cwd) : agents }),
+			discoverAgents: (cwd: string, _scope: unknown, preferredModelProvider?: string) => ({ agents: discoverAgentsForCwd ? discoverAgentsForCwd(cwd, preferredModelProvider) : agents }),
 			allowMutatingManagementActions,
 			...(handleScheduledRunAction ? { handleScheduledRunAction } : {}),
 		});

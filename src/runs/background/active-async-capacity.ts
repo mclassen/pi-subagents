@@ -4,8 +4,11 @@ import * as path from "node:path";
 import { writePrivateAtomicJson } from "../../shared/atomic-json.ts";
 import { TEMP_ROOT_DIR, type ActiveAsyncCapacitySnapshot, type AsyncStatus } from "../../shared/types.ts";
 import { readStatus } from "../../shared/utils.ts";
-import { checkPidLiveness, type PidLiveness } from "./stale-run-reconciler.ts";
+import { checkPidLiveness, checkRecordedPidLiveness, type PidLiveness } from "./stale-run-reconciler.ts";
+import { currentBootId } from "./boot-id.ts";
+import { currentPidNamespaceScope } from "./pid-namespace.ts";
 import { readProcessTerminal } from "./process-terminal.ts";
+import { isTerminalAsyncState as terminalState, readWorkflowChildEvidence, readWorkflowChildProcessEvidence } from "./workflow-terminal-proof.ts";
 
 export const ACTIVE_ASYNC_CAPACITY_DIR = path.join(TEMP_ROOT_DIR, "session-active-async-capacity");
 export const DEFAULT_ABANDONED_SLOT_RELEASE_AFTER_MS = 20 * 60 * 1000;
@@ -43,17 +46,31 @@ interface CapacityOptions {
 	token?: () => string;
 	abandonedSlotReleaseAfterMs?: number | false;
 	pidLiveness?: (pid: number) => PidLiveness;
+	pidNamespaceScope?: () => string | undefined;
+	bootId?: () => string | undefined;
 	afterSlotRename?: (releasedDir: string) => void;
 	writeOwner?: (filePath: string, owner: ActiveAsyncCapacityOwner) => void;
 }
 
-export interface ActiveAsyncCapacityReleaseEvidence {
+interface AbandonedRunnerEvidence {
 	releasedBy: "abandoned-timeout";
 	processProof: "unknown";
 	runnerPid: "gone";
 	lastActivityAgeMs: number;
 	abandonedSlotReleaseAfterMs: number;
 }
+
+/** A workflow's own status PID is the parent Pi host, so workflow evidence names its dead child runners instead. */
+interface AbandonedWorkflowEvidence {
+	releasedBy: "abandoned-timeout";
+	processProof: "unknown";
+	controller: "unregistered";
+	workflowEndedAgeMs: number;
+	abandonedChildren: Array<{ runId: string; state: AsyncStatus["state"]; lastActivityAgeMs: number }>;
+	abandonedSlotReleaseAfterMs: number;
+}
+
+export type ActiveAsyncCapacityReleaseEvidence = AbandonedRunnerEvidence | AbandonedWorkflowEvidence;
 
 export type ActiveAsyncCapacityReleaseVerdict =
 	| { state: "releasable"; reason: string; evidence?: ActiveAsyncCapacityReleaseEvidence }
@@ -209,10 +226,6 @@ function appendAbandonedReleaseEvent(asyncDir: string, owner: ActiveAsyncCapacit
 	}
 }
 
-function terminalState(state: AsyncStatus["state"]): boolean {
-	return state !== "queued" && state !== "running" && state !== "paused";
-}
-
 function runnerReleaseVerdict(owner: ActiveAsyncCapacityOwner, status: AsyncStatus | null, options: CapacityOptions): ActiveAsyncCapacityReleaseVerdict {
 	if (!status) return { state: "retained", reason: "status file is missing or unreadable" };
 	if (!owner.runnerProcessInstanceId) return { state: "retained", reason: "runner process identity has not been recorded" };
@@ -237,20 +250,31 @@ function runnerReleaseVerdict(owner: ActiveAsyncCapacityOwner, status: AsyncStat
 		: abandonedRunnerReleaseVerdict(status, proof?.state ?? "missing", options);
 }
 
-function abandonedRunnerReleaseVerdict(status: AsyncStatus, proofState: string, options: CapacityOptions): ActiveAsyncCapacityReleaseVerdict {
+/**
+ * A top-level runner slot is reclaimed only for a failed run. A workflow child may be in any terminal state:
+ * a stop or a completion whose launcher is gone leaves its proof unresolved just as a failure does.
+ */
+function abandonedRunnerReleaseVerdict(status: AsyncStatus, proofState: string, options: CapacityOptions, anyTerminalState = false): { state: "retained"; reason: string } | { state: "releasable"; reason: string; evidence: AbandonedRunnerEvidence } {
 	const proofReason = `process-terminal proof is ${proofState}`;
 	const thresholdMs = resolveAbandonedSlotReleaseAfterMs(options.abandonedSlotReleaseAfterMs);
 	if (thresholdMs === false) return { state: "retained", reason: `${proofReason}; abandoned-timeout policy is disabled` };
-	if (status.state !== "failed") return { state: "retained", reason: `${proofReason}; abandoned-timeout policy requires a failed run, not ${status.state}` };
+	if (anyTerminalState ? !terminalState(status.state) : status.state !== "failed") return { state: "retained", reason: `${proofReason}; abandoned-timeout policy requires a ${anyTerminalState ? "terminal" : "failed"} run, not ${status.state}` };
 	if (typeof status.pid !== "number" || !Number.isInteger(status.pid) || status.pid < 1) return { state: "retained", reason: `${proofReason}; runner PID is missing or invalid` };
-	const liveness = (options.pidLiveness ?? checkPidLiveness)(status.pid);
+	// A PID from another namespace can look dead here while the runner is alive.
+	const observedScope = (options.pidNamespaceScope ?? currentPidNamespaceScope)();
+	if (status.pidNamespaceScope !== undefined && status.pidNamespaceScope !== observedScope) return { state: "retained", reason: `${proofReason}; runner PID namespace differs from this process, so liveness is unknown` };
+	const liveness = checkRecordedPidLiveness({ pid: status.pid, pidNamespaceScope: status.pidNamespaceScope, bootId: status.bootId }, {
+		observedScope,
+		observedBootId: (options.bootId ?? currentBootId)(),
+		probe: options.pidLiveness ?? ((pid) => checkPidLiveness(pid)),
+	});
 	if (liveness !== "dead") return { state: "retained", reason: `${proofReason}; runner PID liveness is ${liveness}` };
 	const lastActivityAt = status.lastActivityAt ?? status.lastUpdate ?? status.endedAt;
 	if (typeof lastActivityAt !== "number" || !Number.isFinite(lastActivityAt)) return { state: "retained", reason: `${proofReason}; last activity timestamp is missing or invalid` };
 	const now = options.now?.() ?? Date.now();
 	const lastActivityAgeMs = Math.max(0, now - lastActivityAt);
 	if (lastActivityAgeMs <= thresholdMs) return { state: "retained", reason: `${proofReason}; last activity age ${lastActivityAgeMs}ms has not exceeded abandoned-timeout ${thresholdMs}ms` };
-	const evidence: ActiveAsyncCapacityReleaseEvidence = {
+	const evidence: AbandonedRunnerEvidence = {
 		releasedBy: "abandoned-timeout",
 		processProof: "unknown",
 		runnerPid: "gone",
@@ -264,47 +288,57 @@ function abandonedRunnerReleaseVerdict(status: AsyncStatus, proofState: string, 
 	};
 }
 
-function workflowReleaseVerdict(owner: ActiveAsyncCapacityOwner, status: AsyncStatus | null, liveWorkflowRunIds: ReadonlySet<string>): ActiveAsyncCapacityReleaseVerdict {
+function workflowReleaseVerdict(owner: ActiveAsyncCapacityOwner, status: AsyncStatus | null, liveWorkflowRunIds: ReadonlySet<string>, options: CapacityOptions): ActiveAsyncCapacityReleaseVerdict {
 	if (!status) return { state: "retained", reason: "status file is missing or unreadable" };
 	if (status.sessionId !== owner.ownerSessionId) return { state: "retained", reason: `status session ${status.sessionId ?? "unknown"} does not match owner session ${owner.ownerSessionId}` };
 	if (status.runId !== owner.runId) return { state: "retained", reason: `status run ${status.runId} does not match owner run ${owner.runId}` };
 	if (status.mode !== "workflow") return { state: "retained", reason: `status mode is ${status.mode}, not workflow` };
 	if (!terminalState(status.state)) return { state: "retained", reason: `workflow is still ${status.state}` };
 	if (liveWorkflowRunIds.has(owner.runId)) return { state: "retained", reason: "workflow controller is still live" };
-	for (const step of status.steps ?? []) {
-		const label = step.workflowKey ?? step.agent;
-		if (typeof step.async !== "boolean") return { state: "retained", reason: `workflow child ${label} is missing async classification` };
-		if (!step.async) continue;
-		if (!step.runId) return { state: "retained", reason: `async workflow child ${label} is missing run id` };
-		const childDir = path.join(path.dirname(owner.asyncDir), step.runId);
-		if (!fs.existsSync(childDir)) return { state: "retained", reason: `async workflow child ${label} directory is missing` };
-		const childStatus = readStatus(childDir);
-		if (!childStatus) return { state: "retained", reason: `async workflow child ${label} status is missing or unreadable` };
-		if (!terminalState(childStatus.state)) return { state: "retained", reason: `async workflow child ${label} is still ${childStatus.state}` };
-		const childProcessTerminal = childStatus.processTerminal;
-		if (childProcessTerminal?.state === "not-started"
-			&& childStatus.pid === undefined
-			&& !fs.existsSync(path.join(childDir, "process-terminal.json"))
-			&& childProcessTerminal.runId === step.runId
-			&& typeof childProcessTerminal.runnerProcessInstanceId === "string"
-			&& childStatus.state === "failed"
-			&& typeof childStatus.error === "string"
-			&& childStatus.error) continue;
-		if (!childProcessTerminal?.runnerProcessInstanceId) return { state: "retained", reason: `async workflow child ${label} has no runner process identity` };
-		const proof = readProcessTerminal(childDir, {
-			runId: step.runId,
-			runnerProcessInstanceId: childProcessTerminal.runnerProcessInstanceId,
-		});
-		if (proof?.state !== "observed" || proof.runId !== step.runId) return { state: "retained", reason: `async workflow child ${label} process-terminal proof is ${proof?.state ?? "missing"}` };
+	const evidence = readWorkflowChildProcessEvidence(owner.asyncDir, status.steps);
+	if (evidence.state === "observed") return { state: "releasable", reason: "workflow is terminal, controller is gone, and async children have observed proof" };
+	return abandonedWorkflowReleaseVerdict(owner, status, evidence.reason, options);
+}
+
+/** Every unresolved async child must itself pass the abandoned runner policy; any other unresolved child keeps the slot. */
+function abandonedWorkflowReleaseVerdict(owner: ActiveAsyncCapacityOwner, status: AsyncStatus, proofReason: string, options: CapacityOptions): ActiveAsyncCapacityReleaseVerdict {
+	const thresholdMs = resolveAbandonedSlotReleaseAfterMs(options.abandonedSlotReleaseAfterMs);
+	if (thresholdMs === false) return { state: "retained", reason: `${proofReason}; abandoned-timeout policy is disabled` };
+	if (!status.steps) return { state: "retained", reason: proofReason };
+	if (typeof status.endedAt !== "number" || !Number.isFinite(status.endedAt)) return { state: "retained", reason: `${proofReason}; workflow end timestamp is missing or invalid` };
+	const workflowEndedAgeMs = (options.now?.() ?? Date.now()) - status.endedAt;
+	if (workflowEndedAgeMs <= thresholdMs) return { state: "retained", reason: `${proofReason}; workflow ended ${workflowEndedAgeMs}ms ago, within abandoned-timeout ${thresholdMs}ms` };
+	const abandonedChildren: AbandonedWorkflowEvidence["abandonedChildren"] = [];
+	for (const step of status.steps) {
+		const child = readWorkflowChildEvidence(owner.asyncDir, step);
+		if (!child || child.state === "resolved") continue;
+		const unresolved = child.unresolvedProof;
+		if (!unresolved) return { state: "retained", reason: child.reason };
+		if (unresolved.status.sessionId !== owner.ownerSessionId) return { state: "retained", reason: `${child.reason}; child session ${unresolved.status.sessionId ?? "unknown"} does not match owner session ${owner.ownerSessionId}` };
+		const verdict = abandonedRunnerReleaseVerdict(unresolved.status, unresolved.proofState, options, true);
+		if (verdict.state !== "releasable") return { state: "retained", reason: `async workflow child ${unresolved.status.runId}: ${verdict.reason}` };
+		abandonedChildren.push({ runId: unresolved.status.runId, state: unresolved.status.state, lastActivityAgeMs: verdict.evidence.lastActivityAgeMs });
 	}
-	return { state: "releasable", reason: "workflow is terminal, controller is gone, and async children have observed proof" };
+	const evidence: AbandonedWorkflowEvidence = {
+		releasedBy: "abandoned-timeout",
+		processProof: "unknown",
+		controller: "unregistered",
+		workflowEndedAgeMs,
+		abandonedChildren,
+		abandonedSlotReleaseAfterMs: thresholdMs,
+	};
+	return {
+		state: "releasable",
+		reason: `${evidence.releasedBy}: ${proofReason}; workflow controller is unregistered; terminal async children ${abandonedChildren.map((child) => child.runId).join(", ")} have dead runner PIDs; process proof unknown; workflow ended ${workflowEndedAgeMs}ms ago, over ${thresholdMs}ms`,
+		evidence,
+	};
 }
 
 function ownerReleaseVerdict(owner: ActiveAsyncCapacityOwner, liveWorkflowRunIds: ReadonlySet<string>, options: CapacityOptions): ActiveAsyncCapacityReleaseVerdict {
 	const status = readStatus(owner.asyncDir);
 	return owner.kind === "runner"
 		? runnerReleaseVerdict(owner, status, options)
-		: workflowReleaseVerdict(owner, status, liveWorkflowRunIds);
+		: workflowReleaseVerdict(owner, status, liveWorkflowRunIds, options);
 }
 
 function capacitySessionDirs(rootDir: string, sessionId?: string): string[] {

@@ -13,6 +13,8 @@ Missions are durable wrappers around runs. The noun map:
 
 Ordinary workflow launches create one enclosing mission by default, with detailed JSON records under `~/.pi/agent/missions/projects/<project-hash>/` linking objectives, run ids, lifecycle status, decisions, artifact paths, and delivery receipts. Workflow children do not create separate missions. Each workflow child attempt is stored in the enclosing mission with its stable workflow key, run id when known, agent, task metadata, timestamps, session and artifact paths, and latest status heartbeat.
 
+A finished run completes a mission you asked for with `mission` or `missionId` only when its result was accepted. If the run, or any workflow child in the mission, ends with acceptance `review-required`, `rejected`, `claimed`, or `pending`, the mission stays `waiting` and `mission.show` lists each child's acceptance status. Check the result and close the mission with `mission.close`. A `gate` or `acceptance.verify` command lets the runtime accept the result, except for writer runs: they require a review by default and stay `review-required` without one. When the command is enough proof, use `acceptance: { level: "verified", verify: [{ id: "check", command: "..." }], review: { required: false } }` instead of `gate`. Missions made by default for ordinary launches still complete when their run finishes.
+
 Records created under the old default `<project>/.pi/subagents/missions` stay on disk. Continue them by setting `missions.directory` to that path for the project or by copying the record into the new agent-dir project store. There is no automatic migration.
 
 Behavior:
@@ -28,18 +30,15 @@ An explicit `mission` object must have exactly one non-empty `title` or `summary
 ```ts
 const created = subagent({
   action: "mission.create",
-  mission: { title: "Ship auth refresh", objective: "Implement and validate token refresh" }
+  options: {
+    mission: { title: "Ship auth refresh", objective: "Implement and validate token refresh" }
+  }
 })
-subagent({
-  workflowScript: `return runs.run("main", { agent: "worker", task: "Implement the approved auth refresh plan" })`,
-  missionId: "<mission-id>"
-})
+// After a ```js workflow block that runs the approved auth refresh plan:
+subagent({ workflow: true, options: { missionId: "<mission-id>" } })
 
 // Or create and attach in one launch
-subagent({
-  workflowScript: `return runs.run("main", { agent: "worker", task: "Implement the approved plan" })`,
-  mission: { title: "Ship auth refresh" }
-})
+subagent({ workflow: true, options: { mission: { title: "Ship auth refresh" } } })
 ```
 
 ### Goal missions
@@ -49,11 +48,13 @@ Set `goal: true` to make an open mission an active, bounded continuation driver;
 ```ts
 subagent({
   action: "mission.create",
-  mission: {
-    title: "Ship auth refresh",
-    objective: "Implement and validate token refresh",
-    goal: true,
-    maxIterations: 8
+  options: {
+    mission: {
+      title: "Ship auth refresh",
+      objective: "Implement and validate token refresh",
+      goal: true,
+      maxIterations: 8
+    }
   }
 })
 ```
@@ -143,43 +144,75 @@ Durable schedules are enabled by default and stored per project under `.pi/subag
 
 Create a one-shot schedule:
 
+```js workflow
+return runs.run("main", { agent: "reviewer", task: "Review the current diff." });
+```
+
 ```ts
 subagent({
   action: "schedule.create",
   id: "evening-review",
-  name: "Evening review",
-  at: "+30m",
-  baseRef: "refs/heads/release",
-  workflowScript: `return runs.run("main", { agent: "reviewer", task: "Review the current diff." })`
+  workflow: true,
+  options: {
+    name: "Evening review",
+    at: "+30m",
+    baseRef: "refs/heads/release"
+  }
 })
 ```
 
-Create a fixed recurring workflow:
+Create a fixed recurring workflow from a script file:
 
 ```ts
-subagent({ action: "schedule.create", id: "backlog", every: "6h", catchUp: "latest", workflowScript: "return runs.run('main', { agent: 'worker', task: args.task })", args: { task: "Maintain core" } })
+// .pi/workflows/backlog.js: return runs.run('main', { agent: 'worker', task: args.task })
+subagent({ action: "schedule.create", id: "backlog", workflow: "./.pi/workflows/backlog.js", args: { task: "Maintain core" }, options: { every: "6h", catchUp: "latest" } })
 ```
 
-Fixed intervals support `m`, `h`, `d`, and `w` units and advance from the planned time without completion drift. Schedule arguments are normalized and persisted for exact replay after reload; do not put secrets in them.
+Create a daily or weekly local-time schedule:
+
+```ts
+subagent({ action: "schedule.create", workflow: "./.pi/workflows/review.js", options: { every: "day", at: "09:00", timezone: "Asia/Taipei" } })
+subagent({ action: "schedule.create", workflow: "./.pi/workflows/review.js", options: { every: "week", on: ["mon", "tue", "wed", "thu", "fri"], at: "09:00", timezone: "America/New_York" } })
+```
+
+Calendar schedules require `HH:mm` and an explicit IANA `timezone` or `UTC`. Weekly `on` is a non-empty weekday array; duplicates are removed and weekdays sorted. Daily schedules do not accept `on`. Missing local times and skipped dates are skipped; a repeated time fires at its first instant only. The pending local date is persisted with a UTC cache that is refreshed on restoration using the host's current timezone data. Use a calendar-capable version in every session sharing these definitions; older schedulers reject the unknown trigger kind.
+
+Fixed intervals support `m`, `h`, `d`, and `w` units and advance from the planned time without completion drift. The schedule stores the script text read at creation, so later edits to the file do not change it. Schedule arguments are normalized and persisted for exact replay after reload; do not put secrets in them.
 
 Create a quiet recurring workflow whose successful completions stay visible but do not wake the parent session:
 
 ```ts
-subagent({ action: "schedule.create", id: "nightly-sweep", every: "24h", quiet: true, workflowScript: "..." })
+subagent({ action: "schedule.create", id: "nightly-sweep", workflow: true, options: { every: "24h", quiet: true } })
 ```
 
 Manage schedules with `schedule.list`, `schedule.show`, `schedule.history`, `schedule.pause`, `schedule.resume`, `schedule.run`, `schedule.run-due`, and `schedule.delete`.
 
+Attach an existing mission to give each scheduled workflow access to the same durable `state.get/set`:
+
+```ts
+subagent({ action: "schedule.create", id: "backlog", workflow: "./.pi/workflows/backlog.js", options: { every: "6h", missionId: "<mission-id>" } })
+```
+
+The mission must be readable in the store resolved from the schedule's target `cwd` and current mission configuration. Creation checks it without changing its status. Every fire uses the normal explicit mission launch path, including after session restoration; missing or invalid records fail before workflow execution. Schedules accept only an existing `missionId`, not mission creation or updates. The script's fixed `args` and its mutable mission state remain separate.
+
+Attachment uses ordinary mission lifecycle and retention rules. A non-goal mission can become terminal after a run, and the next fire reactivates it. `mission.close` does not pause the schedule; use `schedule.pause` or `schedule.delete` to stop future fires. A schedule does not protect its mission from terminal retention (default 200 records). If it is removed, later fires record `failed_launch` rather than creating a replacement. Open mission decisions and goal notice pause/budget settings do not gate schedule launches. Multiple schedules sharing a mission still have independent overlap controls; attachment does not serialize their workflows.
+
+`missions.enabled:false` still permits explicit attachment; `disabledFeatures:["missions"]` rejects it. Each fire resolves the mission store using its target `cwd`, current mission configuration and Pi agent directory; the schedule does not pin the creation-time store. Sessions must resolve the same effective store to reuse the same state. Attachment does not search other worktrees or copy mission records; an explicitly shared `missions.directory` follows the existing storage rules.
+
+Mission-bound definitions use schedule schema version 2 so older versions reject them instead of dropping the attachment. Existing unbound definitions keep version 1 and need no migration. A project using mission attachment should use a version that supports it in every scheduler session.
+
 Behavior:
 
-- Runs always launch async with fresh context and disable automatic mission creation; mission attachment is deferred from this first slice.
+- Runs always launch async with fresh context. Without `missionId`, they disable mission creation and have no `state` global.
+- Project-wide schedules (the default) fire in whichever Pi session in that project claims the fire first, and that session receives the run's notifications. Pass `sessionOnly: true` to bind restoration and every fire to the creating session; other sessions in the project never arm it.
 - An optional top-level `baseRef` selects the safe Git ref used by managed worktrees (default `HEAD`); it is persisted with the schedule and forwarded on every fire. The source checkout must still be clean.
 - Definitions, bounded history, append-only events, and per-run receipts are stored with mode `0600`.
 - `overlap` is currently fixed to `skip`; `catchUp` supports `latest` (default) and `none`.
-- A successful `schedule.run` satisfies the next natural fire; a failed manual launch does not skip it.
+- A successful `schedule.run` satisfies the next natural fire; a failed manual launch does not skip it. For calendars, a manual launch before today's pending fire consumes today; if today has already fired, it consumes the next pending date. When overdue, it consumes the latest pending occurrence. The next fire is after both that occurrence and the current time.
+- If a natural calendar fire overlaps a manual launch that later fails, the pending fire remains due. Pausing the schedule while that launch is pending still prevents automatic execution after the failure.
 - `quiet` persists only on recurring (`every`) schedules. Successful automatic fires stay visible without a parent turn; failed, stopped, or paused outcomes still wake the session. One-shot `at` schedules and `schedule.run` stay noisy unless that launch passes `quiet: true`.
 - `schedule.run-due` lets an external launcher start due project work without making `pi-subagents` a daemon.
-- Calendar recurrence, cron, queue/replace overlap, and the schedule TUI inspector are intentionally deferred to the next slice.
+- Month/year recurrence, cron, queue/replace overlap, and the schedule TUI inspector are intentionally deferred to the next slice.
 - The old `schedule`, `schedule-list`, `schedule-status`, and `schedule-cancel` actions were removed in a hard cutover.
 
 Disable or bound schedules with the `scheduledRuns` config key in [configuration.md](configuration.md#scheduledruns).

@@ -1,9 +1,8 @@
 import { Agent, type AgentTool, type StreamFn, type ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { createReadOnlyTools, convertToLlm, type ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { streamSimple } from "@earendil-works/pi-ai/compat";
 import type { Model, ProviderHeaders } from "@earendil-works/pi-ai";
 import { Type, type Static } from "typebox";
-import { resolveModelCandidate } from "../runs/shared/model-resolution.ts";
+import { knownModelProviders, resolveModelCandidate } from "../runs/shared/model-resolution.ts";
 import { agentStreamOptions } from "../shared/agent-stream-options.ts";
 import { opencodeSessionHeaders } from "../shared/opencode-session-headers.ts";
 import { resolveEffectiveThinking, splitKnownThinkingSuffix, THINKING_LEVELS, toModelInfo } from "../shared/model-info.ts";
@@ -57,7 +56,7 @@ export interface CreateMainWatchdogReviewOptions {
 	streamFn?: StreamFn;
 	createReadOnlyTools?: (cwd: string) => AgentTool[];
 	getThinkingLevel?: () => ThinkingLevel | undefined;
-	diffBaseline?: () => WatchdogDiffBaseline | undefined;
+	diffBaseline?: () => Promise<WatchdogDiffBaseline | undefined> | undefined;
 }
 
 function fullModelId(model: Pick<RegistryModel, "provider" | "id">): string {
@@ -99,7 +98,7 @@ function resolveReviewThinking(input: {
 function resolveConfiguredModel(ctx: ExtensionContext, rawModel: string): { model: RegistryModel; modelString: string } {
 	const availableModels = ctx.modelRegistry.getAvailable().map(toModelInfo);
 	const preferredProvider = typeof ctx.model?.provider === "string" ? ctx.model.provider : undefined;
-	const resolved = resolveModelCandidate(rawModel, availableModels, preferredProvider);
+	const resolved = resolveModelCandidate(rawModel, availableModels, preferredProvider, knownModelProviders(ctx.modelRegistry));
 	if (!resolved) {
 		throw new Error(`Configured watchdog model '${rawModel}' did not match exactly one authenticated available model. Use provider/model or configure credentials for the intended provider.`);
 	}
@@ -223,7 +222,7 @@ export function formatWatchdogCwdSection(cwd: string): string {
 	return `<cwd>\n${cwd}\n</cwd>`;
 }
 
-export function buildWatchdogSystemPrompt(ctx: Pick<ExtensionContext, "cwd">, options: { hasScope?: boolean; guidance?: string; hasDiff?: boolean } = {}): string {
+function buildWatchdogSystemPrompt(ctx: Pick<ExtensionContext, "cwd">, options: { hasScope?: boolean; guidance?: string; hasDiff?: boolean } = {}): string {
 	const guidance = options.guidance?.trim();
 	return [
 		"You are the main-session subagent watchdog for Pi.",
@@ -278,12 +277,7 @@ async function runWatchdogAttempt(ctx: ExtensionContext, request: WatchdogReview
 	});
 	if (ctx.signal?.aborted || request.signal?.aborted) return { result: { stopReason: "aborted" } };
 	const auth = selection.auth;
-	const registeredProvider = (ctx.modelRegistry as {
-		getRegisteredProviderConfig?: (provider: string) => { api?: string; streamSimple?: StreamFn } | undefined;
-	}).getRegisteredProviderConfig?.(selection.model.provider);
-	const baseStreamFn = options.streamFn ?? (registeredProvider?.streamSimple && registeredProvider.api === selection.model.api
-		? registeredProvider.streamSimple
-		: streamSimple);
+	const baseStreamFn: StreamFn = options.streamFn ?? ((model, context, streamOptions) => ctx.modelRegistry.streamSimple(model, context, streamOptions));
 	const sessionId = ctx.sessionManager.getSessionId();
 	const streamFn: StreamFn = (model, context, streamOptions) => {
 		// Agent may enter one final loop iteration after an aborted mixed tool batch.
@@ -296,7 +290,7 @@ async function runWatchdogAttempt(ctx: ExtensionContext, request: WatchdogReview
 			headers: { ...opencodeSessionHeaders(model, sessionId), ...(streamOptions?.headers ?? {}), ...(auth.headers ?? {}) },
 		});
 	};
-	const diffBaseline = options.diffBaseline?.();
+	const diffBaseline = await options.diffBaseline?.();
 	let clarification: { question: string; evidence: string } | undefined;
 	let warned = false;
 	let toolCount = 0;
@@ -332,6 +326,7 @@ async function runWatchdogAttempt(ctx: ExtensionContext, request: WatchdogReview
 		hasDiff: diffBaseline !== undefined,
 	});
 	const agent = new Agent({
+		sessionId,
 		initialState: {
 			systemPrompt,
 			model: selection.model,

@@ -1,4 +1,5 @@
 import { SUBAGENT_WATCHDOG_WARNING_TYPE } from "./types.ts";
+import { waitToolName } from "../shared/wait-tool-name.ts";
 
 type MessageLike = {
 	role?: string;
@@ -175,10 +176,10 @@ export function formatWatchdogOrchestrationActivity(event: unknown): string {
 		if (call?.type !== "toolCall" || typeof call.id !== "string") continue;
 		const args = call.arguments;
 		if (!args || typeof args !== "object") continue;
-		const eligible = call.name === "bg_wait"
+		const eligible = call.name === waitToolName()
 			|| (call.name === "subagent_supervisor" && ["pending", "list", "reply"].includes(args.action))
 			|| (call.name === "subagent" && (["status", "resume", "interrupt", "steer", "stop"].includes(args.action)
-				|| (args.action === undefined && (typeof args.agent === "string" || typeof args.workflowScript === "string" || typeof args.workflowScriptPath === "string"))));
+				|| (args.action === undefined && (typeof args.agent === "string" || args.workflow !== undefined))));
 		if (!eligible) continue;
 		const result = turn.toolResults.find((value) => {
 			const result = value as { role?: string; toolCallId?: string; toolName?: string };

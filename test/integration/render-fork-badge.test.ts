@@ -5,6 +5,7 @@ import { keyText } from "@earendil-works/pi-coding-agent";
 type RenderTheme = {
 	fg(name: string, text: string): string;
 	bold(text: string): string;
+	getThinkingBorderColor(level: string): (text: string) => string;
 };
 
 type RenderSubagentResult = (
@@ -41,9 +42,10 @@ let renderSubagentSummary: RenderSubagentSummary | undefined;
 const theme = {
 	fg: (_name: string, text: string) => text,
 	bold: (text: string) => text,
+	getThinkingBorderColor: (_level: string) => (text: string) => text,
 };
 const expandKey = keyText("app.tools.expand");
-const expandHint = expandKey ? `Press ${expandKey} for full output` : "Configure the expand key for full output";
+const expandHint = expandKey ? `Press ${expandKey} for full output` : "Press the expand key for full output";
 
 const emptyUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, turns: 0 };
 
@@ -92,6 +94,22 @@ function withMockedDateNow<T>(now: number, fn: () => T): T {
 }
 
 describe("renderSubagentResult fork indicator", () => {
+	it("renders reported foreground progress in the result renderer", () => {
+		const progress = {
+			index: 0, agent: "reviewer", status: "running", task: "Review source",
+			recentTools: [], recentOutput: [], toolCount: 1, tokens: 42, durationMs: 1_000,
+			progressText: "Reviewing the parser", progressUpdatedAt: 958_000,
+		};
+		const rendered = withMockedDateNow(1_000_000, () => renderSubagentResult!({
+			content: [{ type: "text", text: "working" }],
+			details: {
+				mode: "single",
+				progress: [progress],
+				results: [{ agent: "reviewer", task: "Review source", exitCode: 0, messages: [], usage: emptyUsage, progress }],
+			},
+		}, { expanded: false }, theme).render(120).join("\n"));
+		assert.match(rendered, /progress: Reviewing the parser · updated 42s ago/);
+	});
 	it("renders result-owned nested children for foreground single, parallel, and chain runs", () => {
 		const cases = [
 			{
@@ -845,7 +863,7 @@ describe("renderSubagentResult fork indicator", () => {
 		}, { expanded: false }, theme);
 
 		const text = widget.render(120).join("\n");
-		assert.match(text, /Configure the expand key for live detail/);
+		assert.match(text, /Press the expand key for live detail/);
 		assert.match(text, /active 2s ago/);
 		assert.match(text, /⎿  read: package\.json \| 3\.0s/);
 		assert.match(text, /output: \/tmp\/reviewer_output\.md/);
@@ -878,7 +896,7 @@ describe("renderSubagentResult fork indicator", () => {
 				}],
 			},
 		}, { expanded: false }, theme).render(160).join("\n");
-		assert.match(single, /reviewer \(gpt-5\.5 · thinking high\)/);
+		assert.match(single, /reviewer \(openai-codex\/gpt-5\.5 · thinking high\)/);
 
 		const multi = renderSubagentResult!({
 			content: [{ type: "text", text: "(running...)" }],
@@ -891,8 +909,8 @@ describe("renderSubagentResult fork indicator", () => {
 				],
 			},
 		}, { expanded: false }, theme).render(160).join("\n");
-		assert.match(multi, /scan \(claude-haiku-4-5 · thinking low\)/);
-		assert.match(multi, /fix \(gpt-5-mini\)/);
+		assert.match(multi, /scan \(anthropic\/claude-haiku-4-5 · thinking low\)/);
+		assert.match(multi, /fix \(openai\/gpt-5-mini\)/);
 
 		const expanded = renderSubagentResult!({
 			content: [{ type: "text", text: "done" }],
@@ -909,7 +927,26 @@ describe("renderSubagentResult fork indicator", () => {
 				}],
 			},
 		}, { expanded: true }, theme).render(160).join("\n");
-		assert.match(expanded, /review \(gpt-5\.5 · thinking high\)/);
+		assert.match(expanded, /review \(openai-codex\/gpt-5\.5 · thinking high\)/);
+
+		const expandedSingle = renderSubagentResult!({
+			content: [{ type: "text", text: "done" }],
+			details: {
+				mode: "single",
+				results: [{
+					agent: "reviewer",
+					task: "review",
+					model: "router/auto",
+					exitCode: 0,
+					messages: [],
+					finalOutput: "done",
+					usage: emptyUsage,
+					progress: { index: 0, agent: "reviewer", status: "completed", task: "review", model: "openai-codex/gpt-6.1-sol", recentTools: [], recentOutput: [], toolCount: 0, tokens: 0, durationMs: 1 },
+				}],
+			},
+		}, { expanded: true }, theme).render(160).join("\n");
+		assert.match(expandedSingle, /openai-codex\/gpt-6\.1-sol/);
+		assert.doesNotMatch(expandedSingle, /router\/auto/);
 	});
 
 	it("strips repeated agent prefixes in expanded running multi-result rows", () => {

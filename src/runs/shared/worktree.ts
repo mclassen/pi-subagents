@@ -21,7 +21,7 @@ const WORKTREE_NAMING_BRANCH_MAX_BYTES = 256;
 const WORKTREE_COMMAND_OUTPUT_MAX_BYTES = 128 * 1024;
 const WORKTRUNK_COMMAND = process.platform === "win32" ? "git" : "wt";
 const WORKTRUNK_ARG_PREFIX = process.platform === "win32" ? ["wt"] : [];
-export const MACHINE_DIFF_OPTIONS = ["--no-color", "--no-ext-diff", "--no-textconv", "--default-prefix", "--line-prefix=", "--no-relative"] as const;
+export const MACHINE_DIFF_OPTIONS = ["--no-color", "--no-ext-diff", "--no-textconv", "--src-prefix=a/", "--dst-prefix=b/", "--line-prefix=", "--no-relative"] as const;
 const MACHINE_PATCH_OPTIONS = [...MACHINE_DIFF_OPTIONS, "--binary"] as const;
 const PATCH_VALIDATION_OPTIONS = ["apply", "--check", "--cached", "--reverse", "--binary", "--whitespace=nowarn"] as const;
 
@@ -58,6 +58,8 @@ export interface WorktreeSetup {
 }
 
 export interface WorktreeInfo {
+	/** Canonical parent captured at allocation; never re-resolve this evidence later. */
+	recordedBaseDir?: string;
 	path: string;
 	agentCwd: string;
 	branch: string;
@@ -81,6 +83,7 @@ export interface WorktreeDiff {
 }
 
 export interface WorktreeCleanupTask {
+	recordedBaseDir?: string;
 	index: number;
 	path: string;
 	branch: string;
@@ -292,6 +295,26 @@ function runGitChecked(cwd: string, args: string[]): string {
 		throw new Error(message);
 	}
 	return result.stdout;
+}
+
+export function findListedWorktreeOnBranch(repoCwd: string, branch: string): string | undefined {
+	let current: string | undefined;
+	for (const line of runGitChecked(repoCwd, ["worktree", "list", "--porcelain"]).split("\n")) {
+		if (line.startsWith("worktree ")) current = line.slice("worktree ".length);
+		else if (line === `branch refs/heads/${branch}` && current) return normalizeComparableCwd(current);
+	}
+	return undefined;
+}
+
+export function findListedWorktreeAgentCwd(repoCwd: string, branch: string): string | undefined {
+	const worktree = findListedWorktreeOnBranch(repoCwd, branch);
+	if (!worktree) return undefined;
+	const cwdRelative = resolveRepoCwdRelative(repoCwd);
+	return cwdRelative ? path.join(worktree, cwdRelative) : worktree;
+}
+
+export function isComparablePathInside(parent: string, child: string): boolean {
+	return isPathInside(normalizeComparableCwd(parent), normalizeComparableCwd(child));
 }
 
 /** Validate a captured patch against the worktree index without changing either. */
@@ -945,9 +968,11 @@ async function createNativeWorktree(
 	if (branch.status !== 1 || pathExists) throw new Error(`worktree path or branch already exists: ${worktreePath}, ${naming.requestedBranch}`);
 	tx.attempt(index, naming.requestedBranch, worktreePath);
 	ensureProjectWorktreeDir(dedicatedRoot, toplevel);
+	const recordedBaseDir = normalizeComparableCwd(path.dirname(worktreePath));
 	await tx.git(toplevel, ["worktree", "add", worktreePath, "-b", naming.requestedBranch, baseCommit]);
 	const worktree: WorktreeInfo = {
 		path: worktreePath,
+		recordedBaseDir,
 		agentCwd: worktreePath,
 		branch: naming.requestedBranch,
 		index,
@@ -1026,6 +1051,7 @@ async function createWorktrunkWorktree(
 		if (returnedHead !== baseCommit) throw new Error("Worktrunk provisioning returned a worktree at a different base commit");
 		const worktree: WorktreeInfo = {
 			path: worktreePath,
+			recordedBaseDir: normalizeComparableCwd(path.dirname(worktreePath)),
 			agentCwd: cwdRelative ? path.join(worktreePath, cwdRelative) : worktreePath,
 			branch: naming.requestedBranch,
 			index,
@@ -1189,6 +1215,7 @@ function cleanupSingleWorktree(
 			branch: worktree.branch,
 			...(worktree.provider ? { provider: worktree.provider } : {}),
 			...(worktree.naming ? { naming: worktree.naming } : {}),
+			...(worktree.recordedBaseDir ? { recordedBaseDir: worktree.recordedBaseDir } : {}),
 			worktreeRemoved: false,
 			branchRemoved: false,
 			preserved: true,
@@ -1213,6 +1240,7 @@ function cleanupSingleWorktree(
 				branch: worktree.branch,
 				...(worktree.provider ? { provider: worktree.provider } : {}),
 				...(worktree.naming ? { naming: worktree.naming } : {}),
+				...(worktree.recordedBaseDir ? { recordedBaseDir: worktree.recordedBaseDir } : {}),
 				worktreeRemoved: false,
 				branchRemoved: false,
 				preserved: true,
@@ -1248,6 +1276,7 @@ function cleanupSingleWorktree(
 					branch: worktree.branch,
 					...(worktree.provider ? { provider: worktree.provider } : {}),
 					...(worktree.naming ? { naming: worktree.naming } : {}),
+					...(worktree.recordedBaseDir ? { recordedBaseDir: worktree.recordedBaseDir } : {}),
 					worktreeRemoved: false,
 					branchRemoved: false,
 					preserved: true,
@@ -1269,6 +1298,7 @@ function cleanupSingleWorktree(
 					branch: worktree.branch,
 					...(worktree.provider ? { provider: worktree.provider } : {}),
 					...(worktree.naming ? { naming: worktree.naming } : {}),
+					...(worktree.recordedBaseDir ? { recordedBaseDir: worktree.recordedBaseDir } : {}),
 					worktreeRemoved: false,
 					branchRemoved: false,
 					preserved: true,
@@ -1298,6 +1328,7 @@ function cleanupSingleWorktree(
 		branch: worktree.branch,
 		...(worktree.provider ? { provider: worktree.provider } : {}),
 		...(worktree.naming ? { naming: worktree.naming } : {}),
+		...(worktree.recordedBaseDir ? { recordedBaseDir: worktree.recordedBaseDir } : {}),
 		worktreeRemoved,
 		branchRemoved,
 		...(errors.length ? { errors } : {}),
@@ -1337,7 +1368,7 @@ async function compensateSetup(tx: SetupTransaction): Promise<WorktreeCleanupRep
 		}
 		const known = setup.worktrees.find((worktree) => worktree.index === attempt.index);
 		const task: WorktreeCleanupTask = { index: attempt.index, path: attempt.path, branch: attempt.branch,
-			provider: known?.provider ?? "native", naming: known?.naming, worktreeRemoved: false, branchRemoved: false };
+			provider: known?.provider ?? "native", naming: known?.naming, recordedBaseDir: known?.recordedBaseDir, worktreeRemoved: false, branchRemoved: false };
 		report.tasks.push(task);
 		try {
 			if (normalizeComparableCwd(attempt.path) === normalizeComparableCwd(setup.cwd)) throw new Error("Refusing source-checkout removal");

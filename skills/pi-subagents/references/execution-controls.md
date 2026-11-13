@@ -36,7 +36,7 @@ A command-runner agent with a plain `command` (no adapter) is also how a classif
 
 ### External job profiles
 
-An agent may set `runner.type: external-job` with a non-empty `provider` and optional JSON `options`. When `surf-cli` is installed and loaded, Surf can optionally expose a `gpt-pro` package agent through provider `surf-oracle`. Surf maps `model: pro` to its configured pro web mode. pi-subagents does not own that package agent or model mapping. Remove any old `agentOverrides.gpt-pro.disabled` workaround before using Surf's package agent. The provider must be registered in the host Pi process through `pi-subagents/external-job-provider`; the async runner talks to that parent-owned registry through a local operation bridge.
+An agent may set `runner.type: external-job` with a non-empty `provider` and optional JSON `options`. When `surf-cli` is installed and loaded, Surf can optionally expose a `gpt-pro` package agent through provider `surf-oracle`. Surf maps `model: pro` to its configured pro web mode. pi-subagents does not own that package agent or model mapping. Remove any old `agentOverrides.gpt-pro.disabled` workaround before using Surf's package agent. The provider must be registered in the host Pi process through `"pi-subagents/external-job-provider"`; the async runner talks to that parent-owned registry through a local operation bridge.
 
 External job profiles are async-only. The provider owns the remote job and Pi owns the async run record. Status persists provider name, provider job id, prompt digest, provider options, handle/conversation URLs when supplied, result artifact path, last known state, and provider failure code/message. Recovery uses existing provider job metadata to call `reattach` and `result`; it refuses to redispatch a prompt when the persisted provider job does not match the prompt digest.
 
@@ -182,7 +182,7 @@ then wait on its id; do not resume or launch a replacement while it remains
 detached. Headless sessions also auto-drain exact current-session work at
 `agent_end` as a final safeguard.
 
-Providers are discovered through the `pi-subagents/background-work` registry and
+Providers are discovered through the `"pi-subagents/background-work"` registry and
 must expose a stable item id and owning session id. Load a provider through the
 child’s `extensions` or `subagentOnlyExtensions` and allow `bg_wait` in its
 tools. For
@@ -222,7 +222,7 @@ Stop a current-session top-level async run with `stop` (or `/subagents-stop`). S
 
 ```typescript
 subagent({ action: "stop", id: "run-id" })
-subagent({ action: "stop", id: "run-id", childId: "child-id" })
+subagent({ action: "stop", id: "run-id", options: { childId: "child-id" } })
 ```
 
 Use `childId` only for active async/workflow runs whose status snapshot shows a
@@ -236,7 +236,7 @@ Use `steer` for top-level live async guidance and `resume` after a delegated run
 ```typescript
 subagent({ action: "steer", id: "run-id", message: "Focus on the failing test." })
 subagent({ action: "resume", id: "run-id", message: "Follow up on this point." })
-subagent({ action: "resume", id: "run-id", index: 1, message: "Continue reviewer 2." })
+subagent({ action: "resume", id: "run-id", message: "Continue reviewer 2.", options: { index: 1 } })
 subagent({ action: "resume", id: "nested-run-id", message: "Continue this nested reviewer." })
 ```
 
@@ -274,7 +274,7 @@ Instruction-contract tests prove these instructions only, not future model compl
 
 Use native `subagent` runs for unattended implementation, review, and gate work that needs managed isolation, durable artifacts, and process controls. Use `interactive_shell` for visible terminal work, alternate CLIs, trust prompts, or recovery only when the user explicitly requests that mode or the task is outside the governed subagent protocol; it is not an implicit replacement for a failed `subagent` lane.
 
-A cooperating terminal runtime can register read-only external records through `pi-subagents/external-runs`. Records include the source, session, state, optional report path, and completion reason. They are observations only: pi-subagents does not start, stop, steer, or otherwise own the foreign process. Run unattended raw terminal agents in an explicit isolated cwd or worktree; do not use a live project checkout as disposable review space.
+A cooperating terminal runtime can register read-only external records through `"pi-subagents/external-runs"`. Records include the source, session, state, optional report path, and completion reason. They are observations only: pi-subagents does not start, stop, steer, or otherwise own the foreign process. Run unattended raw terminal agents in an explicit isolated cwd or worktree; do not use a live project checkout as disposable review space.
 
 ### Scheduled subagent runs
 
@@ -282,10 +282,10 @@ Schedules are durable project records under `.pi/subagents/schedules/`. They are
 
 ```typescript
 // One-shot reviewer
-subagent({ action: "schedule.create", id: "evening-review", name: "Evening review", at: "+30m", workflowScript: "return runs.run('main', { agent: 'reviewer', task: 'Review the diff.' })" })
+subagent({ action: "schedule.create", id: "evening-review", options: { name: "Evening review", at: "+30m", script: "..." } })
 
 // Fixed recurring workflow
-subagent({ action: "schedule.create", id: "backlog", every: "6h", catchUp: "latest", workflowScript: "..." })
+subagent({ action: "schedule.create", id: "backlog", options: { every: "6h", catchUp: "latest", script: "..." } })
 
 subagent({ action: "schedule.list" })
 subagent({ action: "schedule.show", id: "backlog" })
@@ -337,7 +337,7 @@ subagent({
 })
 ```
 
-If the run already has an active intercom bridge target, needs-attention notifications can also prepare a compact intercom ping for the orchestrator. When a child route is available, the ping tells the orchestrator which agent needs attention and includes the exact `intercom({ action: "send", to: "..." })` target for a nudge. Do not invent a target or ask the child to self-report when no bridge exists.
+If the run already has an active intercom bridge target, needs-attention notifications can also prepare a compact intercom ping for the orchestrator. When a child route is available, the ping tells the orchestrator which agent needs attention and includes the exact `intercom({ action:"send", to:"..." })` target for a nudge. Do not invent a target or ask the child to self-report when no bridge exists.
 
 Steering is acknowledged delivery, not a send attempt or model-compliance signal:
 
@@ -354,8 +354,8 @@ Steering supports three delivery modes via the `mode` parameter (`steer` is the 
 - `mode: "auto"` — same next-safe-point delivery path as `steer`, but without the automatic pause-and-revive recovery after a missed acknowledgment.
 
 ```typescript
-subagent({ action: "steer", id: "abc123", mode: "follow_up", message: "After this step, also validate the config file." })
-subagent({ action: "steer", id: "abc123", mode: "auto", message: "Switch to the failing test now." })
+subagent({ action: "steer", id: "abc123", message: "After this step validate the config file too.", options: { mode: "follow_up" } })
+subagent({ action: "steer", id: "abc123", message: "Switch to the failing test now.", options: { mode: "auto" } })
 ```
 
 For async runs, `delivered` records that the child consumed the correlated user input; foreground `delivered` records in-process transport acceptance. Neither is proof of model compliance. A live foreground follow-up acknowledgment reports `queued`, meaning Pi accepted it into its follow-up queue, not that it was delivered. The foreground transport does not provide a later correlated queued-to-delivered receipt.
@@ -393,7 +393,7 @@ GPT 5.5 main session, or the reverse). Recommendation and configuration:
 ```typescript
 subagent({ action: "watchdog.status" })
 subagent({ action: "watchdog.recommend-model" })
-subagent({ action: "watchdog.configure", model: "recommended", scope: "session" })
+subagent({ action: "watchdog.configure", model: "recommended", options: { scope: "session" } })
 subagent({ action: "watchdog.check" })
 ```
 
@@ -441,15 +441,15 @@ Routing rule:
 Project panes run a separate Pi session from the target directory. Subagents launched inside that pane use that project's config, agents, skills, files, git state, and mission records. The pane binding lives under `<projectRoot>/.pi/subagents/project-panes/herdr.json`. When Pi runs inside Herdr, the owning pane reports compact active-work status and title suffixes, and the parent inline status counts opened project panes. Use Herdr itself or `project.status` / `project.close` for pane-level follow-up. For ordinary headless delegation to another repo, prefer explicit `cwd` first; reserve project panes for visible or persistent project ownership.
 
 ```typescript
-subagent({ action: "mission.create", mission: { title: "Ship auth refresh", objective: "Implement and validate refresh handling" } })
-subagent({ workflowScript: `return runs.run("main", { agent: "worker", task: "Implement the approved plan" })`, missionId: "<mission-id>" })
-subagent({ workflowScript: `return runs.run("main", { agent: "scout", task: "Quickly answer whether this file exists" })`, mission: false })
-subagent({ action: "mission.list", missionScope: "global" })
-subagent({ action: "mission.resolve-decision", missionId: "<mission-id>", id: "<decision-id>", summary: "Settled: ship the v2 API; no schema freeze needed." })
+subagent({ action: "mission.create", options: { mission: { title: "Ship auth refresh", objective: "Implement and validate refresh handling" } } })
+subagent({ options: { script: `return runs.run("main", {agent: "worker", task: "Implement the approved plan"})`, missionId: "<mission-id>" } })
+subagent({ options: { script: `return runs.run("main", {agent: "scout", task: "Quickly answer whether this file exists"})`, mission: false } })
+subagent({ action: "mission.list", options: { missionScope: "global" } })
+subagent({ action: "mission.resolve-decision", id: "<decision-id>", options: { missionId: "<mission-id>", summary: "Settled: ship the v2 API; no schema freeze needed." } })
 subagent({ action: "project.open", cwd: "/path/to/other-repo", message: "Own this mission for the project and report back with receipts." })
 subagent({ action: "project.status", cwd: "/path/to/other-repo" })
 subagent({ action: "project.close", cwd: "/path/to/other-repo" })
-subagent({ action: "mission.close", missionId: "<mission-id>", missionStatus: "completed", summary: "Auth refresh shipped and tests pass." })
+subagent({ action: "mission.close", options: { missionId: "<mission-id>", missionStatus: "completed", summary: "Auth refresh shipped and tests pass." } })
 ```
 
 ## Worktree Isolation
@@ -567,13 +567,13 @@ contact_supervisor({
 The parent replies with the native supervisor tool:
 
 ```typescript
-subagent_supervisor({ action: "reply", message: "Optimize for readability." })
+subagent_supervisor({ action:"reply", message: "Optimize for readability." })
 ```
 
 Or inspects unresolved asks first:
 
 ```typescript
-subagent_supervisor({ action: "pending" })
+subagent_supervisor({ action:"pending" })
 ```
 
 Native supervisor coordination does not expose generic `intercom` as a fallback. Use `subagent_supervisor` for parent replies.

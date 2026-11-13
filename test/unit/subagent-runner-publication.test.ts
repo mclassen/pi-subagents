@@ -115,10 +115,15 @@ for (const barrier of ["startup", "terminal"] as const) {
 			assert.ok(error instanceof Error);
 			assert.match(error.message, /injected status publication lock/);
 			assert.ok(blockedAttempts >= DEFAULT_FILE_SYSTEM_RETRY_DELAYS_MS.length + 1);
-			assert.equal(fs.existsSync(processTerminalCandidatePath(asyncDir)), false);
-			// Pending payloads may exist after disposal; neither a public result
-			// nor writer-terminal proof may be committed after this barrier fails.
-			assert.equal(fs.existsSync(config.resultPath), false);
+			// A startup barrier commits nothing. At the terminal barrier the result is published
+			// before the terminal status (upstream ordering, so delivery demand cannot end
+			// before the result exists); the run still fails and status never reads terminal.
+			if (barrier === "startup") {
+				assert.equal(fs.existsSync(processTerminalCandidatePath(asyncDir)), false);
+				assert.equal(fs.existsSync(config.resultPath), false);
+			} else {
+				assert.notEqual(JSON.parse(fs.readFileSync(statusPath, "utf-8")).state, "complete");
+			}
 			if (barrier === "startup") assert.equal(fake.sessions.length, 0);
 		} finally {
 			fsDefault.renameSync = originalRename;

@@ -2,8 +2,29 @@ import { spawn } from "node:child_process";
 import { createOwnedProcessTreeController } from "../background/owned-process-tree.ts";
 import type { ProcessTreeTerminal } from "../../shared/types.ts";
 
-function terminateCommandTree(controller: ReturnType<typeof createOwnedProcessTreeController>): Promise<ProcessTreeTerminal> {
-	return controller.terminate();
+// Windows: taskkill /T ends descendants started after the last snapshot (for example Git
+// fsmonitor hooks); the owned-tree controller then verifies termination either way.
+export function terminateWindowsTreeThenVerify(pid: number | undefined, controller: { terminate(): Promise<ProcessTreeTerminal> }): Promise<ProcessTreeTerminal> {
+	if (process.platform !== "win32" || pid === undefined) return controller.terminate();
+	return new Promise((resolve) => {
+		let settled = false;
+		const verify = () => {
+			if (settled) return;
+			settled = true;
+			void controller.terminate().then(resolve);
+		};
+		try {
+			const cleanup = spawn("taskkill", ["/PID", String(pid), "/T", "/F"], { stdio: "ignore", windowsHide: true, shell: false });
+			cleanup.once("error", verify);
+			cleanup.once("close", verify);
+		} catch {
+			verify();
+		}
+	});
+}
+
+function terminateCommandTree(pid: number | undefined, controller: ReturnType<typeof createOwnedProcessTreeController>): Promise<ProcessTreeTerminal> {
+	return terminateWindowsTreeThenVerify(pid, controller);
 }
 export interface SetupCommandOptions {
 	cwd?: string;
@@ -83,7 +104,11 @@ export async function runSetupCommand(
 	}
 	result.pid = child.pid;
 	if (child.pid !== undefined && process.platform !== "win32") result.processGroupId = child.pid;
-	const tree = child.pid === undefined ? undefined : createOwnedProcessTreeController(child.pid);
+	// Windows: the owned-tree snapshot costs ~2 s of synchronous PowerShell, so take it only
+	// when termination starts. The root is still running then (Node holds its handle), so its
+	// identity cannot be reused and the snapshot still finds its descendants.
+	let tree = child.pid === undefined || process.platform === "win32" ? undefined : createOwnedProcessTreeController(child.pid);
+	const ensureTree = () => tree ??= child.pid === undefined ? undefined : createOwnedProcessTreeController(child.pid);
 	let termination: Promise<ProcessTreeTerminal> | undefined;
 	let directSettled = false;
 	const releaseUnknownIO = () => {
@@ -97,7 +122,7 @@ export async function runSetupCommand(
 		child.stderr.destroy();
 	};
 	const terminate = () => {
-		if (termination || !tree) return;
+		if (termination || child.pid === undefined) return;
 		if (directSettled) {
 			result.processTree = {
 				state: "unknown", reason: "verification-failed",
@@ -106,7 +131,7 @@ export async function runSetupCommand(
 			releaseUnknownIO();
 			return;
 		}
-		termination = terminateCommandTree(tree).then((proof) => {
+		termination = terminateCommandTree(result.pid, ensureTree()!).then((proof) => {
 			result.processTree = proof;
 			releaseUnknownIO();
 			return proof;

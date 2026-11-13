@@ -3,7 +3,8 @@ import assert from "node:assert/strict";
 
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { row, shouldSuppressSingleStep, stripRepeatedAgentPrefix, withDuplicateLabelDiscriminators } from "../../src/tui/render-helpers.ts";
-import { buildWidgetLines, renderSubagentResult, truncLine, widgetRenderKey } from "../../src/tui/render.ts";
+import { buildWidgetLines, renderSubagentResult, renderSubagentSummary, truncLine, widgetRenderKey } from "../../src/tui/render.ts";
+import { setMainThinkingLevelSource } from "../../src/tui/running-tone.ts";
 import type { AsyncJobState } from "../../src/shared/types.ts";
 
 const theme = {
@@ -13,7 +14,24 @@ const theme = {
 	bold(text: string): string {
 		return text;
 	},
+	getThinkingBorderColor(_level: string): (text: string) => string {
+		return (text) => text;
+	},
 };
+
+const toneTheme = {
+	fg: (name: string, text: string) => `⟦${name}⟧${text}⟦/⟧`,
+	bold: (text: string) => text,
+	getThinkingBorderColor: (level: string) => (text: string) => `⟦thinking:${level}⟧${text}⟦/⟧`,
+};
+
+function withoutTones(text: string): string {
+	return text.replace(/⟦[^⟧]*⟧/g, "");
+}
+
+function runningGlyphTone(line: string | undefined): string | undefined {
+	return line?.match(/⟦([^⟧]+)⟧[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏●]⟦\/⟧/)?.[1];
+}
 
 test("external-cli widget rows show their runner and elapsed time", () => {
 	const text = buildWidgetLines([{
@@ -36,10 +54,10 @@ test("external-cli widget rows show their runner and elapsed time", () => {
 	assert.doesNotMatch(text, /0 tokens/);
 });
 
-function componentText(component: unknown): string {
+function componentText(component: unknown, mapText: (text: string) => string = (text) => text): string {
 	if (typeof component !== "object" || component === null) return "";
-	if ("text" in component && typeof component.text === "string") return component.text;
-	if ("children" in component && Array.isArray(component.children)) return component.children.map(componentText).filter(Boolean).join("\n");
+	if ("text" in component && typeof component.text === "string") return mapText(component.text);
+	if ("children" in component && Array.isArray(component.children)) return component.children.map((child) => componentText(child, mapText)).filter(Boolean).join("\n");
 	return "";
 }
 
@@ -234,6 +252,217 @@ test("multiline rendering omits two-column graphemes at one-column width", () =>
 	}
 });
 
+function runningResult(agent: string, levels: { thinking?: string; progressThinking?: string } = {}) {
+	return {
+		...result(agent, ""),
+		...(levels.thinking ? { thinking: levels.thinking } : {}),
+		progress: {
+			status: "running", index: 0, agent, toolCount: 0, tokens: 0, durationMs: 0,
+			...(levels.progressThinking ? { thinking: levels.progressThinking } : {}),
+		},
+	};
+}
+
+function singleCard(running: ReturnType<typeof runningResult>, expanded: boolean, renderTheme: object, mapText?: (text: string) => string): string {
+	return componentText(renderSubagentResult({
+		content: [{ type: "text", text: "running" }],
+		details: { mode: "single", results: [running] },
+	} as never, { expanded }, renderTheme as never), mapText);
+}
+
+test("a running single card glyph takes the thinking color of its child's recorded level", () => {
+	const cases: Array<[string, ReturnType<typeof runningResult>, string]> = [
+		["level recorded on the result", runningResult("reviewer", { thinking: "low" }), "thinking:low"],
+		["level recorded on progress", runningResult("reviewer", { progressThinking: "xhigh" }), "thinking:xhigh"],
+		["an unknown level string", runningResult("reviewer", { thinking: "bogus" }), "accent"],
+	];
+	for (const [name, running, tone] of cases) {
+		const toned = singleCard(running, false, toneTheme);
+		assert.equal(runningGlyphTone(toned.split("\n")[0]), tone, name);
+		assert.equal(singleCard(running, false, toneTheme, withoutTones), singleCard(running, false, theme), `${name}: text unchanged`);
+	}
+});
+
+test("a single-child glyph with no recorded level takes the main session's color, then accent", () => {
+	const now = Date.now();
+	const jobs = [
+		{ asyncId: "bare-single", asyncDir: "/tmp/bare-single", status: "running", mode: "single", agents: ["scout"], startedAt: now, updatedAt: now, steps: [{ index: 0, agent: "scout", status: "running" }] },
+		{ asyncId: "bare-other", asyncDir: "/tmp/bare-other", status: "running", mode: "single", agents: ["writer"], startedAt: now, updatedAt: now, steps: [{ index: 0, agent: "writer", status: "running", thinking: "low" }] },
+	] as AsyncJobState[];
+	const singleRow = (lines: string[]) => runningGlyphTone(lines.find((line) => line.includes("scout") && runningGlyphTone(line)));
+	setMainThinkingLevelSource(() => "high");
+	try {
+		assert.equal(runningGlyphTone(singleCard(runningResult("reviewer"), false, toneTheme).split("\n")[0]), "thinking:high", "foreground card");
+		assert.equal(singleRow(buildWidgetLines(jobs, toneTheme as never, 160, false, 0)), "thinking:high", "async widget row");
+	} finally {
+		setMainThinkingLevelSource(() => undefined);
+	}
+	assert.equal(runningGlyphTone(singleCard(runningResult("reviewer"), false, toneTheme).split("\n")[0]), "accent", "no main level either");
+	assert.equal(singleRow(buildWidgetLines(jobs, toneTheme as never, 160, false, 0)), "accent", "no main level either");
+});
+
+test("an expanded running single card colors its glyph and running label with the child's level", () => {
+	const running = runningResult("reviewer", { thinking: "medium" });
+	const toned = singleCard(running, true, toneTheme);
+	const header = toned.split("\n")[0];
+	assert.equal(runningGlyphTone(header), "thinking:medium");
+	assert.match(header ?? "", /⟦thinking:medium⟧running⟦\/⟧/);
+	assert.equal(singleCard(running, true, toneTheme, withoutTones), singleCard(running, true, theme));
+});
+
+test("finished single cards keep their state tones whatever the child's level", () => {
+	const completed = { ...result("reviewer", "done"), thinking: "high" };
+	const toned = componentText(renderSubagentResult({
+		content: [{ type: "text", text: "done" }],
+		details: { mode: "single", results: [completed] },
+	} as never, { expanded: false }, toneTheme as never));
+	assert.match(toned.split("\n")[0] ?? "", /^⟦success⟧✓⟦\/⟧/);
+	assert.doesNotMatch(toned, /thinking:/);
+});
+
+test("multi-child cards keep an accent header while each child row takes its own level", () => {
+	const details = {
+		mode: "parallel",
+		results: [
+			{ ...runningResult("scout", { thinking: "low" }), progress: { status: "running", index: 0, agent: "scout", toolCount: 0, tokens: 0, durationMs: 0 } },
+			{ ...runningResult("reviewer", { thinking: "high" }), progress: { status: "running", index: 1, agent: "reviewer", toolCount: 0, tokens: 0, durationMs: 0 } },
+		],
+	};
+	for (const expanded of [false, true]) {
+		const render = (renderTheme: object, mapText?: (text: string) => string) => componentText(renderSubagentResult({ content: [{ type: "text", text: "running" }], details } as never, { expanded }, renderTheme as never), mapText);
+		const lines = render(toneTheme).split("\n");
+		assert.equal(runningGlyphTone(lines[0]), "accent", `header stays accent (expanded=${expanded})`);
+		assert.equal(runningGlyphTone(lines.find((line) => line.includes("scout") && runningGlyphTone(line))), "thinking:low", `scout row (expanded=${expanded})`);
+		assert.equal(runningGlyphTone(lines.find((line) => line.includes("reviewer") && runningGlyphTone(line))), "thinking:high", `reviewer row (expanded=${expanded})`);
+		assert.equal(render(toneTheme, withoutTones), render(theme), `text unchanged (expanded=${expanded})`);
+	}
+});
+
+test("async widget rows for one child take its level while headers and multi-step job rows stay accent", () => {
+	const now = Date.now();
+	const jobs = [
+		{
+			asyncId: "single-job", asyncDir: "/tmp/single-job", status: "running", mode: "single", agents: ["scout"], startedAt: now, updatedAt: now,
+			steps: [{ index: 0, agent: "scout", status: "running", thinking: "high" }],
+		},
+		{
+			asyncId: "chain-job", asyncDir: "/tmp/chain-job", status: "running", mode: "chain", agents: ["planner", "worker"], startedAt: now, updatedAt: now,
+			steps: [
+				{ index: 0, agent: "planner", status: "running", thinking: "medium" },
+				{ index: 1, agent: "worker", status: "pending", thinking: "xhigh" },
+			],
+			stepsTotal: 2,
+		},
+	] as AsyncJobState[];
+	for (const expanded of [false, true]) {
+		const lines = buildWidgetLines(jobs, toneTheme as never, 160, expanded, 0);
+		assert.equal(runningGlyphTone(lines[0]), "accent", `header (expanded=${expanded})`);
+		assert.equal(runningGlyphTone(lines.find((line) => line.includes("scout") && runningGlyphTone(line))), "thinking:high", `single job (expanded=${expanded})`);
+		assert.equal(runningGlyphTone(lines.find((line) => line.includes("chain") && runningGlyphTone(line))), "accent", `chain job (expanded=${expanded})`);
+		assert.deepEqual(lines.map(withoutTones), buildWidgetLines(jobs, theme as never, 160, expanded, 0), `text unchanged (expanded=${expanded})`);
+	}
+	const expandedLines = buildWidgetLines(jobs, toneTheme as never, 160, true, 0);
+	const plannerRow = expandedLines.find((line) => line.includes("planner") && runningGlyphTone(line) && !line.includes("chain"));
+	assert.equal(runningGlyphTone(plannerRow), "thinking:medium", "chain step row");
+	assert.match(plannerRow ?? "", /⟦thinking:medium⟧running⟦\/⟧/);
+});
+
+test("workflow checklist rows take their child's level while phase rows stay accent", () => {
+	const details = {
+		mode: "workflow",
+		results: [{ ...runningResult("writer", { thinking: "max" }), workflowKey: "write" }],
+		workflowGraph: {
+			runId: "wf-levels", mode: "workflow",
+			phases: [{ title: "write", nodeIds: ["write"] }],
+			nodes: [{ id: "write", kind: "agent", agent: "writer", label: "Write", status: "running", flatIndex: 0 }],
+		},
+	};
+	const lines = componentText(renderSubagentResult({ content: [{ type: "text", text: "running" }], details } as never, { expanded: true }, toneTheme as never)).split("\n");
+	assert.equal(runningGlyphTone(lines.find((line) => line.includes("Write") && runningGlyphTone(line))), "thinking:max");
+	assert.ok(lines.some((line) => /write/i.test(line) && runningGlyphTone(line) === "accent"), "phase row stays accent");
+});
+
+test("workflow chat progress rows take the level of the child with the same key", () => {
+	const render = (renderTheme: object, mapText?: (text: string) => string) => componentText(renderSubagentResult({
+		content: [{ type: "text", text: "Workflow running." }],
+		details: {
+			mode: "workflow", runId: "wf_levels", results: [],
+			chatProgress: { mode: "live-card", repoRelation: "same", repoLabel: "pi-subagents" },
+			workflowChildren: { version: 1, parentToolCallId: "call", workflowRunId: "wf_levels", inventoryComplete: false, workflowState: "running", children: [{ childId: "tests", state: "running", thinking: "high" }] },
+			workflow: { trace: [
+				{ operation: "run", key: "tests", state: "started", phase: "Validation", label: "focused suite" },
+				{ operation: "run", key: "lint", state: "started", phase: "Validation", label: "lint" },
+			], emits: [], console: [] },
+		},
+	} as never, { expanded: false }, renderTheme as never), mapText);
+	const lines = render(toneTheme).split("\n");
+	assert.equal(runningGlyphTone(lines.find((line) => line.includes("tests focused suite"))), "thinking:high");
+	assert.equal(runningGlyphTone(lines.find((line) => line.includes("lint") && !line.includes("focused"))), "accent");
+	assert.equal(render(toneTheme, withoutTones), render(theme));
+});
+
+test("glyphs that stand for several children take the main session's thinking color", () => {
+	setMainThinkingLevelSource(() => "xhigh");
+	try {
+		const details = {
+			mode: "parallel",
+			results: [
+				{ ...runningResult("scout", { thinking: "low" }), progress: { status: "running", index: 0, agent: "scout", toolCount: 0, tokens: 0, durationMs: 0 } },
+				{ ...runningResult("reviewer"), progress: { status: "running", index: 1, agent: "reviewer", toolCount: 0, tokens: 0, durationMs: 0 } },
+			],
+		};
+		for (const expanded of [false, true]) {
+			const lines = componentText(renderSubagentResult({ content: [{ type: "text", text: "running" }], details } as never, { expanded }, toneTheme as never)).split("\n");
+			assert.equal(runningGlyphTone(lines[0]), "thinking:xhigh", `multi header (expanded=${expanded})`);
+			assert.equal(runningGlyphTone(lines.find((line) => line.includes("scout") && runningGlyphTone(line))), "thinking:low", `child row keeps its own level (expanded=${expanded})`);
+			assert.equal(runningGlyphTone(lines.find((line) => line.includes("reviewer") && runningGlyphTone(line))), "thinking:xhigh", `child without a level takes the main level (expanded=${expanded})`);
+		}
+
+		const now = Date.now();
+		const jobs = [{
+			asyncId: "single-job", asyncDir: "/tmp/single-job", status: "running", mode: "single", agents: ["scout"], startedAt: now, updatedAt: now,
+			steps: [{ index: 0, agent: "scout", status: "running", thinking: "low" }],
+		}, {
+			asyncId: "chain-job", asyncDir: "/tmp/chain-job", status: "running", mode: "chain", agents: ["planner", "worker"], startedAt: now, updatedAt: now,
+			steps: [{ index: 0, agent: "planner", status: "running", thinking: "medium" }, { index: 1, agent: "worker", status: "pending" }], stepsTotal: 2,
+		}] as AsyncJobState[];
+		for (const expanded of [false, true]) {
+			const lines = buildWidgetLines(jobs, toneTheme as never, 160, expanded, 0);
+			assert.equal(runningGlyphTone(lines[0]), "thinking:xhigh", `widget header (expanded=${expanded})`);
+			assert.match(lines[0] ?? "", /⟦thinking:xhigh⟧(Async agents|subagents)⟦\/⟧/, `widget title (expanded=${expanded})`);
+			assert.equal(runningGlyphTone(lines.find((line) => line.includes("chain") && runningGlyphTone(line))), "thinking:xhigh", `chain job row (expanded=${expanded})`);
+		}
+
+		const summary = renderSubagentSummary({ content: [{ type: "text", text: "running" }], details } as never, { isPartial: true }, toneTheme as never);
+		assert.match(componentText(summary), /⟦thinking:xhigh⟧●⟦\/⟧/, "multi summary glyph");
+	} finally {
+		setMainThinkingLevelSource(() => undefined);
+	}
+});
+
+test("compact workflow lanes take their one child's level, or the main session's for several", () => {
+	setMainThinkingLevelSource(() => "xhigh");
+	try {
+		const now = Date.now();
+		const job = {
+			asyncId: "wf-lanes", asyncDir: "/tmp/wf-lanes", status: "running", mode: "workflow", startedAt: now, updatedAt: now,
+			preflight: { version: 1, coverage: "partial", lanes: [{ key: "review", mode: "review" }, { key: "write", mode: "mutation" }] },
+			steps: [
+				{ index: 0, workflowKey: "review.a", agent: "reviewer", status: "running", thinking: "low" },
+				{ index: 1, workflowKey: "review.b", agent: "reviewer", status: "running", thinking: "high" },
+				{ index: 2, workflowKey: "write", agent: "worker", status: "running", thinking: "medium" },
+			],
+			workflow: { trace: [], emits: [], console: [] },
+		} as AsyncJobState;
+		const lines = buildWidgetLines([job], toneTheme as never, 180, false, 0);
+		const laneTone = (key: string) => runningGlyphTone(lines.find((line) => new RegExp(`\\s${key} \u00b7 `).test(withoutTones(line))));
+		assert.equal(laneTone("review"), "thinking:xhigh", "two children");
+		assert.equal(laneTone("write"), "thinking:medium", "one child");
+	} finally {
+		setMainThinkingLevelSource(() => undefined);
+	}
+});
+
 test("running single-subagent cards show the configured detach shortcut", () => {
 	const running = {
 		...result("reviewer", ""),
@@ -380,7 +609,7 @@ test("collapsed async workflow widgets render compact lane rows while expanded w
 	assert.match(collapsed, /review · reviewer · queued/);
 	assert.match(collapsed, /gate · reviewer · queued/);
 	assert.doesNotMatch(collapsed, /bottleneck/);
-	assert.match(collapsed, /Configure the expand key for details/);
+	assert.match(collapsed, /Press the expand key for details/);
 	assert.doesNotMatch(collapsed, /Fleet/);
 	assert.equal((collapsed.match(/1\/5 done · 1 active · 3 queued/g) ?? []).length, 1);
 	assert.doesNotMatch(collapsed, /Step \d\/\d|task:|workspace:|ref:|out(?:put)?:/i);
@@ -434,7 +663,7 @@ test("compact foreground workflow results use checklist phases instead of child 
 	assert.match(text, /1\/2 done · 1 active/);
 	assert.match(text, /✓ inventory/);
 	assert.match(text, /writers 1 active/);
-	assert.match(text, /Configure the expand key for live detail/);
+	assert.match(text, /Press the expand key for live detail/);
 	assert.doesNotMatch(text, /Fleet/);
 	assert.doesNotMatch(text, /Step \d\/\d|task:|workspace:|ref:|out(?:put)?:/i);
 });
@@ -646,7 +875,7 @@ test("main-window renderer config caps only collapsed rich result rows", () => {
 	}, { expanded: false }, theme as any, undefined, { compactResultMaxLines: 3 }).render(120);
 
 	assert.equal(rendered.length, 3);
-	assert.match(rendered[2]!, /rows hidden · Configure the expand key to view them/);
+	assert.match(rendered[2]!, /rows hidden · Press the expand key to expand/);
 
 	const expanded = renderSubagentResult({
 		content: [{ type: "text", text: "done" }],
@@ -662,4 +891,95 @@ test("main-window renderer config caps only collapsed rich result rows", () => {
 
 	assert.ok(expanded.length > 3);
 	assert.doesNotMatch(expanded.join("\n"), /rows hidden/);
+});
+
+test("expanded async rows show the only running child's whole task; two running children keep one-line tasks", () => {
+	const shared = "Implement the fix described in the report below and keep the change narrow, focused, and tested.";
+	const brief = (file: string) => [
+		shared,
+		`Objective: make ${file} reject expired sessions before it reads the cache.`,
+		"Context: the cache keeps entries for one hour after logout.",
+		`Constraints: touch only ${file} and its unit test; no new config.`,
+		"Deliverable: one commit with a focused regression test.",
+		"Acceptance: the new test fails on main and passes with the change.",
+	];
+	const job = (tasks: string[], running = tasks.length): AsyncJobState => ({
+		asyncId: "expanded-task",
+		asyncDir: "/tmp/expanded-task",
+		status: "running",
+		mode: "parallel",
+		agents: tasks.map(() => "worker"),
+		stepsTotal: tasks.length,
+		startedAt: 1_000,
+		updatedAt: 2_000,
+		steps: tasks.map((description, index) => ({ index, agent: "worker", status: index < running ? "running" : "complete", description })),
+	});
+	const auth = brief("src/auth.ts");
+	const billing = brief("src/billing.ts");
+	const both = job([auth.join("\n"), billing.join("\n")]);
+
+	const collapsed = buildWidgetLines([both], theme, 120);
+	const collapsedTasks = collapsed.filter((line) => line.includes("task: "));
+	assert.equal(collapsedTasks.length, 2);
+	for (const line of collapsedTasks) assert.ok(line.endsWith(`task: ${shared.slice(0, 93)}...`), line);
+
+	const expandedBoth = buildWidgetLines([both], theme, 120, true);
+	assert.ok(expandedBoth.some((line) => line.includes("Agent 1/2:")) && expandedBoth.some((line) => line.includes("Agent 2/2:")), expandedBoth.join("\n"));
+	const expandedTasks = expandedBoth.filter((line) => line.includes("task: "));
+	assert.equal(expandedTasks.length, 2);
+	for (const line of expandedTasks) assert.ok(line.endsWith(`task: ${shared.slice(0, 93)}...`), line);
+	assert.equal(expandedBoth.length, buildWidgetLines([job(["Short task one", "Short task two"])], theme, 120, true).length);
+
+	const expanded = buildWidgetLines([job([auth.join("\n"), billing.join("\n")], 1)], theme, 120, true);
+	for (const authored of auth) {
+		assert.ok(expanded.some((line) => line.trim() === authored || line.trim() === `task: ${authored}`), `missing ${authored}\n${expanded.join("\n")}`);
+	}
+	assert.ok(expanded.every((line) => visibleWidth(line) <= 120));
+
+	const narrow = buildWidgetLines([job([auth.join("\n")])], theme, 80, true);
+	assert.ok(narrow.every((line) => visibleWidth(line) <= 80));
+	const narrowTask = narrow.slice(narrow.findIndex((line) => line.trim().startsWith("task: ")), narrow.findIndex((line) => line.includes("⎿")));
+	assert.equal(narrowTask.join("").replace(/\s/g, ""), `task:${auth.join("")}`.replace(/\s/g, ""), narrow.join("\n"));
+
+	const huge = buildWidgetLines([job(["word ".repeat(20_000)])], theme, 120, true);
+	const taskStart = huge.findIndex((line) => line.trim().startsWith("task: "));
+	const marker = huge.findIndex((line) => line.trim() === "…");
+	assert.ok(taskStart >= 0 && marker > taskStart && marker - taskStart <= 8, huge.join("\n"));
+
+	const structured = ["Fix the login bug.", "  - check src/auth.ts", "\t- then src/session.ts", "", "", "Report: one paragraph."].join("\n");
+	const layout = buildWidgetLines([job([structured])], theme, 120, true);
+	const layoutStart = layout.findIndex((line) => line.endsWith("task: Fix the login bug."));
+	const layoutIndent = layout[layoutStart]!.indexOf("task: ");
+	assert.deepEqual(layout.slice(layoutStart + 1, layoutStart + 5).map((line) => line.slice(layoutIndent)), ["  - check src/auth.ts", "  - then src/session.ts", "", "Report: one paragraph."], layout.join("\n"));
+
+	const single = (asyncId: string, running: boolean, description: string): AsyncJobState => ({
+		asyncId,
+		asyncDir: `/tmp/${asyncId}`,
+		status: running ? "running" : "complete",
+		mode: "single",
+		agents: ["worker"],
+		startedAt: 1_000,
+		updatedAt: 2_000,
+		steps: [{ index: 0, agent: "worker", status: running ? "running" : "complete", description }],
+	});
+	const hasAuthTask = (lines: string[]) => auth.slice(1).every((authored) => lines.some((line) => line.endsWith(authored)));
+	const pair = [single("live-one", true, auth.join("\n")), single("done-one", false, billing.join("\n"))];
+	const pairExpanded = buildWidgetLines(pair, theme, 120, true);
+	assert.ok(hasAuthTask(pairExpanded), pairExpanded.join("\n"));
+	assert.ok(!pairExpanded.some((line) => line.includes("Objective: make src/billing.ts")), pairExpanded.join("\n"));
+	assert.ok(!buildWidgetLines(pair, theme, 120).some((line) => line.includes("Objective:")));
+
+	const workflow: AsyncJobState = {
+		asyncId: "wf-parent",
+		asyncDir: "/tmp/wf-parent",
+		status: "running",
+		mode: "workflow",
+		agents: ["worker"],
+		startedAt: 1_000,
+		updatedAt: 2_000,
+		steps: [{ index: 0, agent: "worker", status: "running", workflowKey: "impl", runId: "wf-child", description: auth.join("\n") }],
+	};
+	const workflowChild: AsyncJobState = { ...single("wf-child", true, auth.join("\n")), parentWorkflowRunId: "wf-parent", workflowKey: "impl" };
+	const workflowExpanded = buildWidgetLines([workflow, workflowChild], theme, 120, true);
+	assert.ok(hasAuthTask(workflowExpanded), workflowExpanded.join("\n"));
 });

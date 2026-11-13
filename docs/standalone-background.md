@@ -1,6 +1,6 @@
 # Standalone background execution
 
-Supported standalone target: **official Pi 0.86.1, Linux x64**. Keep its adjacent release assets with the executable. Other versions, operating systems, architectures and packagers are outside the fully validated support target; limited experimental Windows coverage is described below.
+Supported standalone target: **official Pi 1.2.0, Linux x64**. Keep its adjacent release assets with the executable. Other versions, operating systems, architectures and packagers are outside the fully validated support target; limited experimental Windows coverage is described below.
 
 Pi's extension loader supplies its embedded SDK to `binary-bootstrap.ts`, which awaits the existing configured runner before exiting. Startup authorization, revival leases, controls, disposal and process-close observation remain shared with npm. Each independent run has its own host; native sessions inside that run share it. No per-session CLI protocol, runtime download/install, alternate SDK or foreground fallback is introduced. Npm Pi keeps its Node runner, peer aliases and detected npm `PI_PACKAGE_DIR` override (including refusal when no npm root exists).
 
@@ -33,17 +33,17 @@ The `official-standalone` CI job runs this gate. Both archive and executable has
 
 The matrix covers public launch/notification, workflows, same-run concurrent sessions, parallel stop, targeted steer/interrupt, child/tool/run deadlines, missing bootstrap, post-spawn persistence/authorization failures, SDK initialization failure, malformed bootstrap input/EOF with an authorized positive control, and competing revival. The provider is deterministic, but SDK sessions, runner and public extension are real. Only startup-failure writes are faulted.
 
-`matrix.json` records complete/partial results; `inputs.json` freezes source identities and every mode must use the same package hash. Inspect per-mode logs, `identity.json`, lifecycle/notification evidence, `status.json` and `process-terminal.json`. A persisted result is not exit proof: the gate separately awaits observed close, verifies dead PIDs before sandbox teardown and checks session shutdown/lease release. CI retains receipts and at most 32 MiB compressed lifecycle evidence. Contributor-head passes do not establish acceptance for a different integration snapshot.
+`matrix.json` records complete/partial results with per-mode durations; `inputs.json` freezes source identities. The candidate is built and packed once and every mode must use that package hash. Modes run one at a time; they are CPU-bound and miss their deadlines when run concurrently. Inspect per-mode logs, `identity.json`, lifecycle/notification evidence, `status.json` and `process-terminal.json`. A persisted result is not exit proof: the gate separately awaits observed close, verifies dead PIDs before sandbox teardown and checks session shutdown/lease release. CI retains receipts and at most 32 MiB compressed lifecycle evidence. Contributor-head passes do not establish acceptance for a different integration snapshot.
 
 For a focused diagnostic, use `node test/smoke/standalone-background.mjs "$release_dir/pi/pi" "$(mktemp -d)/check" bootstrap-errors` (or another matrix mode). A focused pass is not the complete gate.
 
 ## Npm regressions and local trial
 
-Existing npm clean-install CI covers real SDK 0.86.1. The standalone CI job also checks the public npm launch path without execution-time network:
+Existing npm clean-install CI covers real SDK 1.2.0. The standalone CI job also checks the public npm launch path without execution-time network:
 
 ```bash
 npm_checks="$(mktemp -d)"
-node test/smoke/clean-install.mjs "$npm_checks/sdk" 0.86.1
+node test/smoke/clean-install.mjs "$npm_checks/sdk" 1.2.0
 node test/smoke/npm-background.mjs "$npm_checks/sdk" "$npm_checks/launch"
 ```
 

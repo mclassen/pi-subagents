@@ -10,6 +10,7 @@ import {
 	type SubagentDelegationUpdate,
 } from "../api/delegation.ts";
 import { parseSubagentDelegationRequest } from "./delegation-request.ts";
+import { sameProviderDiagnostics } from "../shared/provider-diagnostics.ts";
 import {
 	parsePromptTemplateRequest,
 	toDelegationUpdate,
@@ -110,7 +111,8 @@ function sameStructuredDelegationUpdateProgress(left: SubagentDelegationUpdate, 
 		&& left.model === right.model
 		&& left.toolCount === right.toolCount
 		&& left.tokens === right.tokens
-		&& sameUpdateUsage(left.usage, right.usage);
+		&& sameUpdateUsage(left.usage, right.usage)
+		&& sameProviderDiagnostics(left.providerDiagnostics, right.providerDiagnostics);
 }
 
 export function registerPromptTemplateDelegationBridge<Ctx extends { cwd?: string }>(
@@ -234,7 +236,7 @@ export function registerPromptTemplateDelegationBridge<Ctx extends { cwd?: strin
 						requestId: legacy.requestId,
 						messages: [],
 						isError: true,
-						errorText: "Legacy prompt-template tasks/worktree orchestration was removed; use workflowScript.",
+						errorText: "Legacy prompt-template tasks/worktree orchestration was removed; use a workflow script.",
 					});
 					return;
 				}
@@ -245,7 +247,7 @@ export function registerPromptTemplateDelegationBridge<Ctx extends { cwd?: strin
 				...legacyRequest,
 				messages: [],
 				isError: true,
-				errorText: "Legacy prompt-template direct delegation was removed; use workflowScript through the subagent tool or structured delegation.",
+				errorText: "Legacy prompt-template direct delegation was removed; use a workflow script through the subagent tool or structured delegation.",
 			} satisfies PromptTemplateDelegationResponse);
 			return;
 		}

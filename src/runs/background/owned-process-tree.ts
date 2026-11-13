@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
 import type { ProcessTreeTerminal } from "../../shared/types.ts";
-import { observeWindowsProcesses, signalRetainedWindowsProcesses, releaseWindowsProcesses, type RetainedWindowsProcess, type WindowsProcessSnapshot } from "./windows-process-identity.ts";
+import { observeWindowsProcesses, observeWindowsProcessesAsync, signalRetainedWindowsProcesses, releaseWindowsProcesses, type RetainedWindowsProcess, type WindowsProcessSnapshot } from "./windows-process-identity.ts";
 export type { WindowsProcessSnapshot } from "./windows-process-identity.ts";
 
 const DEFAULT_TERM_GRACE_MS = 3000;
@@ -276,21 +276,30 @@ export function createOwnedProcessTreeController(
 			ownershipMonitorFailure = descendants.diagnostic;
 		}
 	}
+	// Async and non-overlapping: a synchronous PowerShell snapshot blocks the event loop for ~0.5-1 s.
+	let monitorTick: Promise<void> | undefined;
+	let monitorStopped = false;
+	const observeOwnership = async (): Promise<void> => {
+		const observedSnapshot = await observeWindowsProcessesAsync(retainedWindowsProcesses);
+		const snapshot = Array.isArray(observedSnapshot) ? reconcileWindowsProcessSnapshot(observedSnapshot, retainedWindowsProcesses, windowsIdentities) : observedSnapshot;
+		if (!Array.isArray(snapshot)) {
+			ownershipMonitorFailure ??= snapshot.diagnostic;
+			return;
+		}
+		if (!windowsIdentities.has(pid)) return;
+		const descendants = discoverVerifiedOwnedWindowsProcesses(snapshot, windowsIdentities);
+		if (!Array.isArray(descendants)) {
+			ownershipMonitorFailure ??= descendants.diagnostic;
+			return;
+		}
+		for (const descendant of descendants) windowsIdentities.set(descendant.pid, descendant.creationDate);
+	};
 	const ownershipMonitor = windows
 		? setInterval(() => {
-			const observedSnapshot = observeWindowsProcesses(retainedWindowsProcesses);
-			const snapshot = Array.isArray(observedSnapshot) ? reconcileWindowsProcessSnapshot(observedSnapshot, retainedWindowsProcesses, windowsIdentities) : observedSnapshot;
-			if (!Array.isArray(snapshot)) {
-				ownershipMonitorFailure ??= snapshot.diagnostic;
-				return;
-			}
-			if (!windowsIdentities.has(pid)) return;
-			const descendants = discoverVerifiedOwnedWindowsProcesses(snapshot, windowsIdentities);
-			if (!Array.isArray(descendants)) {
-				ownershipMonitorFailure ??= descendants.diagnostic;
-				return;
-			}
-			for (const descendant of descendants) windowsIdentities.set(descendant.pid, descendant.creationDate);
+			if (monitorTick || monitorStopped) return;
+			monitorTick = observeOwnership()
+				.catch((error: unknown) => { ownershipMonitorFailure ??= error instanceof Error ? error.message : String(error); })
+				.finally(() => { monitorTick = undefined; });
 		}, 250)
 		: undefined;
 	ownershipMonitor?.unref();
@@ -311,8 +320,11 @@ export function createOwnedProcessTreeController(
 	const finish = (writerClosed: boolean): Promise<ProcessTreeTerminal> => {
 		if (termination) return termination;
 		if (ownershipMonitor) clearInterval(ownershipMonitor);
+		monitorStopped = true;
 		termination = (async (): Promise<ProcessTreeTerminal> => {
 			if (windows) {
+				// Let an in-flight observation finish updating retained handles before termination uses them.
+				await monitorTick;
 				if (!Array.isArray(initialWindowsProcesses)) {
 					return { state: "unknown", reason: "verification-failed", diagnostic: initialWindowsProcesses!.diagnostic };
 				}
@@ -370,6 +382,9 @@ export function createOwnedProcessTreeController(
 		finishAfterWriterClose: () => finish(true),
 		dispose: () => {
 			if (ownershipMonitor) clearInterval(ownershipMonitor);
+			monitorStopped = true;
+			// An observation still in flight may retain new handles after this release; release those too.
+			if (windows && monitorTick) void monitorTick.then(() => { releaseWindowsProcesses(retainedWindowsProcesses); });
 			if (!termination) {
 				termination = Promise.resolve(settleWithRelease({
 					state: "unknown", reason: "verification-failed",

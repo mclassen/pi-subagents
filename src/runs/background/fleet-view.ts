@@ -19,6 +19,7 @@ import { formatNestedRunStatusLines } from "../shared/nested-render.ts";
 import { contextModeLabel, summarizeContextModes } from "../shared/context-mode.ts";
 import { formatAsyncRunOutputPath, formatAsyncRunProgressLabel, listAsyncRuns, type AsyncRunSummary } from "./async-status.ts";
 import { isTrustedRecordedSessionFile } from "../../shared/session-file-trust.ts";
+import { waitToolName } from "../../shared/wait-tool-name.ts";
 
 const DEFAULT_TRANSCRIPT_LINES = 80;
 const MAX_TRANSCRIPT_LINES = 500;
@@ -198,14 +199,14 @@ function sessionMessageParts(record: unknown): SessionTranscriptMessage[] {
 	const parts: SessionTranscriptMessage[] = [];
 	for (const part of content) {
 		if (!part || typeof part !== "object") continue;
-		const entry = part as { type?: unknown; text?: unknown; name?: unknown; toolName?: unknown; args?: unknown; result?: unknown; content?: unknown; isError?: unknown };
+		const entry = part as { type?: unknown; text?: unknown; name?: unknown; toolName?: unknown; arguments?: unknown; result?: unknown; content?: unknown; isError?: unknown };
 		if (typeof entry.text === "string") {
 			if (entry.text.trim()) parts.push({ role, kind: "text", text: entry.text });
 			continue;
 		}
 		if (entry.type === "toolCall" || entry.type === "tool_call") {
 			const name = typeof entry.name === "string" ? entry.name : typeof entry.toolName === "string" ? entry.toolName : "tool";
-			parts.push({ role, kind: "toolCall", name, text: `[tool: ${name}${entry.args === undefined ? "" : ` ${stringifyJsonPreview(entry.args)}`}]` });
+			parts.push({ role, kind: "toolCall", name, text: `[tool: ${name}${entry.arguments === undefined ? "" : ` ${stringifyJsonPreview(entry.arguments)}`}]` });
 			continue;
 		}
 		if (entry.type === "toolResult" || entry.type === "tool_result") {
@@ -334,7 +335,7 @@ function formatDetachedForegroundFleetLines(runs: ForegroundRun[]): string[] {
 		const childSummary = detachedChildren.map((child) => `${fleetChildDisplayName(child)} #${child.index}`).join(", ");
 		lines.push(`- ${run.runId} | detached | ${run.mode}${childSummary ? ` | ${childSummary}` : ""}`);
 		lines.push(`  status: subagent({ action: "status", id: "${run.runId}" })`);
-		lines.push(`  recovery: reply to the supervisor request first, then wait with bg_wait({ id: "${run.runId}" }); do not resume or launch a replacement while any child remains detached.`);
+		lines.push(`  recovery: reply to the supervisor request first, then wait with ${waitToolName()}({ id: "${run.runId}" }); do not resume or launch a replacement while any child remains detached.`);
 	}
 	return lines;
 }
@@ -359,7 +360,7 @@ function formatAsyncFleetLines(runs: AsyncRunSummary[], now = Date.now()): strin
 		const runContext = contextModeLabel(run.context);
 		lines.push(`- ${run.id} | ${run.state}${activity ? ` | ${activity}` : ""} | ${run.mode}${runContext ? ` ${runContext}` : ""} | ${progress}${pending} | ${cwd}`);
 		lines.push(`  status: subagent({ action: "status", id: "${run.id}" })`);
-		lines.push(`  transcript: subagent({ action: "status", id: "${run.id}", view: "transcript" })`);
+		lines.push(`  transcript: subagent({ action: "status", id: "${run.id}", options: { view: "transcript" } })`);
 		for (const step of run.steps) {
 			const display = fleetStepDisplayName(step);
 			const stepContext = contextModeLabel(step.context);
@@ -372,7 +373,7 @@ function formatAsyncFleetLines(runs: AsyncRunSummary[], now = Date.now()): strin
 			if (fs.existsSync(output)) lines.push(`    output: ${shortenPath(output)}`);
 			if (step.sessionFile) lines.push(`    session: ${shortenPath(step.sessionFile)}`);
 			if (step.status === "running" || step.recentOutput?.length || fs.existsSync(output)) {
-				lines.push(`    transcript: subagent({ action: "status", id: "${run.id}", index: ${step.index}, view: "transcript" })`);
+				lines.push(`    transcript: subagent({ action: "status", id: "${run.id}", options: { index: ${step.index}, view: "transcript" } })`);
 			}
 			lines.push(...formatNestedRunStatusLines(step.children, { indent: "    ", commandHints: true, maxLines: 12 }));
 		}
@@ -432,9 +433,9 @@ export function inspectSubagentFleet(_params: FleetViewParams, deps: FleetViewDe
 	const asyncLines = formatAsyncFleetLines(asyncRuns, deps.now?.() ?? Date.now());
 	if (asyncLines.length) lines.push(...asyncLines, "");
 	lines.push("Commands:");
-	lines.push("  Refresh fleet: subagent({ action: \"status\", view: \"fleet\" })");
-	lines.push("  Tail run transcript: subagent({ action: \"status\", id: \"<run-id>\", view: \"transcript\" })");
-	lines.push("  Tail child transcript: subagent({ action: \"status\", id: \"<run-id>\", index: 0, view: \"transcript\" })");
+	lines.push("  Refresh fleet: subagent({ action: \"status\", options: { view: \"fleet\" } })");
+	lines.push("  Tail run transcript: subagent({ action: \"status\", id: \"<run-id>\", options: { view: \"transcript\" } })");
+	lines.push("  Tail child transcript: subagent({ action: \"status\", id: \"<run-id>\", options: { index: 0, view: \"transcript\" } })");
 
 	return { content: [{ type: "text", text: lines.join("\n").trimEnd() }], details: { mode: "management", results: [] } };
 }
@@ -490,8 +491,6 @@ function appendKnownArtifacts(lines: string[], input: { outputPaths: string[]; s
 }
 
 /**
- * Sanitizes each assembled line independently.
- *
  * Sanitizing the joined response would let a single binary fragment in child
  * output collapse the whole transcript, including run state, artifact paths, and
  * warnings, into the binary placeholder. Per-line sanitization keeps that damage

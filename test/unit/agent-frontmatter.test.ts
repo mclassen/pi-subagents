@@ -8,7 +8,7 @@ import { handleManagementAction } from "../../src/agents/agent-management.ts";
 import { serializeAgent } from "../../src/agents/agent-serializer.ts";
 import { parseChain, serializeChain } from "../../src/agents/chain-serializer.ts";
 import { discoverAgents, discoverAgentsAll, inspectAgentDefinitionDirectory, type AgentConfig } from "../../src/agents/agents.ts";
-import { parseFrontmatter } from "../../src/agents/frontmatter.ts";
+import { parseFrontmatter, parseFrontmatterList, parseUnquotedList } from "../../src/agents/frontmatter.ts";
 import { buildInProcessChildLaunch } from "../../src/runs/shared/child-launch.ts";
 import { applyThinkingSuffix } from "../../src/runs/shared/child-tool-plan.ts";
 import { THINKING_LEVELS } from "../../src/shared/model-info.ts";
@@ -273,6 +273,96 @@ body`);
 
 		assert.equal(afterIndented.frontmatter.description, "normal\n  code\n\nnext");
 		assert.equal(beforeIndented.frontmatter.description, "normal\n\n  code\nnext");
+	});
+});
+
+describe("quoted names in tool and extension lists", () => {
+	it("reads each quoted item without its quote marks", () => {
+		const toolsOf = (value: string) => parseUnquotedList(parseFrontmatter(`---\ntools: ${value}\nname: worker\n---\nbody`).frontmatter.tools);
+		assert.deepEqual(toolsOf('"read", "bash"'), ["read", "bash"]);
+		assert.deepEqual(toolsOf("'read', 'bash'"), ["read", "bash"]);
+		assert.deepEqual(toolsOf('"read"'), ["read"]);
+		assert.deepEqual(parseUnquotedList(parseFrontmatter('---\ntools:\n  - "read"\n  - bash\nname: worker\n---\nbody').frontmatter.tools), ["read", "bash"]);
+		assert.deepEqual(toolsOf("false"), ["false"]);
+		assert.equal(parseUnquotedList(undefined), undefined);
+		const description = parseFrontmatter('---\ndescription: "Review \\"a\\", then continue"\nname: worker\n---\nbody');
+		assert.equal(description.frontmatter.description, 'Review \\"a\\", then continue');
+	});
+
+	it("loads quoted tools and extension paths as plain names", () => withTempHome(() => {
+		const project = fs.mkdtempSync(path.join(os.tmpdir(), "pi-quoted-project-"));
+		tempDirs.push(project);
+		const agentFile = path.join(project, ".pi", "agents", "reviewer.md");
+		writeAgent(agentFile, [
+			"---",
+			"name: reviewer",
+			"description: Reviews with quoted tools",
+			'tools: "read", "bash"',
+			`extensions: "./ext/a.ts", './ext/b.ts'`,
+			"---",
+			"Review.",
+			"",
+		].join("\n"));
+		const agent = discoverAgents(project, "project").agents.find((item) => item.name === "reviewer");
+		assert.deepEqual(agent?.tools, ["read", "bash"]);
+		const agentDir = path.dirname(agentFile);
+		assert.deepEqual(agent?.extensions, [path.resolve(agentDir, "ext/a.ts"), path.resolve(agentDir, "ext/b.ts")]);
+	}));
+});
+
+describe("frontmatter comments", () => {
+	const toolsOf = (frontmatter: string) => parseFrontmatterList(parseFrontmatter(`---\n${frontmatter}\nname: worker\n---\nbody`).frontmatter.tools);
+
+	it("ignores YAML comments in tool lists", () => {
+		assert.deepEqual(toolsOf("tools:\n  - read\n  # note\n  - bash"), ["read", "bash"]);
+		assert.deepEqual(toolsOf("tools:\n  - read\n# note\n  - bash"), ["read", "bash"]);
+		assert.deepEqual(toolsOf("tools:\n  - read # why\n  - bash"), ["read", "bash"]);
+		assert.deepEqual(toolsOf("tools:\n  - read\n  # note, more\n  - bash"), ["read", "bash"]);
+	});
+
+	it("keeps # inside quoted list items and block scalars", () => {
+		assert.deepEqual(toolsOf('tools:\n  - "a # b"\n  - bash'), ['"a # b"', "bash"]);
+		assert.deepEqual(parseFrontmatterList(parseFrontmatter('---\ndefaultReads: "notes #1.md"\n---\nbody').frontmatter.defaultReads), ["notes #1.md"]);
+		const parsed = parseFrontmatter(`---
+description: |
+  first
+  # kept
+notes: >
+  one
+  # two
+---
+body`);
+		assert.equal(parsed.frontmatter.description, "first\n# kept");
+		assert.equal(parsed.frontmatter.notes, "one # two");
+	});
+});
+
+describe("blank lines in nested frontmatter blocks", () => {
+	const fm = (body: string) => parseFrontmatter(`---\n${body}---\npayload`);
+
+	it("preserves a nested block value across exactly-empty lines", () => {
+		const parsed = fm("runner:\n  type: external-cli\n  command: python3\n  args:\n    - -c\n    - |\n      import hashlib\n\n      x = 1\n      print('ok')\nname: t\n");
+		assert.equal(parsed.frontmatter.runner, "type: external-cli\ncommand: python3\nargs:\n  - -c\n  - |\n    import hashlib\n\n    x = 1\n    print('ok')");
+		assert.equal(parsed.frontmatter.name, "t");
+	});
+
+	it("keeps list items after an exactly-empty line and drops no comment into the list", () => {
+		const parsed = fm("tools:\n  - read\n\n# note\n\n  - bash\nname: x\n");
+		assert.deepEqual(parseFrontmatterList(parsed.frontmatter.tools), ["read", "bash"]);
+		assert.equal(parsed.frontmatter.name, "x");
+	});
+
+	it("keeps edge blank lines out of nested block values", () => {
+		assert.equal(fm("runner:\n  type: x\n\nname: z\n").frontmatter.runner, "type: x");
+		assert.equal(fm("runner:\n  type: x\n\n").frontmatter.runner, "type: x");
+		assert.equal(fm("runner:\n\n\n  type: x\n").frontmatter.runner, "type: x");
+		assert.equal(fm("runner:\n  type: x\n  \nname: z\n").frontmatter.runner, "type: x\n");
+		assert.equal(fm("async:\n  true\n\n  \nname: x\n").frontmatter.async, "true");
+	});
+
+	it("leaves literal and folded block edges unchanged", () => {
+		assert.equal(fm("prompt: |\n  hello\n\nname: x\n").frontmatter.prompt, "hello\n");
+		assert.equal(fm("description: >\n  normal\n\n  next\nname: x\n").frontmatter.description, "normal\nnext");
 	});
 });
 
@@ -1269,6 +1359,8 @@ Agent prompt
 				},
 			},
 		});
+		// Mark this fixture as the project root, even when /tmp is a project.
+		fs.mkdirSync(path.join(dir, ".pi"));
 		writeAgent(path.join(dir, "root-agent.md"), `---
 name: root-agent
 description: Root package agent
@@ -1590,6 +1682,29 @@ Do work
 	});
 });
 
+describe("agent launcher frontmatter", () => {
+	it("reads a launcher name and rejects invalid names, external runners and machine placement", () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-agent-launcher-"));
+		tempDirs.push(dir);
+		const agentsDir = path.join(dir, ".pi", "agents");
+		writeAgent(path.join(agentsDir, "sandboxed.md"), "---\nname: sandboxed\ndescription: Sandboxed\nlauncher: net\n---\nWork.\n");
+		writeAgent(path.join(agentsDir, "placed.md"), "---\nname: placed\ndescription: Placed\nlauncher: net\nmachine: workmac\n---\nWork.\n");
+		writeAgent(path.join(agentsDir, "quoted.md"), "---\nname: quoted\ndescription: Quoted\nlauncher: \"'net'\"\n---\nWork.\n");
+		writeAgent(path.join(agentsDir, "spaced.md"), "---\nname: spaced\ndescription: Spaced\nlauncher: a b\n---\nWork.\n");
+		writeAgent(path.join(agentsDir, "external.md"), "---\nname: external\ndescription: External\nlauncher: net\nrunner:\n  type: external-cli\n  command: node\n---\nWork.\n");
+
+		const result = discoverAgents(dir, "project");
+		const sandboxed = result.agents.find((agent) => agent.name === "sandboxed");
+		assert.equal(sandboxed?.launcher, "net");
+		assert.equal(sandboxed?.extraFields, undefined);
+		const errorFor = (name: string) => result.agentDiagnostics?.find((diagnostic) => diagnostic.name === name)?.error ?? "";
+		assert.match(errorFor("placed"), /'launcher'.*cannot be combined with 'machine'/);
+		assert.match(errorFor("quoted"), /frontmatter 'launcher' "'net'" is invalid; launcher names must start with a letter or digit/);
+		assert.match(errorFor("spaced"), /frontmatter 'launcher' "a b" is invalid/);
+		assert.match(errorFor("external"), /'launcher'.*cannot be combined with runner\.type='external-cli'/);
+	});
+});
+
 describe("agent frontmatter systemPromptMode", () => {
 	it("serializes systemPromptMode into agent frontmatter", () => {
 		const agent: AgentConfig = {
@@ -1779,7 +1894,7 @@ Do work
 		const allowed = buildInProcessChildLaunch({ ...launch, model: "openai-codex/gpt-6-sol:low" });
 
 		assert.ok(allowed.toolPlan.runtimeExtensions.some((extensionPath) => extensionPath.endsWith("fast-mode-extension.ts")));
-		assert.deepEqual(allowed.session.hooks.map((hook) => hook.name), ["pi-subagents:prompt-runtime", "pi-subagents:fast-mode"]);
+		assert.deepEqual(allowed.session.hooks.map((hook) => hook.name), ["pi-subagents:prompt-runtime", "pi-subagents:fast-mode", "pi-subagents:prompt-boundary"]);
 		assert.throws(() => buildInProcessChildLaunch({ ...launch, model: "anthropic/claude-sonnet-4" }), /fast mode supports only/);
 		assert.throws(() => buildInProcessChildLaunch({ ...launch, model: "openai/gpt-6-sol" }), /fast mode supports only/);
 	});

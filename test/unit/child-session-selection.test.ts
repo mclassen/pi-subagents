@@ -28,6 +28,7 @@ function scripted(options: { clamp?: boolean; changeOnBind?: boolean; failBind?:
 				},
 				dispose() { this.disposed++; },
 				async prompt() { this.prompts++; },
+				async abort() {},
 				extensionRunner: { onError: () => () => {}, hasHandlers: () => true, emit: async () => { session.shutdowns++; if (options.failShutdown) throw new Error("shutdown failed"); } },
 			};
 			sessions.push(session);

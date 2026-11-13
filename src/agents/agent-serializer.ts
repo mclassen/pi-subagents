@@ -33,6 +33,7 @@ export const KNOWN_FIELDS = new Set([
 	"subagentOnlyExtensions",
 	"mutationTools",
 	"machine",
+	"launcher",
 	"output",
 	"outputMode",
 	"outputSchema",
@@ -54,6 +55,8 @@ function joinComma(values: string[] | undefined): string | undefined {
 
 interface SerializeAgentOptions {
 	preserveFrontmatterFields?: ReadonlySet<string>;
+	/** The caller set inheritGlobalContext on create; write it even when false, because an absent field takes settings defaults. */
+	explicitInheritGlobalContext?: boolean;
 }
 
 export function serializeAgent(config: AgentConfig, options: SerializeAgentOptions = {}): string {
@@ -63,7 +66,12 @@ export function serializeAgent(config: AgentConfig, options: SerializeAgentOptio
 	lines.push("---");
 	lines.push(`name: ${frontmatterNameForConfig(config)}`);
 	if (config.packageName) lines.push(`package: ${config.packageName}`);
-	lines.push(`description: ${config.description}`);
+	if (config.description.includes("\n")) {
+		lines.push("description: |-");
+		for (const line of config.description.split("\n")) lines.push(`  ${line}`);
+	} else {
+		lines.push(`description: ${config.description}`);
+	}
 	if (config.advertise === true || preserve("advertise")) lines.push(`advertise: ${config.advertise === true ? "true" : "false"}`);
 	const aliasesValue = joinComma(config.aliases);
 	if (aliasesValue || preserve("alias", "aliases")) lines.push(`aliases: ${aliasesValue ?? ""}`);
@@ -85,12 +93,10 @@ export function serializeAgent(config: AgentConfig, options: SerializeAgentOptio
 
 	if (config.model || preserve("model")) lines.push(`model: ${config.model ?? ""}`);
 	if (config.fast === true || preserve("fast")) lines.push(`fast: ${config.fast === undefined ? "" : config.fast ? "true" : "false"}`);
-	if ((config.thinking && (config.thinking !== "off" || preserve("thinking"))) || (!config.thinking && preserve("thinking"))) {
-		lines.push(`thinking: ${config.thinking ?? ""}`);
-	}
+	if (config.thinking || preserve("thinking")) lines.push(`thinking: ${config.thinking ?? ""}`);
 	if (!preservingExistingFrontmatter || preserve("systemPromptMode")) lines.push(`systemPromptMode: ${config.systemPromptMode}`);
 	if (!preservingExistingFrontmatter || preserve("inheritProjectContext")) lines.push(`inheritProjectContext: ${config.inheritProjectContext ? "true" : "false"}`);
-	if (config.inheritGlobalContext || preserve("inheritGlobalContext")) lines.push(`inheritGlobalContext: ${config.inheritGlobalContext ? "true" : "false"}`);
+	if (config.inheritGlobalContext || preserve("inheritGlobalContext") || options.explicitInheritGlobalContext) lines.push(`inheritGlobalContext: ${config.inheritGlobalContext ? "true" : "false"}`);
 	if (!preservingExistingFrontmatter || preserve("inheritSkills")) lines.push(`inheritSkills: ${config.inheritSkills ? "true" : "false"}`);
 	if (config.defaultContext || preserve("defaultContext")) lines.push(`defaultContext: ${config.defaultContext ?? ""}`);
 	if (config.runner || preserve("runner")) {
@@ -130,6 +136,7 @@ export function serializeAgent(config: AgentConfig, options: SerializeAgentOptio
 	if (mutationToolsValue || preserve("mutationTools")) lines.push(`mutationTools: ${mutationToolsValue ?? ""}`);
 
 	if (config.machine || preserve("machine")) lines.push(`machine: ${config.machine ?? ""}`);
+	if (config.launcher) lines.push(`launcher: ${config.launcher}`);
 	if (config.output || preserve("output")) lines.push(`output: ${config.output ?? ""}`);
 	if (config.outputMode || preserve("outputMode")) lines.push(`outputMode: ${config.outputMode ?? ""}`);
 	if (config.outputSchema || preserve("outputSchema")) lines.push(`outputSchema: ${config.outputSchema ? JSON.stringify(config.outputSchema) : ""}`);

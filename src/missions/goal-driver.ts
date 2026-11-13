@@ -34,7 +34,14 @@ function readLinkedRun(run: MissionRunLink): MissionRunLink {
 	if (!run.asyncDir) return run;
 	const statusPath = path.join(run.asyncDir, "status.json");
 	if (!fs.existsSync(statusPath)) return run;
-	const status = JSON.parse(fs.readFileSync(statusPath, "utf-8")) as Record<string, unknown>;
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(fs.readFileSync(statusPath, "utf-8"));
+	} catch (error) {
+		throw new Error(`Failed to read linked run status '${statusPath}': ${error instanceof Error ? error.message : String(error)}`, { cause: error });
+	}
+	if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error(`Linked run status '${statusPath}' must be an object`);
+	const status = parsed as Record<string, unknown>;
 	if (typeof status.state !== "string" || !status.state.trim()) throw new Error(`Linked run status '${statusPath}' is missing state`);
 	const tokens = tokenUsage(status.totalTokens)
 		?? (Array.isArray(status.steps)

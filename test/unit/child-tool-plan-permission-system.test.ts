@@ -1,9 +1,3 @@
-/**
- * Permission-system compatibility tests:
- * - <active_agent> tag injection into child system prompts
- * - Permission-system extension auto-detection
- */
-
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -20,6 +14,7 @@ const originalEnv = {
 	USERPROFILE: process.env.USERPROFILE,
 	PI_CODING_AGENT_DIR: process.env.PI_CODING_AGENT_DIR,
 };
+const originalCwd = process.cwd();
 const tempRoots: string[] = [];
 
 function createFixture() {
@@ -38,6 +33,8 @@ function createFixture() {
 }
 
 afterEach(() => {
+	// Windows cannot delete a process's current directory.
+	process.chdir(originalCwd);
 	for (const key of Object.keys(originalEnv)) {
 		const value = originalEnv[key as keyof typeof originalEnv];
 		if (value === undefined) delete process.env[key];
