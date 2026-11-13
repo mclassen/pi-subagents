@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { createAtomicJsonWriter } from "../../shared/atomic-json.ts";
 import { TEMP_ROOT_DIR } from "../../shared/types.ts";
+import { runFileSystemOperationWithRetry } from "../../shared/file-system-retry.ts";
 
 export const SESSION_LEASES_DIR = path.join(TEMP_ROOT_DIR, "session-leases");
 
@@ -188,7 +189,12 @@ function createLeaseDirectory(leaseDir: string, owner: SessionLeaseOwner): boole
 	try {
 		fs.writeFileSync(path.join(tempDir, "owner.json"), JSON.stringify(owner, null, 2), { encoding: "utf-8", mode: 0o600 });
 		try {
-			fs.renameSync(tempDir, leaseDir);
+			// Windows briefly refuses renames (EPERM/EBUSY) while a scanner holds a file; an
+			// existing lease is contention, never retried.
+			runFileSystemOperationWithRetry(() => {
+				if (fs.existsSync(leaseDir)) throw Object.assign(new Error("Session lease already exists"), { code: "EEXIST" });
+				fs.renameSync(tempDir, leaseDir);
+			});
 			return true;
 		} catch (error) {
 			if (fs.existsSync(leaseDir)) return false;
@@ -280,7 +286,10 @@ export function acquireSessionLease(request: SessionLeaseRequest, options: Sessi
 		// rename it and later contenders cannot move a successor lease by mistake.
 		const tombstone = `${leaseDir}.stale-${existingOwner.token.replace(/[^A-Za-z0-9._-]/g, "-")}`;
 		try {
-			fs.renameSync(leaseDir, tombstone);
+			runFileSystemOperationWithRetry(() => {
+				if (fs.existsSync(tombstone)) throw Object.assign(new Error("Session lease tombstone already exists"), { code: "EEXIST" });
+				fs.renameSync(leaseDir, tombstone);
+			});
 		} catch (error) {
 			const code = (error as NodeJS.ErrnoException).code;
 			if (code === "ENOENT" || fs.existsSync(tombstone)) continue;
