@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { writePrivateAtomicJson } from "../../shared/atomic-json.ts";
+import { runFileSystemOperationWithRetry } from "../../shared/file-system-retry.ts";
 import { TEMP_ROOT_DIR, type ActiveAsyncCapacitySnapshot, type AsyncStatus } from "../../shared/types.ts";
 import { readStatus } from "../../shared/utils.ts";
 import { checkPidLiveness, checkRecordedPidLiveness, type PidLiveness } from "./stale-run-reconciler.ts";
@@ -199,7 +200,8 @@ function removeOwnedSlot(dir: string, expected: ActiveAsyncCapacityOwner, option
 		const current = matchingOwner(dir, expected);
 		if (!current || (requireUnstarted && (current.runnerProcessInstanceId || current.runnerStartedAt))) return false;
 		const releasedDir = path.join(path.dirname(dir), `.${path.basename(dir)}.released-${randomUUID()}`);
-		fs.renameSync(dir, releasedDir);
+		// Windows briefly refuses directory renames (EPERM/EBUSY) while a scanner holds a file inside.
+		runFileSystemOperationWithRetry(() => fs.renameSync(dir, releasedDir));
 		options.afterSlotRename?.(releasedDir);
 		if (release?.state === "releasable" && release.evidence) {
 			appendAbandonedReleaseEvent(expected.asyncDir, expected, release.evidence, options.now?.() ?? Date.now());
@@ -483,7 +485,7 @@ function handleFor(owner: ActiveAsyncCapacityOwner, limit: number, options: Capa
 					return true;
 				}
 				const releasedDir = path.join(path.dirname(dir), `.${path.basename(dir)}.released-${randomUUID()}`);
-				fs.renameSync(dir, releasedDir);
+				runFileSystemOperationWithRetry(() => fs.renameSync(dir, releasedDir));
 				options.afterSlotRename?.(releasedDir);
 				fs.rmSync(releasedDir, { recursive: true, force: true });
 				return true;
