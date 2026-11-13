@@ -42,6 +42,8 @@ it("loads the executor and Fleet within seconds of a session starting, not at se
 	assert.equal(fleetLoaded(), false, "session_start must not load Fleet on Pi's startup path");
 
 	t.mock.timers.tick(5_000);
+	// The preload uses dynamic import(), whose module loads complete over later event-loop turns.
+	for (let turn = 0; turn < 500 && !(executorLoaded() && fleetLoaded()); turn++) await new Promise((resolve) => setImmediate(resolve));
 	assert.equal(executorLoaded(), true, "the executor loads within seconds of the session starting");
 	assert.equal(fleetLoaded(), true, "Fleet loads within seconds of the session starting");
 

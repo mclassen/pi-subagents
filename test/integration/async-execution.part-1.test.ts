@@ -963,7 +963,8 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		const status = JSON.parse(fs.readFileSync(path.join(asyncDir, "status.json"), "utf-8")) as AsyncStatusPayload;
 		assert.equal(status.state, "failed");
 		assert.match(status.error ?? "", /Failed to establish async runner capacity ownership/);
-		assert.equal(status.processTerminal?.state, "not-started");
+		// The killed runner existed, so it is never certified "not-started"; its close observer settles the proof.
+		assert.ok(["pending", "observed"].includes(String(status.processTerminal?.state)), String(status.processTerminal?.state));
 		assert.deepEqual(getActiveAsyncCapacitySnapshot(parentSessionId, 1), { used: 0, limit: 1 });
 	});
 

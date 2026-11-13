@@ -1,13 +1,14 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { createHash } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
 import { WINDOWS_HIDDEN_PROCESS_OPTIONS, windowsSystemDirectory, windowsSystemExecutable } from "../../shared/windows-launch-safety.ts";
 
 export interface WindowsProcessSnapshot { pid: number; parentPid: number; creationDate: string }
 export interface RetainedWindowsProcess { handle: string; creationDate: string; exited: boolean }
 
-// Handles live in the controller process, not the short-lived PowerShell observer. Every
+// Handles live in the controller process, not the short-lived helper observer. Every
 // signal and exit check duplicates that same kernel object; a recycled PID is never a target.
 const nativeSource = `
 using System;
@@ -76,16 +77,122 @@ public static class OwnedProcessNative {
 }
 `;
 
-// Cache compilation once per controller host; monitor ticks only load the private assembly.
-let nativeAssembly: string | undefined;
-function assemblyPath(): string {
-	if (!nativeAssembly) {
-		const directory = fs.mkdtempSync(path.join(os.tmpdir(), "pi-owned-process-native-"));
-		nativeAssembly = path.join(directory, "OwnedProcessNative.dll");
-		process.once("exit", () => { fs.rmSync(directory, { recursive: true, force: true }); });
-	}
-	return nativeAssembly;
+// The helper is a small native console program, compiled once per source revision and
+// reused, so each call costs tens of milliseconds instead of a PowerShell start (~2 s).
+const helperSource = `using System.Web.Script.Serialization;
+${nativeSource}${String.raw`
+public static class OwnedProcessHelper {
+ static IntPtr owner, self;
+ static List<Dictionary<string, object>> created = new List<Dictionary<string, object>>();
+ static IntPtr H(object value) { return new IntPtr(Convert.ToInt64(value)); }
+ static void ReleaseOwned(object handle) {
+  // CLOSE_SOURCE may consume the source even when DuplicateHandle fails: never retry it.
+  IntPtr local = OwnedProcessNative.Copy(owner, H(handle), self, 3);
+  if (!OwnedProcessNative.CloseHandle(local)) throw new Exception("CloseHandle failed after source transfer");
+ }
+ static Dictionary<string, object> Proof(object pid, string handle, object creationDate, bool exited) {
+  var proof = new Dictionary<string, object>();
+  proof["pid"] = Convert.ToInt32(pid); proof["handle"] = handle; proof["creationDate"] = Convert.ToString(creationDate); proof["exited"] = exited;
+  return proof;
+ }
+ public static int Main(string[] args) {
+  var json = new JavaScriptSerializer(); json.MaxJsonLength = int.MaxValue;
+  try {
+   var input = (Dictionary<string, object>)json.DeserializeObject(Console.In.ReadToEnd());
+   owner = OwnedProcessNative.OpenProcess(64, false, uint.Parse(args[0]));
+   if (owner == IntPtr.Zero) throw new Exception("Cannot open controller handle table");
+   self = OwnedProcessNative.GetCurrentProcess();
+   try {
+    string action = Convert.ToString(input["action"]);
+    var retained = new List<Dictionary<string, object>>();
+    object raw; if (input.TryGetValue("retained", out raw) && raw != null) foreach (object item in (object[])raw) retained.Add((Dictionary<string, object>)item);
+    var retainedPids = new HashSet<string>(); foreach (var item in retained) retainedPids.Add(Convert.ToString(item["pid"]));
+    if (action == "release") {
+     var releases = new List<Dictionary<string, object>>();
+     foreach (var item in retained) {
+      var row = new Dictionary<string, object>();
+      row["pid"] = Convert.ToInt32(item["pid"]); row["creationDate"] = Convert.ToString(item["creationDate"]);
+      try { ReleaseOwned(item["handle"]); row["state"] = "released"; }
+      catch (Exception e) { row["state"] = "uncertain"; row["diagnostic"] = e.Message; }
+      releases.Add(row);
+     }
+     var released = new Dictionary<string, object>(); released["releaseResults"] = releases.ToArray();
+     Console.Out.Write(json.Serialize(released));
+     return 0;
+    }
+    var proofs = new List<Dictionary<string, object>>();
+    var signalFailures = new Dictionary<string, int>();
+    object deadlineValue;
+    DateTime deadline = input.TryGetValue("deadline", out deadlineValue) && deadlineValue != null
+     ? DateTimeOffset.FromUnixTimeMilliseconds(Convert.ToInt64(deadlineValue)).UtcDateTime : DateTime.UtcNow;
+    foreach (var item in retained) {
+     IntPtr local = OwnedProcessNative.Copy(owner, H(item["handle"]), self, 2);
+     try {
+      if (action == "terminate" && !OwnedProcessNative.Exited(local)) {
+       if (!OwnedProcessNative.TerminateProcess(local, 1)) signalFailures[Convert.ToString(item["pid"])] = Marshal.GetLastWin32Error();
+      }
+      proofs.Add(Proof(item["pid"], Convert.ToString(item["handle"]), item["creationDate"], OwnedProcessNative.Exited(local)));
+     } finally { OwnedProcessNative.CloseHandle(local); }
+    }
+    if (action == "terminate") {
+     foreach (var item in retained) {
+      IntPtr local = OwnedProcessNative.Copy(owner, H(item["handle"]), self, 2);
+      try {
+       double remaining = Math.Max(0, (deadline - DateTime.UtcNow).TotalMilliseconds);
+       OwnedProcessNative.WaitForSingleObject(local, (uint)remaining);
+       string key = Convert.ToString(item["pid"]);
+       if (signalFailures.ContainsKey(key) && !OwnedProcessNative.Exited(local)) throw new Exception("TerminateProcess failed for retained PID " + key + " (expected=" + Convert.ToString(item["creationDate"]) + ", retained=" + OwnedProcessNative.Creation(local) + "): " + signalFailures[key]);
+      } finally { OwnedProcessNative.CloseHandle(local); }
+     }
+     Console.Out.Write("{}");
+     return 0;
+    }
+    OwnedProcessRow[] rows = OwnedProcessNative.Snapshot();
+    var candidates = new HashSet<int>();
+    foreach (var proof in proofs) {
+     if ((bool)proof["exited"]) continue;
+     foreach (var row in rows) if (row.pid == (int)proof["pid"] && row.creationDate == (string)proof["creationDate"]) { candidates.Add(row.pid); break; }
+    }
+    object root; if (input.TryGetValue("root", out root) && root != null) candidates.Add(Convert.ToInt32(root));
+    bool changed;
+    do {
+     changed = false;
+     foreach (var row in rows) if (candidates.Contains(row.parentPid) && !candidates.Contains(row.pid)) { candidates.Add(row.pid); changed = true; }
+    } while (changed);
+    foreach (var row in rows) {
+     if (!candidates.Contains(row.pid) || retainedPids.Contains(row.pid.ToString())) continue;
+     // SYNCHRONIZE | PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION
+     IntPtr local = OwnedProcessNative.OpenProcess(1048577 | 4096, false, (uint)row.pid);
+     if (local == IntPtr.Zero) throw new Exception("Cannot retain observed PID " + row.pid);
+     try {
+      string observed = OwnedProcessNative.Creation(local);
+      if (observed != row.creationDate) throw new Exception("PID " + row.pid + " changed before retention (expected=" + row.creationDate + ", observed=" + observed + ")");
+      IntPtr remote = OwnedProcessNative.Copy(self, local, owner, 2);
+      var entry = new Dictionary<string, object>(); entry["pid"] = row.pid; entry["creationDate"] = row.creationDate; entry["handle"] = remote.ToInt64().ToString();
+      created.Add(entry);
+      proofs.Add(Proof(row.pid, remote.ToInt64().ToString(), row.creationDate, OwnedProcessNative.Exited(local)));
+     } finally { OwnedProcessNative.CloseHandle(local); }
+    }
+    var output = new Dictionary<string, object>(); output["processes"] = rows; output["retained"] = proofs.ToArray();
+    Console.Out.Write(json.Serialize(output));
+    return 0;
+   } catch (Exception e) {
+    string failure = e.Message;
+    var rollbackFailures = new List<string>();
+    foreach (var item in created) {
+     try { ReleaseOwned(item["handle"]); }
+     catch (Exception rollback) { rollbackFailures.Add(item["pid"] + "@" + item["creationDate"] + ": " + rollback.Message); }
+    }
+    if (rollbackFailures.Count > 0) failure += "; rollback uncertain identities: " + string.Join(", ", rollbackFailures.ToArray());
+    throw new Exception(failure);
+   } finally { OwnedProcessNative.CloseHandle(owner); }
+  } catch (Exception e) {
+   Console.Error.Write(e.Message);
+   return 1;
+  }
+ }
 }
+`}`;
 
 interface WindowsReleaseResult {
 	pid: number;
@@ -101,118 +208,39 @@ interface NativeResult {
 	diagnostic?: string;
 }
 
-function helperCommand(): string {
-	const assembly = assemblyPath().replaceAll("'", "''");
-	return `
-$ErrorActionPreference = 'Stop'
-if (-not (Test-Path -LiteralPath '${assembly}')) {
-Add-Type -OutputAssembly '${assembly}' -TypeDefinition @'
-${nativeSource}
-'@
-}
-Add-Type -Path '${assembly}'
-$inputData = [Console]::In.ReadToEnd() | ConvertFrom-Json
-$owner = [OwnedProcessNative]::OpenProcess(64, $false, ${process.pid})
-if ($owner -eq [IntPtr]::Zero) { throw 'Cannot open controller handle table' }
-$self = [OwnedProcessNative]::GetCurrentProcess()
-$created = [Collections.Generic.List[object]]::new()
-function Release-OwnedHandle($handle) {
- # CLOSE_SOURCE may consume the source even when DuplicateHandle fails: never retry it.
- $local = [OwnedProcessNative]::Copy($owner, [IntPtr]([long]$handle), $self, 3)
- if (-not [OwnedProcessNative]::CloseHandle($local)) { throw 'CloseHandle failed after source transfer' }
-}
-try {
- $retained = @{}
- foreach ($item in $inputData.retained) { $retained[[string]$item.pid] = $item }
- if ($inputData.action -eq 'release') {
-  $releases = [Collections.Generic.List[object]]::new()
-  foreach ($item in $inputData.retained) {
-   try {
-    Release-OwnedHandle $item.handle
-    $releases.Add(@{ pid=[int]$item.pid; creationDate=[string]$item.creationDate; state='released' })
-   } catch {
-    $releases.Add(@{ pid=[int]$item.pid; creationDate=[string]$item.creationDate; state='uncertain'; diagnostic=$_.Exception.Message })
-   }
-  }
-  @{ releaseResults=@($releases.ToArray()) } | ConvertTo-Json -Compress -Depth 5
-  return
- }
- $proofs = [Collections.Generic.List[object]]::new()
- $signalFailures = @{}
- $deadline = if ($inputData.deadline) { [DateTimeOffset]::FromUnixTimeMilliseconds([long]$inputData.deadline).UtcDateTime } else { [DateTime]::UtcNow }
- foreach ($item in $inputData.retained) {
-  $local = [OwnedProcessNative]::Copy($owner, [IntPtr]([long]$item.handle), $self, 2)
-  try {
-   if ($inputData.action -eq 'terminate' -and -not [OwnedProcessNative]::Exited($local)) {
-    if (-not [OwnedProcessNative]::TerminateProcess($local, 1)) { $signalFailures[[string]$item.pid] = [Runtime.InteropServices.Marshal]::GetLastWin32Error() }
-   }
-   $proofs.Add(@{ pid=[int]$item.pid; handle=[string]$item.handle; creationDate=[string]$item.creationDate; exited=[OwnedProcessNative]::Exited($local) })
-  } finally { [void][OwnedProcessNative]::CloseHandle($local) }
- }
- if ($inputData.action -eq 'terminate') {
-  foreach ($item in $inputData.retained) {
-   $local = [OwnedProcessNative]::Copy($owner, [IntPtr]([long]$item.handle), $self, 2)
-   try {
-    $remaining = [Math]::Max(0, ($deadline - [DateTime]::UtcNow).TotalMilliseconds)
-    [void][OwnedProcessNative]::WaitForSingleObject($local, [uint32]$remaining)
-    if ($signalFailures.ContainsKey([string]$item.pid) -and -not [OwnedProcessNative]::Exited($local)) { throw "TerminateProcess failed for retained PID $($item.pid) (expected=$($item.creationDate), retained=$([OwnedProcessNative]::Creation($local))): $($signalFailures[[string]$item.pid])" }
-   } finally { [void][OwnedProcessNative]::CloseHandle($local) }
-  }
-  '{}' ; return
- }
- $rows = @([OwnedProcessNative]::Snapshot())
- $candidates = @{}
- foreach ($item in $proofs) {
-  if ($item.exited) { continue }
-  foreach ($row in $rows) {
-   if ($row.pid -eq $item.pid -and $row.creationDate -eq $item.creationDate) { $candidates[[string]$item.pid] = $true; break }
-  }
- }
- if ($inputData.root) { $candidates[[string]$inputData.root] = $true }
- do {
-  $changed = $false
-  foreach ($row in $rows) {
-   if ($candidates.ContainsKey([string]$row.parentPid) -and -not $candidates.ContainsKey([string]$row.pid)) {
-    $candidates[[string]$row.pid] = $true; $changed = $true
-   }
-  }
- } while ($changed)
- foreach ($row in $rows) {
-  if (-not $candidates.ContainsKey([string]$row.pid) -or $retained.ContainsKey([string]$row.pid)) { continue }
-  # SYNCHRONIZE | PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION
-  $local = [OwnedProcessNative]::OpenProcess(1048577 -bor 4096, $false, [uint32]$row.pid)
-  if ($local -eq [IntPtr]::Zero) { throw "Cannot retain observed PID $($row.pid)" }
-  try {
-   $observedCreation = [OwnedProcessNative]::Creation($local)
-   if ($observedCreation -ne $row.creationDate) { throw "PID $($row.pid) changed before retention (expected=$($row.creationDate), observed=$observedCreation)" }
-   $remote = [OwnedProcessNative]::Copy($self, $local, $owner, 2)
-   $created.Add(@{ pid=$row.pid; creationDate=$row.creationDate; handle=$remote.ToInt64().ToString() })
-   $proofs.Add(@{ pid=$row.pid; handle=$remote.ToInt64().ToString(); creationDate=$row.creationDate; exited=[OwnedProcessNative]::Exited($local) })
-  } finally { [void][OwnedProcessNative]::CloseHandle($local) }
- }
- @{ processes=@($rows); retained=@($proofs.ToArray()) } | ConvertTo-Json -Compress -Depth 5
-} catch {
- $failure = $_.Exception.Message
- $rollbackFailures = [Collections.Generic.List[string]]::new()
- foreach ($item in $created) {
-  try { Release-OwnedHandle $item.handle }
-  catch { $rollbackFailures.Add("$($item.pid)@$($item.creationDate): $($_.Exception.Message)") }
- }
- if ($rollbackFailures.Count) { $failure += "; rollback uncertain identities: " + ($rollbackFailures -join ', ') }
- throw $failure
-} finally { [void][OwnedProcessNative]::CloseHandle($owner) }
-`;
+let helperExecutable: string | undefined;
+function helperPath(): string {
+	if (helperExecutable && fs.existsSync(helperExecutable)) return helperExecutable;
+	const digest = createHash("sha256").update(helperSource).digest("hex").slice(0, 16);
+	const target = path.join(os.tmpdir(), `pi-owned-process-helper-${digest}.exe`);
+	if (!fs.existsSync(target)) {
+		// Build privately, then publish atomically so concurrent builders never run a partial file.
+		const directory = fs.mkdtempSync(path.join(os.tmpdir(), "pi-owned-process-build-"));
+		try {
+			const staged = path.join(directory, "helper.exe");
+			const result = spawnSync(windowsSystemExecutable("WindowsPowerShell", "v1.0", "powershell.exe"), [
+				"-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
+				"$ErrorActionPreference = 'Stop'; Add-Type -TypeDefinition ([Console]::In.ReadToEnd()) -ReferencedAssemblies System.Web.Extensions -OutputType ConsoleApplication -OutputAssembly $env:PI_OWNED_PROCESS_HELPER_OUT",
+			], { encoding: "utf8", input: helperSource, timeout: 60_000, ...WINDOWS_HIDDEN_PROCESS_OPTIONS, cwd: windowsSystemDirectory(), env: { ...process.env, PI_OWNED_PROCESS_HELPER_OUT: staged } });
+			if (result.error || result.status !== 0 || !fs.existsSync(staged)) {
+				throw new Error(result.error?.message ?? (result.stderr.trim() || `helper build exited with ${result.status}`));
+			}
+			try { fs.renameSync(staged, target); }
+			catch (error) { if (!fs.existsSync(target)) throw error; }
+		} finally {
+			fs.rmSync(directory, { recursive: true, force: true });
+		}
+	}
+	helperExecutable = target;
+	return target;
 }
 
-const HELPER_ARGS = (command: string) => ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command];
 const helperTimeout = (input: object) => 5000 + ("verifyMs" in input ? Number((input as { verifyMs?: unknown }).verifyMs) : 0);
 
 function invoke(input: object): NativeResult {
 	try {
 		const payload = JSON.stringify(input);
-		const command = helperCommand();
-		const result = spawnSync(windowsSystemExecutable("WindowsPowerShell", "v1.0", "powershell.exe"),
-			HELPER_ARGS(command),
+		const result = spawnSync(helperPath(), [String(process.pid)],
 			{ encoding: "utf8", input: payload, timeout: helperTimeout(input), ...WINDOWS_HIDDEN_PROCESS_OPTIONS, cwd: windowsSystemDirectory() });
 		if (result.error || result.status !== 0) return { diagnostic: result.error?.message ?? (result.stderr.trim() || `Windows identity helper exited with ${result.status}`) };
 		try { return JSON.parse(result.stdout.trim()); }
@@ -222,13 +250,13 @@ function invoke(input: object): NativeResult {
 	}
 }
 
-/** Same helper protocol as invoke(), without blocking the event loop (PowerShell takes ~0.5-1 s to start). */
+/** Same helper protocol as invoke(), without blocking the event loop. */
 function invokeAsync(input: object): Promise<NativeResult> {
 	return new Promise((resolve) => {
 		let settled = false;
 		const finish = (result: NativeResult) => { if (!settled) { settled = true; resolve(result); } };
 		try {
-			const child = spawn(windowsSystemExecutable("WindowsPowerShell", "v1.0", "powershell.exe"), HELPER_ARGS(helperCommand()), {
+			const child = spawn(helperPath(), [String(process.pid)], {
 				...WINDOWS_HIDDEN_PROCESS_OPTIONS, cwd: windowsSystemDirectory(), stdio: ["pipe", "pipe", "pipe"],
 			});
 			let stdout = "";
