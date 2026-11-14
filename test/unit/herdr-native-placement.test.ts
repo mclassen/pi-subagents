@@ -41,6 +41,12 @@ function mockBridgeSockets(): { sockets: EventEmitter[]; restore(): void } {
 const eventFrame = (cursor: number) => encodeHerdrPiFrame({ protocol: 1, runId: "run_12345678", type: "event", cursor, nativeSessionId: "native", event: { type: "tool_execution_start", toolName: "read", args: { path: `file-${cursor}` } } });
 
 describe("pane-native Herdr placement public contracts", { skip: process.platform === "win32" }, () => {
+	it("decodes two near-cap frames that arrive in one read, and refuses one over the cap", () => {
+		const frame = (pad: number) => encodeHerdrPiFrame({ protocol: 1, runId: "run_decoder01", type: "event", pad: "x".repeat(pad) });
+		const near = frame(HERDR_PI_MAX_FRAME_BYTES - 200);
+		assert.equal(new HerdrPiFrameDecoder().push(Buffer.concat([near, near])).length, 2);
+		assert.throws(() => new HerdrPiFrameDecoder().push(Buffer.concat([near.subarray(0, -1), Buffer.from("x".repeat(400))])), /exceeds/u);
+	});
 	it("preserves explicit default versus named endpoint identity", () => {
 		assert.equal(parseHerdrEndpoint(JSON.stringify({ socket: "/tmp/herdr.sock", session: null, version: "0.9.0", protocol: 22, running: true, compatible: true })).session, null);
 		assert.equal(parseHerdrEndpoint(JSON.stringify({ socket: "/tmp/herdr.sock", session: null, version: "0.9.0", protocol: 22, running: true, compatible: true }), "default").session, null);
@@ -96,6 +102,7 @@ describe("pane-native Herdr placement public contracts", { skip: process.platfor
 		assert.throws(() => serializeHerdrPiLaunch({ ...clean, runtime: { ...runtime, nestedRoute: { rootRunId: "r", eventSink: "/local/events", controlInbox: "/local/control", capabilityToken: "SECRET" } } }), /Nested delegation/u);
 		assert.throws(() => serializeHerdrPiLaunch({ ...clean, processEnv: { MCP_DIRECT_TOOLS: "local-server" } }), /bindings, MCP selections, or process environment/u);
 		assert.throws(() => serializeHerdrPiLaunch({ ...clean, runtime: { ...runtime, permissions: { rules: { bash: "deny" } } as never } }), /permission rules/u);
+		assert.throws(() => serializeHerdrPiLaunch({ ...clean, runtime: { ...runtime, structuredOutput: { schema: { type: "object" } } as never } }), /outputSchema/u);
 	});
 
 	it("launches a fresh placed child that was given a local session path, and refuses one that would restore a transcript", () => {
@@ -245,6 +252,24 @@ describe("pane-native Herdr placement public contracts", { skip: process.platfor
 		finally { for (const socket of sockets) socket.destroy(); handlers.get("session_shutdown")?.(); old.mode === undefined ? delete process.env[HERDR_PI_MODE_ENV] : process.env[HERDR_PI_MODE_ENV] = old.mode; old.run === undefined ? delete process.env[HERDR_PI_RUN_ENV] : process.env[HERDR_PI_RUN_ENV] = old.run; old.dir === undefined ? delete process.env[HERDR_PI_RUNTIME_DIR_ENV] : process.env[HERDR_PI_RUNTIME_DIR_ENV] = old.dir; fs.rmSync(dir, { recursive: true, force: true }); }
 	});
 
+	it("gives a placed child the parent's acceptance instructions in its system prompt", async () => {
+		let placedLaunch: ChildSessionLaunch | undefined;
+		const factory: ChildSessionFactory = { async create(value) { placedLaunch = value; const listeners = new Set<(event: any) => void>(); return { ...child, subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); }, async prompt() { const message = { role: "assistant", content: [{ type: "text", text: "done" }], stopReason: "stop", usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, cost: { total: 0 } } }; for (const listener of listeners) listener({ type: "message_end", message }); for (const listener of listeners) listener({ type: "agent_settled" }); } }; }, async dispose() {} };
+		await runSync(process.cwd(), [makeAgent("worker")], "worker", "inspect", { machine: { ...machine, cwd: os.tmpdir() }, cwd: os.tmpdir(), childSessionFactory: factory });
+		const resources = serializeHerdrPiLaunch(placedLaunch!).resources;
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pha-")); const old = { mode: process.env[HERDR_PI_MODE_ENV], run: process.env[HERDR_PI_RUN_ENV], dir: process.env[HERDR_PI_RUNTIME_DIR_ENV] }; process.env[HERDR_PI_MODE_ENV] = "1"; process.env[HERDR_PI_RUN_ENV] = "run_accept001"; process.env[HERDR_PI_RUNTIME_DIR_ENV] = dir; const handlers = new Map<string, Function>(); let socket: net.Socket | undefined;
+		let activeTools = ["read", "bash"]; const pi = { registerTool() {}, registerCommand() {}, on(name: string, handler: Function) { handlers.set(name, handler); }, getAllTools: () => activeTools.map((name) => ({ name })), getActiveTools: () => [...activeTools], setActiveTools(value: string[]) { activeTools = [...value]; } };
+		try {
+			registerHerdrPiBridge(pi as never); handlers.get("session_start")?.({}, { sessionManager: { getSessionId: () => "native", getSessionFile: () => "/remote/session" }, isIdle: () => true, hasPendingMessages: () => false });
+			socket = net.createConnection(path.join(dir, "bridge.sock")); const decoder = new HerdrPiFrameDecoder(); const frames: any[] = []; socket.on("data", (chunk) => frames.push(...decoder.push(chunk))); await new Promise<void>((resolve) => socket!.once("connect", resolve));
+			socket.write(encodeHerdrPiFrame({ protocol: 1, runId: "run_accept001", type: "configure", requestId: "cfg", resources: { ...resources, toolCeiling: ["read"] } })); await new Promise((resolve) => setTimeout(resolve, 50));
+			assert.ok(frames.some((frame) => frame.type === "configured"));
+			const prompt = (handlers.get("before_agent_start")?.({ systemPrompt: "BASE" }) as { systemPrompt: string }).systemPrompt;
+			assert.match(prompt, /## Acceptance Contract\nAcceptance level: attested/u);
+			assert.match(prompt, /```acceptance-report/u);
+		} finally { socket?.destroy(); handlers.get("session_shutdown")?.(); old.mode === undefined ? delete process.env[HERDR_PI_MODE_ENV] : process.env[HERDR_PI_MODE_ENV] = old.mode; old.run === undefined ? delete process.env[HERDR_PI_RUN_ENV] : process.env[HERDR_PI_RUN_ENV] = old.run; old.dir === undefined ? delete process.env[HERDR_PI_RUNTIME_DIR_ENV] : process.env[HERDR_PI_RUNTIME_DIR_ENV] = old.dir; fs.rmSync(dir, { recursive: true, force: true }); }
+	});
+
 	for (const reason of ["need_decision", "interview_request", "successful_reply", "ask_after_idle_channel_cleanup"] as const) {
 		it(`preserves ${reason} through the shared Herdr/Rex supervisor file relay and bridge`, { timeout: 10_000 }, async () => {
 			// Short prefix: the bridge socket lives under this dir, and macOS caps Unix socket paths at 104 bytes.
@@ -338,6 +363,21 @@ describe("pane-native Herdr placement public contracts", { skip: process.platfor
 		}
 	});
 
+	// An in-process SDK session in the child loads the extension again and may start (and end) its own session; the first session to start owns the bridge.
+	for (const starts of [["native"], ["native", "sdk"], ["sdk"]]) it(`gives the bridge to the first session that starts when the extension loads twice (${starts.join(", then ")} starts)`, { skip: process.platform === "win32" }, async () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-herdr-twice-")); const old = { mode: process.env[HERDR_PI_MODE_ENV], run: process.env[HERDR_PI_RUN_ENV], dir: process.env[HERDR_PI_RUNTIME_DIR_ENV] }; process.env[HERDR_PI_MODE_ENV] = "1"; process.env[HERDR_PI_RUN_ENV] = "run_twice001"; process.env[HERDR_PI_RUNTIME_DIR_ENV] = dir; let socket: net.Socket | undefined;
+		const fakePi = () => { const handlers = new Map<string, Function>(); return { handlers, pi: { registerTool() {}, registerCommand() {}, on(name: string, handler: Function) { handlers.set(name, handler); }, getActiveTools: () => ["read"], setActiveTools() {} } }; };
+		const loads = { native: fakePi(), sdk: fakePi() }, ctx = (id: string) => ({ sessionManager: { getSessionId: () => id, getSessionFile: () => `/remote/${id}` }, isIdle: () => true, hasPendingMessages: () => false });
+		try {
+			registerHerdrPiBridge(loads.native.pi as never); registerHerdrPiBridge(loads.sdk.pi as never);
+			for (const id of starts) loads[id as keyof typeof loads].handlers.get("session_start")?.({}, ctx(id));
+			if (starts.length > 1) loads.sdk.handlers.get("session_shutdown")?.();
+			assert.equal(JSON.parse(fs.readFileSync(path.join(dir, "manifest.json"), "utf8")).nativeSessionId, starts[0]);
+			socket = net.createConnection(path.join(dir, "bridge.sock")); const decoder = new HerdrPiFrameDecoder(); const frames: any[] = []; socket.on("data", (chunk) => frames.push(...decoder.push(chunk))); await new Promise<void>((resolve) => socket!.once("connect", resolve)); await new Promise((resolve) => setTimeout(resolve, 30));
+			assert.equal(frames.find((frame) => frame.type === "ready")?.nativeSessionId, starts[0]);
+		} finally { socket?.destroy(); loads.sdk.handlers.get("session_shutdown")?.(); loads.native.handlers.get("session_shutdown")?.(); old.mode === undefined ? delete process.env[HERDR_PI_MODE_ENV] : process.env[HERDR_PI_MODE_ENV] = old.mode; old.run === undefined ? delete process.env[HERDR_PI_RUN_ENV] : process.env[HERDR_PI_RUN_ENV] = old.run; old.dir === undefined ? delete process.env[HERDR_PI_RUNTIME_DIR_ENV] : process.env[HERDR_PI_RUNTIME_DIR_ENV] = old.dir; fs.rmSync(dir, { recursive: true, force: true }); }
+	});
+
 	it("leaves the remote operator's APPEND_SYSTEM.md out of the child's prompt", { skip: process.platform === "win32" }, async () => {
 		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-herdr-append-")); const old = { mode: process.env[HERDR_PI_MODE_ENV], run: process.env[HERDR_PI_RUN_ENV], dir: process.env[HERDR_PI_RUNTIME_DIR_ENV] }; process.env[HERDR_PI_MODE_ENV] = "1"; process.env[HERDR_PI_RUN_ENV] = "run_append01"; process.env[HERDR_PI_RUNTIME_DIR_ENV] = dir; const handlers = new Map<string, Function>(); let socket: net.Socket | undefined;
 		const pi = { registerTool() {}, registerCommand() {}, on(name: string, handler: Function) { handlers.set(name, handler); }, getActiveTools: () => ["read"], setActiveTools() {} };
@@ -353,6 +393,50 @@ describe("pane-native Herdr placement public contracts", { skip: process.platfor
 			assert.doesNotMatch(result.systemPrompt, /REMOTE_OPERATOR_APPEND/u);
 			assert.match(result.systemPrompt, /<active_agent name="worker"\/>/u);
 		} finally { socket?.destroy(); handlers.get("session_shutdown")?.(); old.mode === undefined ? delete process.env[HERDR_PI_MODE_ENV] : process.env[HERDR_PI_MODE_ENV] = old.mode; old.run === undefined ? delete process.env[HERDR_PI_RUN_ENV] : process.env[HERDR_PI_RUN_ENV] = old.run; old.dir === undefined ? delete process.env[HERDR_PI_RUNTIME_DIR_ENV] : process.env[HERDR_PI_RUNTIME_DIR_ENV] = old.dir; fs.rmSync(dir, { recursive: true, force: true }); }
+	});
+
+	it("forwards a placed child's tool calls to the parent session, keeping oversized args under the frame cap", { skip: process.platform === "win32" }, async () => {
+		// Short prefix: the bridge socket lives under this dir, and macOS caps Unix socket paths at 104 bytes.
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pte-")); const old = { mode: process.env[HERDR_PI_MODE_ENV], run: process.env[HERDR_PI_RUN_ENV], dir: process.env[HERDR_PI_RUNTIME_DIR_ENV] }; process.env[HERDR_PI_MODE_ENV] = "1"; process.env[HERDR_PI_RUN_ENV] = "run_toolevt01"; process.env[HERDR_PI_RUNTIME_DIR_ENV] = dir; const handlers = new Map<string, Function>(); let bridge: BridgeChannel | undefined; let session: HerdrPiSession | undefined;
+		const pi = { registerTool() {}, registerCommand() {}, on(name: string, handler: Function) { handlers.set(name, handler); }, getActiveTools: () => ["read", "write"], setActiveTools() {} };
+		try {
+			registerHerdrPiBridge(pi as never); handlers.get("session_start")?.({}, { sessionManager: { getSessionId: () => "native", getSessionFile: () => "/remote/session" }, model: { provider: "p", id: "m" }, isIdle: () => true, hasPendingMessages: () => false });
+			bridge = new BridgeChannel(path.join(dir, "bridge.sock"), "run_toolevt01"); await bridge.configure({ agent: "worker", toolCeiling: ["read", "write"] });
+			const identity: HerdrRunIdentity = { runId: "run_toolevt01", machineId: "m1", target: "remote", session: null, workspaceId: "w", tabId: "t", paneId: "p", terminalId: "term", agentName: "pi-tools", nativeSessionId: "native", cwd: process.cwd(), runtimeDir: dir };
+			session = new HerdrPiSession({ identity, machine, connection: {}, host: { async prompt() {} }, async cleanup() {} } as unknown as HerdrPlacedRunOwner, { async close() {} }, bridge, ["read", "write"], "p/m", runtime);
+			const events: any[] = []; session.subscribe((event) => events.push(event));
+			handlers.get("tool_execution_start")?.({ type: "tool_execution_start", toolCallId: "c1", toolName: "read", args: { path: "src/a.ts" } }, {});
+			handlers.get("tool_execution_end")?.({ type: "tool_execution_end", toolCallId: "c1", toolName: "read", result: { content: [] }, isError: false }, {});
+			handlers.get("tool_execution_start")?.({ type: "tool_execution_start", toolCallId: "c2", toolName: "write", args: { path: "big.txt", content: "x".repeat(2 * HERDR_PI_MAX_FRAME_BYTES) } }, {});
+			const deadline = Date.now() + 5_000; while (events.length < 3) { assert.ok(Date.now() < deadline, "tool events reach the parent session"); await new Promise((resolve) => setTimeout(resolve, 10)); }
+			assert.deepEqual(events.slice(0, 2), [{ type: "tool_execution_start", toolCallId: "c1", toolName: "read", args: { path: "src/a.ts" } }, { type: "tool_execution_end", toolCallId: "c1", toolName: "read", isError: false }]);
+			assert.equal(events[2].toolName, "write"); assert.equal(events[2].args.path, "big.txt"); assert.ok(events[2].args.content.length < HERDR_PI_MAX_FRAME_BYTES);
+		} finally { await session?.dispose(); bridge?.close(); handlers.get("session_shutdown")?.(); old.mode === undefined ? delete process.env[HERDR_PI_MODE_ENV] : process.env[HERDR_PI_MODE_ENV] = old.mode; old.run === undefined ? delete process.env[HERDR_PI_RUN_ENV] : process.env[HERDR_PI_RUN_ENV] = old.run; old.dir === undefined ? delete process.env[HERDR_PI_RUNTIME_DIR_ENV] : process.env[HERDR_PI_RUNTIME_DIR_ENV] = old.dir; fs.rmSync(dir, { recursive: true, force: true }); }
+	});
+
+	it("shrinks a placed child's message that is over the frame cap, so it still reaches the parent and the journal still replays", { skip: process.platform === "win32" }, async () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pbm-")); const old = { mode: process.env[HERDR_PI_MODE_ENV], run: process.env[HERDR_PI_RUN_ENV], dir: process.env[HERDR_PI_RUNTIME_DIR_ENV] }; process.env[HERDR_PI_MODE_ENV] = "1"; process.env[HERDR_PI_RUN_ENV] = "run_bigmsg01"; process.env[HERDR_PI_RUNTIME_DIR_ENV] = dir; const handlers = new Map<string, Function>(); let bridge: BridgeChannel | undefined; let replay: BridgeChannel | undefined; let session: HerdrPiSession | undefined;
+		const pi = { registerTool() {}, registerCommand() {}, on(name: string, handler: Function) { handlers.set(name, handler); }, getActiveTools: () => ["read", "write"], setActiveTools() {} };
+		const ctx = { sessionManager: { getSessionId: () => "native", getSessionFile: () => "/remote/session" }, model: { provider: "p", id: "m" }, isIdle: () => true, hasPendingMessages: () => false };
+		try {
+			registerHerdrPiBridge(pi as never); handlers.get("session_start")?.({}, ctx);
+			bridge = new BridgeChannel(path.join(dir, "bridge.sock"), "run_bigmsg01"); await bridge.configure({ agent: "worker", toolCeiling: ["read", "write"] });
+			const identity: HerdrRunIdentity = { runId: "run_bigmsg01", machineId: "m1", target: "remote", session: null, workspaceId: "w", tabId: "t", paneId: "p", terminalId: "term", agentName: "pi-big", nativeSessionId: "native", cwd: process.cwd(), runtimeDir: dir };
+			session = new HerdrPiSession({ identity, machine, connection: {}, host: { async prompt() {} }, async cleanup() {} } as unknown as HerdrPlacedRunOwner, { async close() {} }, bridge, ["read", "write"], "p/m", runtime);
+			const events: any[] = []; session.subscribe((event) => events.push(event));
+			handlers.get("message_end")?.({ type: "message_end", message: { role: "toolResult", toolCallId: "c1", toolName: "read", isError: false, content: [{ type: "text", text: "Read image file [image/png]" }, { type: "image", mimeType: "image/png", data: "A".repeat(2 * HERDR_PI_MAX_FRAME_BYTES) }], timestamp: 1 } }, ctx);
+			handlers.get("message_end")?.({ type: "message_end", message: { role: "assistant", stopReason: "toolUse", content: [{ type: "text", text: "Writing it." }, { type: "toolCall", id: "c2", name: "write", arguments: { path: "big.txt", content: "x".repeat(2 * HERDR_PI_MAX_FRAME_BYTES) } }], timestamp: 2 } }, ctx);
+			handlers.get("agent_settled")?.({}, ctx);
+			const deadline = Date.now() + 5_000; while (events.filter((event) => event.type === "message_end").length < 2) { assert.ok(Date.now() < deadline, "the oversized messages reach the parent session"); await new Promise((resolve) => setTimeout(resolve, 10)); }
+			const [toolResult, assistant] = events.filter((event) => event.type === "message_end").map((event) => event.message);
+			assert.deepEqual(toolResult.content[0], { type: "text", text: "Read image file [image/png]" }); assert.match(toolResult.content[1].text, /Image \(image\/png\) omitted by the pi-subagents bridge/u); assert.equal(toolResult.toolCallId, "c1");
+			assert.equal(assistant.content[0].text, "Writing it."); assert.equal(assistant.content[1].arguments.path, "big.txt"); assert.equal(assistant.stopReason, "toolUse");
+			bridge.close(); await new Promise((resolve) => setTimeout(resolve, 20));
+			replay = new BridgeChannel(path.join(dir, "bridge.sock"), "run_bigmsg01");
+			const replayDeadline = Date.now() + 5_000; while (!replay.frames.some((frame) => frame.type === "ready")) { assert.ok(Date.now() < replayDeadline, "a reconnect replays the journal and gets ready"); await new Promise((resolve) => setTimeout(resolve, 10)); }
+			const settled = replay.frames.find((frame) => frame.type === "settled") as { finalAssistant?: { content: { text?: string }[] } } | undefined;
+			assert.equal(settled?.finalAssistant?.content[0]?.text, "Writing it.");
+		} finally { await session?.dispose(); bridge?.close(); replay?.close(); handlers.get("session_shutdown")?.(); old.mode === undefined ? delete process.env[HERDR_PI_MODE_ENV] : process.env[HERDR_PI_MODE_ENV] = old.mode; old.run === undefined ? delete process.env[HERDR_PI_RUN_ENV] : process.env[HERDR_PI_RUN_ENV] = old.run; old.dir === undefined ? delete process.env[HERDR_PI_RUNTIME_DIR_ENV] : process.env[HERDR_PI_RUNTIME_DIR_ENV] = old.dir; fs.rmSync(dir, { recursive: true, force: true }); }
 	});
 
 	it("frames correlated bridge data and fails closed on malformed, partial, or oversized evidence", () => {
