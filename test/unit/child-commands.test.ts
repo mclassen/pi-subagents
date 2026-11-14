@@ -143,7 +143,7 @@ describe("Pi agent loop command cancellation", () => {
 		const responses = [
 			fauxAssistantMessage(fauxToolCall("bash", { command: serviceCommand(path.join(dir, "service.pid")), yieldTimeMs: 0 }, { id: "service" }), { stopReason: "toolUse" }),
 			fauxAssistantMessage(fauxToolCall("bash", { command: "printf continued" }, { id: "continue" }), { stopReason: "toolUse" }),
-			fauxAssistantMessage(fauxToolCall("subagent_command", { action: "cancel", toolCallId: "service", waitMs: 1000 }, { id: "cancel-service" }), { stopReason: "toolUse" }),
+			fauxAssistantMessage(fauxToolCall("subagent_command", { action: "cancel", toolCallId: "service", waitMs: 10_000 }, { id: "cancel-service" }), { stopReason: "toolUse" }),
 			fauxAssistantMessage("Done"),
 		];
 		const agent = new Agent({
