@@ -137,7 +137,7 @@ it("starts a fresh session goal independently beside an unchanged paused foreign
 		assert.ok(foreign);
 		for (let i = 0; i < 9; i++) {
 			handleMissionAction("mission.update", { missionId: foreign.id, missionUpdate: { goal: { iteration: "begin" } } }, a);
-			handleMissionAction("mission.update", { missionId: foreign.id, missionUpdate: { goal: { iteration: "complete" } } }, a);
+			handleMissionAction("mission.update", { missionId: foreign.id, missionUpdate: { goal: { iteration: "complete", progress: "advanced" } } }, a);
 		}
 		const paused = handleMissionAction("mission.update", { missionId: foreign.id, missionUpdate: { goal: { paused: true } } }, a).details?.mission;
 		assert.equal(paused?.goal?.iterationsStarted, 9);

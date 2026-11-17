@@ -34,7 +34,7 @@ it("creates and continues an unbudgeted goal with explicit pause, iteration, and
 		assert.equal(notices.length, 1);
 		assert.equal(notices[0]!.triggerTurn, true);
 		assert.match(notices[0]!.message, /Next ready action:/);
-		assert.match(notices[0]!.message, /archive obsolete steps with reasons and evidence/i);
+		assert.match(notices[0]!.message, /top unmet acceptance criterion/i);
 		assert.equal(mission.goal?.iterationsStarted, 0, "automatic notice does not spend an iteration");
 
 		handleMissionAction("mission.update", { missionId: mission.id, missionUpdate: { goal: { iteration: "begin" } } }, ctx);
@@ -47,7 +47,7 @@ it("creates and continues an unbudgeted goal with explicit pause, iteration, and
 		fs.writeFileSync(path.join(asyncDir, "status.json"), JSON.stringify({ state: "complete" }));
 		const settled = handleMissionAction("mission.show", { missionId: mission.id }, ctx).details?.mission;
 		assert.equal(settled?.runs[0]?.status, "complete", "mission.show refreshes the linked run through the production path");
-		handleMissionAction("mission.update", { missionId: mission.id, missionUpdate: { goal: { iteration: "complete" } } }, ctx);
+		handleMissionAction("mission.update", { missionId: mission.id, missionUpdate: { goal: { iteration: "complete", progress: "advanced" } } }, ctx);
 		assert.equal(handleMissionAction("mission.show", { missionId: mission.id }, ctx).details?.mission?.goal?.iterationsStarted, 1);
 
 		handleMissionAction("mission.update", { missionId: mission.id, missionUpdate: { goal: { paused: true }, status: "waiting", summary: "Iteration checkpoint" } }, ctx);

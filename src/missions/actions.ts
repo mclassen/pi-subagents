@@ -4,8 +4,10 @@ import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import type { Details } from "../shared/types.ts";
 import {
 	MISSION_STATUSES,
+	GOAL_MAX_STALLED_ITERATIONS,
 	type MissionArtifact,
 	type MissionArtifactKind,
+	type MissionGoalProgress,
 	type MissionReceipt,
 	type MissionReceiptKind,
 	type MissionReceiptStatus,
@@ -53,7 +55,7 @@ export interface MissionLaunchInput {
 export interface MissionUpdateToolInput {
 	title?: string;
 	objective?: string;
-	goal?: boolean | { paused?: boolean; maxIterations?: number; iterationsStarted?: number; iterationActive?: boolean; iteration?: "begin" | "complete" };
+	goal?: boolean | { paused?: boolean; maxIterations?: number; iterationsStarted?: number; iterationActive?: boolean; iteration?: "begin" | "complete"; progress?: MissionGoalProgress };
 	status?: MissionStatus;
 	summary?: string;
 	labels?: string[];
@@ -191,19 +193,23 @@ function validateMissionUpdate(value: unknown): MissionUpdateInput {
 		else {
 			if (!input.goal || typeof input.goal !== "object" || Array.isArray(input.goal)) throw new Error("missionUpdate.goal must be boolean or an iteration-control object");
 			const goal = input.goal as Record<string, unknown>;
-			if (!Object.keys(goal).length || Object.keys(goal).some((key) => !["paused", "maxIterations", "iterationsStarted", "iterationActive", "iteration"].includes(key))) throw new Error("missionUpdate.goal contains unknown or no controls");
+			if (!Object.keys(goal).length || Object.keys(goal).some((key) => !["paused", "maxIterations", "iterationsStarted", "iterationActive", "iteration", "progress"].includes(key))) throw new Error("missionUpdate.goal contains unknown or no controls");
 			if (goal.paused !== undefined && typeof goal.paused !== "boolean") throw new Error("missionUpdate.goal.paused must be boolean");
 			for (const key of ["maxIterations", "iterationsStarted"] as const) {
 				if (goal[key] !== undefined && (!Number.isSafeInteger(goal[key]) || (goal[key] as number) < (key === "maxIterations" ? 1 : 0))) throw new Error(`missionUpdate.goal.${key} is invalid`);
 			}
 			if (goal.iterationActive !== undefined && typeof goal.iterationActive !== "boolean") throw new Error("missionUpdate.goal.iterationActive must be boolean");
 			if (goal.iteration !== undefined && goal.iteration !== "begin" && goal.iteration !== "complete") throw new Error("missionUpdate.goal.iteration must be begin or complete");
+			// The model must judge each completed iteration; that judgment drives the stall stop.
+			if (goal.iteration === "complete" && goal.progress !== "advanced" && goal.progress !== "none") throw new Error('missionUpdate.goal.iteration "complete" requires progress: "advanced" (an acceptance criterion moved) or "none"');
+			if (goal.iteration !== "complete" && goal.progress !== undefined) throw new Error("missionUpdate.goal.progress is reported only with iteration: complete");
 			update.goal = {
 				...(goal.paused !== undefined ? { status: goal.paused ? "paused" as const : "active" as const } : {}),
 				...(goal.maxIterations !== undefined ? { maxIterations: goal.maxIterations as number } : {}),
 				...(goal.iterationsStarted !== undefined ? { iterationsStarted: goal.iterationsStarted as number } : {}),
 				...(goal.iterationActive !== undefined ? { iterationActive: goal.iterationActive as boolean } : {}),
 				...(goal.iteration !== undefined ? { iteration: goal.iteration as "begin" | "complete" } : {}),
+				...(goal.progress !== undefined ? { progress: goal.progress as MissionGoalProgress } : {}),
 			};
 		}
 		if (update.goal && update.goal.status === "active") update.status = "active";
@@ -317,6 +323,9 @@ function formatMission(record: MissionRecord): string {
 	if (record.goal) lines.push(record.goal.maxIterations === undefined
 		? "Goal iterations: reconcile the existing limit and count before continuing"
 		: `Goal iterations: ${record.goal.iterationsStarted}/${record.goal.maxIterations}${record.goal.iterationActive ? " (iteration active)" : ""}`);
+	if (record.goal?.stalledIterations) lines.push(record.goal.stalledIterations >= GOAL_MAX_STALLED_ITERATIONS
+		? `Goal stalled: ${record.goal.stalledIterations} consecutive iterations without progress; paused. Report one consolidated diagnosis and the single decision needed.`
+		: `Goal no-progress iterations: ${record.goal.stalledIterations}/${GOAL_MAX_STALLED_ITERATIONS}; the next iteration needs a different hypothesis.`);
 	if (record.summary) lines.push(`Summary: ${record.summary}`);
 	if (record.labels?.length) lines.push(`Labels: ${record.labels.join(", ")}`);
 	if (record.runs.length) {

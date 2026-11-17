@@ -74,7 +74,7 @@ describe("goal mission continuation", () => {
 				if (guard === "limit") {
 					updateGoal(test, mission.id, { iteration: "begin" });
 					updateGoal(test, mission.id, { maxIterations: 1 });
-					updateGoal(test, mission.id, { iteration: "complete" });
+					updateGoal(test, mission.id, { iteration: "complete", progress: "advanced" });
 				}
 				const before = readMission(test.location, mission.id);
 				assert.deepEqual(collectGoalContinuationNotices({ ...input, turnId: "resumed", ownerSessionId: guard === "foreign" ? "foreign" : "session-1", pendingMessages: guard === "pending", deliveryHistory: new Set<string>() }), [], guard);
@@ -109,7 +109,7 @@ describe("goal mission continuation", () => {
 			assert.equal(first.length, 1);
 			assert.equal(first[0]!.triggerTurn, true);
 			assert.match(first[0]!.message, /Next ready action: Continue objective:/);
-			assert.match(first[0]!.message, /reassess PLAN\.md.*archive obsolete steps/i);
+			assert.match(first[0]!.message, /top unmet acceptance criterion.*progress advanced or none/i);
 			assert.equal(readMission(test.location, mission.id).goal?.iterationsStarted, 0);
 
 			assert.deepEqual(collect(test, "turn-1"), [], "same-turn duplicate is suppressed");
@@ -135,7 +135,7 @@ describe("goal mission continuation", () => {
 			assert.equal(updated.goal?.iterationActive, true);
 			updated = updateGoal(test, mission.id, { iteration: "begin" });
 			assert.equal(updated.goal?.iterationsStarted, 1, "begin is idempotent while an iteration is active");
-			updated = updateGoal(test, mission.id, { iteration: "complete" });
+			updated = updateGoal(test, mission.id, { iteration: "complete", progress: "advanced" });
 			assert.equal(updated.goal?.iterationsStarted, 1);
 			assert.equal(updated.goal?.iterationActive, false);
 		} finally {
@@ -154,7 +154,7 @@ describe("goal mission continuation", () => {
 				assert.equal(notice[0]!.triggerTurn, true);
 				const begun = updateGoal(test, mission.id, { iteration: "begin" });
 				assert.equal(begun.goal?.iterationsStarted, iteration);
-				const completed = updateGoal(test, mission.id, { iteration: "complete" });
+				const completed = updateGoal(test, mission.id, { iteration: "complete", progress: "advanced" });
 				assert.equal(completed.goal?.iterationsStarted, iteration);
 			}
 			const finished = readMission(test.location, mission.id);
@@ -420,5 +420,83 @@ describe("goal mission continuation", () => {
 		} finally {
 			fs.rmSync(test.root, { recursive: true, force: true });
 		}
+	});
+});
+
+describe("goal stall stop", () => {
+	function iterate(test: ReturnType<typeof fixture>, missionId: string, progress: "advanced" | "none") {
+		updateGoal(test, missionId, { iteration: "begin" });
+		return updateGoal(test, missionId, { iteration: "complete", progress });
+	}
+
+	it("pauses after two consecutive no-progress iterations and stops waking the parent", () => {
+		const test = fixture();
+		try {
+			const mission = goal(test, { maxIterations: 8 });
+			const first = iterate(test, mission.id, "none");
+			assert.equal(first.goal?.status, "active");
+			assert.equal(first.goal?.stalledIterations, 1);
+			const second = iterate(test, mission.id, "none");
+			assert.equal(second.goal?.status, "paused");
+			assert.equal(second.goal?.stalledIterations, 2);
+			assert.equal(second.goal?.iterationsStarted, 2);
+			assert.deepEqual(collect(test, "after-stall"), []);
+			assert.throws(() => updateGoal(test, mission.id, { iteration: "begin" }), /paused/);
+			const shown = handleMissionAction("mission.show", { missionId: mission.id }, test.ctx).content[0];
+			assert.match(shown?.type === "text" ? shown.text : "", /Goal stalled: 2 consecutive iterations without progress; paused/);
+		} finally { fs.rmSync(test.root, { recursive: true, force: true }); }
+	});
+
+	it("resets the stall count when an iteration advances", () => {
+		const test = fixture();
+		try {
+			const mission = goal(test);
+			iterate(test, mission.id, "none");
+			const advanced = iterate(test, mission.id, "advanced");
+			assert.equal(advanced.goal?.stalledIterations, undefined);
+			const again = iterate(test, mission.id, "none");
+			assert.equal(again.goal?.status, "active");
+			assert.equal(again.goal?.stalledIterations, 1);
+		} finally { fs.rmSync(test.root, { recursive: true, force: true }); }
+	});
+
+	it("clears the stall on explicit resumption without resetting iteration history", () => {
+		const test = fixture();
+		try {
+			const mission = goal(test);
+			iterate(test, mission.id, "none");
+			iterate(test, mission.id, "none");
+			const resumed = updateGoal(test, mission.id, { paused: false });
+			assert.equal(resumed.goal?.status, "active");
+			assert.equal(resumed.goal?.stalledIterations, undefined);
+			assert.equal(resumed.goal?.iterationsStarted, 2);
+			assert.equal(updateGoal(test, mission.id, { iteration: "begin" }).goal?.iterationsStarted, 3);
+		} finally { fs.rmSync(test.root, { recursive: true, force: true }); }
+	});
+
+	it("requires a progress judgment on completion and rejects it anywhere else", () => {
+		const test = fixture();
+		try {
+			const mission = goal(test);
+			updateGoal(test, mission.id, { iteration: "begin" });
+			assert.throws(() => updateGoal(test, mission.id, { iteration: "complete" }), /requires progress/);
+			assert.throws(() => updateGoal(test, mission.id, { iteration: "complete", progress: "some" }), /requires progress/);
+			assert.throws(() => updateGoal(test, mission.id, { paused: true, progress: "none" }), /only with iteration: complete/);
+			assert.equal(readMission(test.location, mission.id).goal?.iterationActive, true, "rejected updates leave the iteration open");
+		} finally { fs.rmSync(test.root, { recursive: true, force: true }); }
+	});
+
+	it("carries the objective, checkpoint and stall count in the continuation notice", () => {
+		const test = fixture();
+		try {
+			const mission = goal(test);
+			iterate(test, mission.id, "none");
+			updateMission(test.location, mission.id, { summary: "Criteria 2/4 pass; refresh retry still drops the token." });
+			const notice = collect(test, "turn-1");
+			assert.equal(notice[0]!.triggerTurn, true);
+			assert.match(notice[0]!.message, /No-progress iterations: 1\/2; the next attempt needs a different hypothesis/);
+			assert.match(notice[0]!.message, /Checkpoint: Criteria 2\/4 pass; refresh retry still drops the token\./);
+			assert.match(notice[0]!.message, /Objective: Implement and validate token refresh/);
+		} finally { fs.rmSync(test.root, { recursive: true, force: true }); }
 	});
 });

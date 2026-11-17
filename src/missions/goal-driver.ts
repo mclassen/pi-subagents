@@ -4,13 +4,14 @@ import * as path from "node:path";
 import type { RetainedChild } from "../runs/background/retained-children.ts";
 import type { ControlEvent } from "../shared/types.ts";
 import { listMissions, readMission, updateMission } from "./store.ts";
-import type { MissionRecord, MissionRunLink, MissionStoreLocation } from "./types.ts";
+import { GOAL_MAX_STALLED_ITERATIONS, type MissionRecord, type MissionRunLink, type MissionStoreLocation } from "./types.ts";
 import { missionStatePath } from "./workflow-state.ts";
 
 const TERMINAL_MISSION_STATUSES = new Set(["completed", "failed", "cancelled"]);
 const ACTIVE_RUN_STATUSES = new Set(["queued", "running", "active", "paused"]);
 const STOPPED_GOAL_RUN_STATUSES = new Set(["stopped", "cancelled", "rejected"]);
 const MAX_ACTION_LENGTH = 180;
+const MAX_CHECKPOINT_LENGTH = 600;
 
 export interface GoalContinuationNotice {
 	missionId: string;
@@ -19,9 +20,9 @@ export interface GoalContinuationNotice {
 	event: ControlEvent;
 }
 
-function bounded(value: string): string {
+function bounded(value: string, maxLength = MAX_ACTION_LENGTH): string {
 	const normalized = value.replace(/\s+/g, " ").trim();
-	return normalized.length > MAX_ACTION_LENGTH ? `${normalized.slice(0, MAX_ACTION_LENGTH - 1)}…` : normalized;
+	return normalized.length > maxLength ? `${normalized.slice(0, maxLength - 1)}…` : normalized;
 }
 
 function tokenUsage(value: unknown): number | undefined {
@@ -219,10 +220,14 @@ export function collectGoalContinuationNotices(input: {
 		const message = [
 			`${triggerTurn ? "Goal continuation" : "Goal stopped"}: ${bounded(record.title)}`,
 			`Mission: ${record.id}`,
+			// The original objective anchors the parent after compaction, when only this notice is fresh.
+			`Objective: ${bounded(record.objective, MAX_CHECKPOINT_LENGTH)}`,
 			...(record.goal?.maxIterations !== undefined ? [`Iterations started: ${record.goal.iterationsStarted}/${record.goal.maxIterations}${record.goal.iterationActive ? " (current iteration active)" : ""}`] : []),
+			...(record.goal?.stalledIterations ? [`No-progress iterations: ${record.goal.stalledIterations}/${GOAL_MAX_STALLED_ITERATIONS}; the next attempt needs a different hypothesis.`] : []),
+			...(record.summary ? [`Checkpoint: ${bounded(record.summary, MAX_CHECKPOINT_LENGTH)}`] : []),
 			...(triggerTurn ? [
 				`Next ready action: ${action}`,
-				"Use exact-ID mission.show to recheck pause/closure and linked runs. Before a new iteration, reassess PLAN.md against the original goal; update active steps/dependencies and archive obsolete steps with reasons and evidence. Begin an inactive iteration with mission.update goal.iteration=begin only when implementation/verification starts; do not increment an already active iteration. Checkpoint and complete it after verification, then continue automatically within the limit. Close only with full acceptance evidence.",
+				"Recheck the mission with exact-ID mission.show, then work the top unmet acceptance criterion in PLAN.md to a measured result. Begin an inactive iteration with goal.iteration=begin; finish it with goal.iteration=complete and progress advanced or none. Continue without asking for routine confirmation; close only when every criterion passes.",
 			] : [reason]),
 		].join("\n");
 		// Persist the wakeup claim before delivery. Only explicit implementation/

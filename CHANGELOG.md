@@ -6,6 +6,11 @@
 
 - From a Pi running inside a Herdr pane, `machine: "local"` now opens the subagent in a new tab of your own Herdr session, with no saved machine or SSH. Before, `local` worked only inside Rex, and placing a child in Herdr on the same machine meant a saved machine and SSH to yourself. When Herdr runs inside a Rex tab, the Herdr session wins, and outside both terminals `local` fails before anything starts. Thanks to [@mystery4f](https://github.com/mystery4f) for #3266.
 
+### Changed
+
+- `/goal` now works toward fixed acceptance criteria and stops when it stops making progress. Before, goals often ran to their iteration limit without closing: the prompt made the parent ask before implementing with fewer than two isolated writers, acceptance mixed in steps only the user can take, and a reworded summary counted as progress. Now the parent writes 3 to 7 checkable criteria plus a separate handoff list for user-only steps, edits the target checkout directly unless two independent lanes are ready, and asks only for actions outside its authority. Each obstacle or discovery is recorded as a blocker (handled now), an amendment to a criterion, a deferred follow-up or a pitfall that later iterations avoid, so the goal adapts without drifting. The prompt is just over half its former size.
+- Completing a goal iteration through `mission.update` now requires `goal.progress: "advanced" | "none"`. Two `none` completions in a row pause the goal and stop automatic wakeups; `goal: { paused: false }` resumes it and clears the count. Continuation notices now include the original objective, the mission summary as a checkpoint and the no-progress count.
+
 ### Fixed
 
 - A subagent placed in a Herdr or Rex pane no longer loses a large message or crashes when the parent reconnects. Before, a message too big to send to the parent in one piece, such as a screenshot it read or a very large file it wrote, never reached the parent, and the next time the parent reconnected to that pane the subagent's Pi crashed. Now the parent gets the message shortened: images and very long text are replaced by a note saying what was left out, and very long tool arguments are cut. Two large messages sent back to back also no longer break the connection.

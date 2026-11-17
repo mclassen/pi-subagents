@@ -125,7 +125,7 @@ describe("subagent control notice delivery", () => {
 				updateMission(location, missionId, { goalContinuation: { ownerSessionId: ctx.currentSessionId, ...last, delivery: "observed" } });
 				handleMissionAction("mission.update", { missionId, missionUpdate: { goal: { iteration: "begin" } } }, ctx);
 				assert.equal(readMission(location, missionId).goal?.iterationsStarted, iteration);
-				handleMissionAction("mission.update", { missionId, missionUpdate: { goal: { iteration: "complete" }, summary: `Verified cycle ${iteration}; PLAN.md updated` } }, ctx);
+				handleMissionAction("mission.update", { missionId, missionUpdate: { goal: { iteration: "complete", progress: "advanced" }, summary: `Verified cycle ${iteration}; PLAN.md updated` } }, ctx);
 			}
 			assert.deepEqual(recorder.sent.map((entry) => entry.options), [{ triggerTurn: true }, { triggerTurn: true }]);
 			assert.equal(readMission(location, missionId).goal?.status, "iteration-limit");

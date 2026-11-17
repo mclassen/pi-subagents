@@ -15,13 +15,18 @@ export type MissionReceiptKind = "pull_request" | "ci" | "deployment" | "release
 export type MissionReceiptStatus = "pending" | "ready" | "succeeded" | "failed";
 export type MissionGoalStatus = "active" | "paused" | "iteration-limit";
 
+export type MissionGoalProgress = "advanced" | "none";
+
 export const DEFAULT_GOAL_MAX_ITERATIONS = 8;
+export const GOAL_MAX_STALLED_ITERATIONS = 2;
 
 export interface MissionGoal {
 	status: MissionGoalStatus;
 	maxIterations?: number;
 	iterationsStarted?: number;
 	iterationActive?: boolean;
+	/** Consecutive completed iterations that reported no progress; two pause the goal. */
+	stalledIterations?: number;
 	lastContinuation?: { turnId: string; progressKey: string; delivery?: "pending" | "observed" };
 }
 
@@ -31,6 +36,8 @@ export interface MissionGoalUpdate {
 	iterationsStarted?: number;
 	iterationActive?: boolean;
 	iteration?: "begin" | "complete";
+	/** Whether the completed iteration moved an acceptance criterion. */
+	progress?: MissionGoalProgress;
 }
 
 export interface MissionTokenUsage {

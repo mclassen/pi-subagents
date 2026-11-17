@@ -1,4 +1,4 @@
-import { DEFAULT_GOAL_MAX_ITERATIONS, type MissionGoal, type MissionGoalUpdate, type MissionRecord, type MissionUpdateInput } from "./types.ts";
+import { DEFAULT_GOAL_MAX_ITERATIONS, GOAL_MAX_STALLED_ITERATIONS, type MissionGoal, type MissionGoalUpdate, type MissionRecord, type MissionUpdateInput } from "./types.ts";
 
 const ACTIVE_RUNS = new Set(["queued", "running", "active", "paused"]);
 
@@ -26,6 +26,7 @@ export function parseMissionGoal(value: unknown, label: string): MissionGoal {
 		if (input.iterationActive !== undefined && typeof input.iterationActive !== "boolean") throw new Error(`${label}.iterationActive must be boolean`);
 		goal.iterationActive = input.iterationActive === true;
 	}
+	if (input.stalledIterations !== undefined) goal.stalledIterations = integer(input.stalledIterations, `${label}.stalledIterations`, 0);
 	if (input.lastContinuation !== undefined) {
 		const last = input.lastContinuation as Record<string, unknown> | null;
 		if (!last || typeof last !== "object" || Array.isArray(last) || typeof last.turnId !== "string" || !last.turnId || typeof last.progressKey !== "string" || !last.progressKey) {
@@ -59,11 +60,17 @@ export function updateMissionGoal(record: MissionRecord, patch: MissionGoalUpdat
 			goal.status = patch.status;
 			// Explicit resumption permits a fresh attempt without erasing iteration history.
 			delete goal.lastContinuation;
+			if (patch.status === "active") delete goal.stalledIterations;
 		}
+		if (patch.progress !== undefined && patch.iteration !== "complete") throw new Error("goal.progress is reported only with iteration: complete");
 		if (patch.iteration === "complete") {
 			if (!goal.iterationActive) throw new Error("No goal iteration is active");
 			if (record.runs.some((run) => run.status && ACTIVE_RUNS.has(run.status))) throw new Error("Settle linked runs before completing the goal iteration");
 			goal.iterationActive = false;
+			if (patch.progress === "advanced") delete goal.stalledIterations;
+			if (patch.progress === "none") goal.stalledIterations = (goal.stalledIterations ?? 0) + 1;
+			// Iterations that move no acceptance criterion are the loop this guard stops.
+			if ((goal.stalledIterations ?? 0) >= GOAL_MAX_STALLED_ITERATIONS) goal.status = "paused";
 		}
 	}
 	if (continuation) {
