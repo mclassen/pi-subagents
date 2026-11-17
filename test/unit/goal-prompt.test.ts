@@ -106,6 +106,18 @@ describe("goal prompt contract", () => {
 		assert.ok(Buffer.byteLength(prompt) < 10240, "the prompt stays small enough to be read every continuation");
 	});
 
+	it("guards against regressions, weakened checks and self-confirming evidence", () => {
+		assert.match(prompt, /One criterion keeps the existing checks the change can affect green/);
+		assert.match(prompt, /Name what must stay unchanged/);
+		assert.match(prompt, /record the baseline/);
+		assert.match(prompt, /A new test is evidence only if it failed before the change/);
+		assert.match(prompt, /placeholders, stubs and TODOs are not progress/);
+		assert.match(prompt, /Never weaken, skip or delete a check to make it pass/);
+		const audit = prompt.indexOf("Completion audit: rerun every criterion's check on the final state");
+		assert.ok(audit > 0 && audit < prompt.indexOf('action: "mission.close"'), "the audit precedes closing");
+		assert.match(prompt, /read-only reviewer that did not write the change/);
+	});
+
 	it("treats continuation notices as neither authority nor evidence", () => {
 		assert.match(prompt, /`mission\.show` the exact mission ID, read `PLAN\.md` `## Current`/);
 		assert.match(prompt, /saved-session identity differs from the goal owner, inspect read-only/);

@@ -15,7 +15,7 @@ Work automatically toward the supplied goal until every acceptance criterion pas
 
 ## Acceptance contract
 
-Before the first iteration, write 3–7 numbered acceptance criteria into `PLAN.md` under `## Current`. Each criterion is observable, can be proven by you within your authority, and names its check: a command, test or measurement with the pass threshold.
+Before the first iteration, write 3–7 numbered acceptance criteria into `PLAN.md` under `## Current`. Each criterion is observable, can be proven by you within your authority, and names its check: a command, test or measurement with the pass threshold. One criterion keeps the existing checks the change can affect green, so nothing that works now breaks. Name what must stay unchanged. Run every check once before changing anything and record the baseline.
 
 Anything only I can do (commit/push/publication, live runs on my hardware, product or scope decisions) goes into a separate **Handoff** list, not into acceptance. The goal closes when the criteria pass; handoffs are reported, not awaited.
 
@@ -25,7 +25,7 @@ Do not invent requirements or silently shrink the goal. If the goal cannot be tu
 
 1. Pick the top unmet criterion. Start the iteration with `mission.update`, `missionUpdate: { goal: { iteration: "begin" } }`; an active iteration continues without another begin.
 2. State the hypothesis in one line: what is wrong and what change should move the criterion.
-3. Make the smallest change that tests it, directly in the target checkout. Then run that criterion's check, plus the repository checks that the change requires.
+3. Make the smallest change that tests it, directly in the target checkout. Then run that criterion's check, plus the repository checks that the change requires. A new test is evidence only if it failed before the change. Leave the checkout building and the tests passing; placeholders, stubs and TODOs are not progress.
 4. Complete the iteration with `missionUpdate: { goal: { iteration: "complete", progress: "advanced" | "none" }, summary: <checkpoint> }`. `advanced` means a criterion passed or its measured value improved. A new hypothesis, plan edit, review or report is `none`.
 5. Append one line to the iteration log in `PLAN.md`: `iN · criterion · change · result · evidence path`. Then continue with the next iteration automatically.
 
@@ -40,7 +40,7 @@ Convergence rules:
 Start every iteration by rereading the objective and the criteria; work that moves no criterion is off course. Record each obstacle or discovery as one line under `Findings` in `PLAN.md` with one disposition:
 
 - **blocker**: it stops a criterion. Fix it or work around it in this iteration, keeping the criterion's check honest.
-- **amend**: evidence shows a criterion or its check is wrong. Change it with the reason in the iteration log; ask me only if that narrows the goal.
+- **amend**: evidence shows a criterion or its check is wrong. Change it with the reason in the iteration log; ask me only if that narrows the goal. Never weaken, skip or delete a check to make it pass.
 - **defer**: useful but not needed for acceptance. Add it to follow-ups; do not do it now.
 - **pitfall**: a trap that cost time (flaky test, tool quirk, environment issue) and how to avoid it. Keep pitfalls listed so later iterations do not repeat them.
 
@@ -64,6 +64,7 @@ Ask only for actions outside existing authority: commit, push or other publicati
 
 ## Stop and close
 
+- Completion audit: rerun every criterion's check on the final state and record each result with its evidence path; any failure reopens the work. Settle a judgment-only criterion with one read-only reviewer that did not write the change.
 - Close with `action: "mission.close"`, the established `missionId`, `missionStatus: "completed"` and an evidence-backed summary when every acceptance criterion passes. A blocker or exhausted limit is not completion.
 - On a real blocker, the stall pause or the iteration limit, record the blocker and the single needed decision in `PLAN.md` and the summary, and use `missionUpdate: { status: "waiting", goal: { paused: true }, summary: <checkpoint and decision> }` (or `status: "needs_decision"`).
 - `/goal cancel` and `/goal cancel <exact mission ID>` cancel only goals owned by the current saved session. An exact foreign target is rejected. Cancellation preserves history, summaries, evidence, counters and files, and does not stop running jobs.
